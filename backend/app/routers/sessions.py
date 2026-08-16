@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app.db.interface import IAgentDatabase
 from app.db.deps import get_db
 from app.models.domain import Session, SessionStatus, MessageRole, AgentType
+from app.auth import is_websocket_authenticated
 from app.adapters.registry import AdapterRegistry, get_registry
 from app.core.session_config import ensure_session_config, write_session_config
 from app.core.session_prompt import effective_system_prompt
@@ -390,6 +391,9 @@ async def session_stream(
     db: IAgentDatabase = Depends(get_db),
     registry: AdapterRegistry = Depends(get_registry),
 ):
+    if not is_websocket_authenticated(ws):
+        await ws.close(code=1008, reason="authentication required")
+        return
     await ws.accept()
     logger.info("WS connect session=%s", session_id)
 

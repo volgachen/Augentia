@@ -4,6 +4,8 @@ import logging
 import os
 import uuid
 import httpx
+
+from app.auth import internal_auth_headers
 from app.adapters.tools.base import BaseTool
 from app.adapters.tools.registry import register_tool
 
@@ -137,7 +139,7 @@ class SubagentTool(BaseTool):
             ) as client:
                 resp = await client.post(
                     f"{base}/api/v1/sessions",
-                    headers={"content-type": "application/json"},
+                    headers={"content-type": "application/json", **internal_auth_headers()},
                     content=json.dumps(body),
                 )
         except httpx.TimeoutException:
@@ -166,7 +168,7 @@ class SubagentTool(BaseTool):
             ) as client:
                 msg_resp = await client.post(
                     f"{base}/api/v1/sessions/{new_id}/messages",
-                    headers={"content-type": "application/json"},
+                    headers={"content-type": "application/json", **internal_auth_headers()},
                     content=json.dumps(msg_body),
                 )
         except httpx.TimeoutException:
@@ -289,7 +291,8 @@ class SubagentTool(BaseTool):
                 timeout=_GET_SESSION_TIMEOUT, trust_env=False
             ) as client:
                 resp = await client.get(
-                    f"{base}/api/v1/sessions/{parent_session_id}"
+                    f"{base}/api/v1/sessions/{parent_session_id}",
+                    headers=internal_auth_headers(),
                 )
         except Exception:
             logger.exception(

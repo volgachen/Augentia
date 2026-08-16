@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import httpx
+from app.auth import internal_auth_headers
 from app.adapters.tools.base import BaseTool
 from app.adapters.tools.registry import register_tool
 
@@ -67,7 +68,7 @@ class SessionSendTool(BaseTool):
             ) as client:
                 resp = await client.post(
                     f"{base}/api/v1/sessions/{target_session_id}/messages",
-                    headers={"content-type": "application/json"},
+                    headers={"content-type": "application/json", **internal_auth_headers()},
                     content=json.dumps(body),
                 )
         except httpx.TimeoutException:

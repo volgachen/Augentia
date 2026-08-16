@@ -19,6 +19,24 @@ class Settings:
             "AUGENTIA_WORKTREE_ROOT",
             os.path.join(os.path.expanduser("~"), ".augentia", "worktrees"),
         )
+        self.auth_enabled: bool = os.getenv("AUGENTIA_AUTH_ENABLED", "false").lower() in {
+            "1", "true", "yes", "on",
+        }
+        self.auth_password_hash: str = os.getenv("AUGENTIA_AUTH_PASSWORD_HASH", "")
+        self.session_secret: str = os.getenv("AUGENTIA_SESSION_SECRET", "")
+        self.internal_token: str = os.getenv("AUGENTIA_INTERNAL_TOKEN", "")
+        self.cookie_secure: bool = os.getenv("AUGENTIA_COOKIE_SECURE", "false").lower() in {
+            "1", "true", "yes", "on",
+        }
+        self.session_ttl_seconds: int = int(os.getenv("AUGENTIA_SESSION_TTL_SECONDS", "43200"))
+        self.allowed_origins: list[str] = [
+            origin.strip().rstrip("/")
+            for origin in os.getenv(
+                "AUGENTIA_ALLOWED_ORIGINS",
+                "http://127.0.0.1:12599,http://localhost:12599",
+            ).split(",")
+            if origin.strip()
+        ]
 
 
 @lru_cache(maxsize=1)

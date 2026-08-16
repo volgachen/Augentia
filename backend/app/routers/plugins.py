@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSock
 from pydantic import BaseModel, Field
 
 from app.adapters.registry import AdapterRegistry, get_registry as get_session_registry
+from app.auth import is_websocket_authenticated
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
 from app.models.domain import PluginInstance, PluginLog, PluginRun, PluginStatus
@@ -265,6 +266,9 @@ async def plugin_instance_stream(
     db: IAgentDatabase = Depends(get_db),
     registry: PluginRunnerRegistry = Depends(get_plugin_registry),
 ):
+    if not is_websocket_authenticated(ws):
+        await ws.close(code=1008, reason="authentication required")
+        return
     await ws.accept()
     try:
         instance = await db.get_plugin_instance(instance_id)

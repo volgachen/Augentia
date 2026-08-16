@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import httpx
+from app.auth import internal_auth_headers
 from app.adapters.tools.base import BaseTool
 from app.adapters.tools.registry import register_tool
 
@@ -52,7 +53,9 @@ class ListSubagentsTool(BaseTool):
             async with httpx.AsyncClient(
                 timeout=_LIST_TIMEOUT, trust_env=False
             ) as client:
-                resp = await client.get(f"{base}/api/v1/sessions")
+                resp = await client.get(
+                    f"{base}/api/v1/sessions", headers=internal_auth_headers()
+                )
         except httpx.TimeoutException:
             return "Error: Gateway timeout while listing sessions."
         except httpx.ConnectError:
@@ -148,7 +151,8 @@ class ListSubagentsTool(BaseTool):
         # deliveries so the displayed task reads naturally.
         try:
             resp = await client.get(
-                f"{base}/api/v1/sessions/{session_id}/messages"
+                f"{base}/api/v1/sessions/{session_id}/messages",
+                headers=internal_auth_headers(),
             )
         except Exception:
             logger.exception("failed to fetch messages for %s", session_id)

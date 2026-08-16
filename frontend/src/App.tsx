@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useStore } from "./store/sessions";
+import { useAuthStore } from "./store/auth";
 import { usePluginStore } from "./store/plugins";
 import ActiveSessionsMenu from "./components/ActiveSessionsMenu";
 import ToastCenter from "./components/ToastCenter";
@@ -13,6 +14,8 @@ const NAV = [
 
 export default function App() {
   const sessions = useStore((s) => s.sessions);
+  const authEnabled = useAuthStore((s) => s.authEnabled);
+  const logout = useAuthStore((s) => s.logout);
   const setActiveSession = useStore((s) => s.setActiveSession);
   const sessionCount = Object.keys(sessions).length;
   const instances = usePluginStore((s) => s.instances);
@@ -60,8 +63,17 @@ export default function App() {
             </NavLink>
           ))}
         </div>
-        <div className="ml-auto">
+        <div className="ml-auto flex items-center gap-2">
           <ActiveSessionsMenu currentSessionId={currentSessionId} />
+          {authEnabled && (
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="rounded-md border border-gray-700 bg-gray-800 px-2.5 py-1 text-xs font-medium text-gray-300 hover:bg-gray-700"
+            >
+              Logout
+            </button>
+          )}
         </div>
       </nav>
 

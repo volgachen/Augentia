@@ -18,9 +18,13 @@ const WS_BASE = `ws://${API_HOST}/api/v1`;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     ...init,
   });
+  if (res.status === 401 && path !== "/auth/login") {
+    window.dispatchEvent(new Event("augentia:unauthorized"));
+  }
   if (!res.ok) {
     const detail = await res.text();
     throw new Error(`${res.status} ${detail}`);
@@ -86,6 +90,15 @@ export interface PluginCommandPayload {
 }
 
 export const api = {
+  auth: {
+    me: () => request<{ authenticated: boolean; auth_enabled: boolean }>("/auth/me"),
+    login: (password: string) =>
+      request<{ authenticated: boolean; auth_enabled: boolean }>("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({ password }),
+      }),
+    logout: () => request<void>("/auth/logout", { method: "POST" }),
+  },
   agents: {
     list: () => request<AgentTemplate[]>("/agents"),
     get: (id: string) => request<AgentTemplate>(`/agents/${id}`),
