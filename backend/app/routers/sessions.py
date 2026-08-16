@@ -417,6 +417,10 @@ async def session_stream(
             # decision on a pending tool confirm ({"decision": "approve"|"deny",
             # "call_id": ..., "message": ...}). The latter only resolves an adapter
             # Future, and may also queue a supplementary user message.
+            if payload.get("cancel") is True:
+                logger.info("WS cancel session=%s", session_id)
+                await runner.cancel_turn()
+                continue
             if "decision" in payload:
                 call_id = payload.get("call_id")
                 approved = payload.get("decision") == "approve"

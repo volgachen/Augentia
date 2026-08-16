@@ -352,6 +352,7 @@ export default function LiveConsole() {
   const navigate = useNavigate();
   const sessions = useStore((s) => s.sessions);
   const sendMessage = useStore((s) => s.sendMessage);
+  const cancelGeneration = useStore((s) => s.cancelGeneration);
   const retryMessage = useStore((s) => s.retryMessage);
   const resolveConfirm = useStore((s) => s.resolveConfirm);
   const openSession = useStore((s) => s.openSession);
@@ -669,13 +670,24 @@ export default function LiveConsole() {
           onKeyDown={handleKeyDown}
           disabled={generating}
         />
-        <button
-          onClick={handleSend}
-          disabled={!input.trim() || generating}
-          className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium transition-colors self-end"
-        >
-          {generating ? "…" : "Send"}
-        </button>
+        {generating ? (
+          <button
+            type="button"
+            onClick={() => sessionId && cancelGeneration(sessionId)}
+            className="px-4 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white text-sm font-medium transition-colors self-end"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!input.trim()}
+            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium transition-colors self-end"
+          >
+            Send
+          </button>
+        )}
       </div>
     </div>
   );

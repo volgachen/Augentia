@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -42,6 +42,7 @@ class SessionRunner:
         self._inbox: asyncio.Queue[_InboxItem] = asyncio.Queue()
         self._subscribers: set[asyncio.Queue[StreamEvent | None]] = set()
         self._task: asyncio.Task | None = None
+        self._turn_task: asyncio.Task | None = None
         # TOOL_CONFIRM events are broadcast-only (not persisted), so a client
         # that connects/reconnects while a tool is awaiting approval would never
         # see the confirm panel. Cache the currently-pending confirm events here
@@ -80,6 +81,14 @@ class SessionRunner:
 
     async def submit(self, content: str, from_session_id: str | None = None) -> None:
         await self._inbox.put(_InboxItem(content=content, from_session_id=from_session_id))
+
+    async def cancel_turn(self) -> None:
+        turn_task = self._turn_task
+        if turn_task is not None and not turn_task.done():
+            turn_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await turn_task
+        self._pending_confirms.clear()
 
     async def resolve_decision(self, call_id: str, approved: bool, supplementary_msg: str = "") -> None:
         # Routed from a WS client's approve/deny frame. This resolves the adapter's
@@ -148,10 +157,18 @@ class SessionRunner:
         while True:
             item = await self._inbox.get()
             await self._db.update_session_status(self._session_id, SessionStatus.RUNNING)
+            self._turn_task = asyncio.create_task(
+                self._run_turn(item), name=f"turn:{self._session_id}"
+            )
             try:
-                await self._run_turn(item)
+                await self._turn_task
             except asyncio.CancelledError:
-                raise
+                if asyncio.current_task().cancelling():
+                    raise
+                await self._db.update_session_status(
+                    self._session_id, SessionStatus.WAITING_USER
+                )
+                self._broadcast(StreamEvent(type=StreamEventType.DONE, data="cancelled"))
             except Exception as e:
                 logger.exception("runner turn crashed session=%s", self._session_id)
                 self._broadcast(StreamEvent(type=StreamEventType.ERROR, data=str(e)))
@@ -159,6 +176,8 @@ class SessionRunner:
                     await self._db.update_session_status(self._session_id, SessionStatus.ERROR)
                 except Exception:
                     logger.exception("failed to mark session ERROR session=%s", self._session_id)
+            finally:
+                self._turn_task = None
 
     async def _run_turn(self, item: _InboxItem) -> None:
         # Persist the raw content + sender separately; the agent stdin gets a

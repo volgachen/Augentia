@@ -131,6 +131,7 @@ interface Store {
     additionalPromptPath?: string | null,
   ) => Promise<string>;
   sendMessage: (sessionId: string, content: string) => void;
+  cancelGeneration: (sessionId: string) => void;
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
   disconnectSession: (sessionId: string) => void;
@@ -475,6 +476,26 @@ export const useStore = create<Store>((set, get) => {
             [sessionId]: {
               ...cur,
               session: { ...cur.session, status: "RUNNING" },
+            },
+          },
+        };
+      });
+    },
+
+    cancelGeneration: (sessionId) => {
+      const entry = get().sessions[sessionId];
+      if (!entry?.socket) return;
+      entry.socket.send(JSON.stringify({ cancel: true }));
+      set((s) => {
+        const cur = s.sessions[sessionId];
+        if (!cur) return s;
+        return {
+          sessions: {
+            ...s.sessions,
+            [sessionId]: {
+              ...cur,
+              session: { ...cur.session, status: "WAITING_USER" },
+              pendingConfirms: [],
             },
           },
         };
