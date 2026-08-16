@@ -4,6 +4,7 @@ import { useStore } from "../store/sessions";
 import type { StreamEvent } from "../api/types";
 import TaskListPanel from "../components/TaskListPanel";
 import SubAgentListPanel from "../components/SubAgentListPanel";
+import SessionListPanel from "../components/SessionListPanel";
 import ToolConfirmPanel from "../components/ToolConfirmPanel";
 import ToolPermissionsPanel from "../components/ToolPermissionsPanel";
 import SystemPromptPanel from "../components/SystemPromptPanel";
@@ -362,7 +363,7 @@ export default function LiveConsole() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
   const [focusedItemIndex, setFocusedItemIndex] = useState<number | null>(null);
-  const [sidebarTab, setSidebarTab] = useState<"overview" | "permissions" | "systemPrompt">("overview");
+  const [sidebarTab, setSidebarTab] = useState<"overview" | "permissions" | "systemPrompt" | "sessions">("overview");
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [showToolResults, setShowToolResults] = useState(true);
 
@@ -581,6 +582,7 @@ export default function LiveConsole() {
             {[
               ["overview", "Overview"],
               ["permissions", "Tools"],
+              ["sessions", "Sessions"],
               ["systemPrompt", "System Prompt"],
             ].map(([key, label]) => (
               <button
@@ -610,6 +612,13 @@ export default function LiveConsole() {
                   />
                 </div>
               </div>
+            )}
+            {sidebarTab === "sessions" && (
+              <SessionListPanel
+                sessions={Object.values(sessions)}
+                currentSessionId={session.id}
+                onOpen={(id) => navigate(`/console/${id}`)}
+              />
             )}
             {sidebarTab === "permissions" && (
               <ToolPermissionsPanel
