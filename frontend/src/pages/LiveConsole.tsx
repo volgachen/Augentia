@@ -183,9 +183,19 @@ function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
   return items;
 }
 
-function ToolCallLine({ item }: { item: ToolCallView }) {
+function ToolCallLine({
+  item,
+  showToolCalls,
+  showToolResults,
+}: {
+  item: ToolCallView;
+  showToolCalls: boolean;
+  showToolResults: boolean;
+}) {
   const [expanded, setExpanded] = useState(false);
   const summary = getToolSummary(item.name, item.args);
+  if (!showToolCalls) return null;
+
   return (
     <div className="text-left font-mono text-sm text-yellow-400">
       <button
@@ -203,7 +213,7 @@ function ToolCallLine({ item }: { item: ToolCallView }) {
           <ToolPreview name={item.name} args={item.args} className="mt-1" />
         </div>
       )}
-      {item.result !== undefined && (
+      {showToolResults && item.result !== undefined && (
         <pre className="mt-1 ml-4 px-2 py-1.5 bg-gray-950/60 border border-gray-800 rounded whitespace-pre-wrap break-all text-xs text-amber-200 overflow-auto max-h-72">
           {resultToText(item.result)}
         </pre>
@@ -298,6 +308,8 @@ function ConsoleItemLine({
   editingMessageId,
   editingContent,
   generating,
+  showToolCalls,
+  showToolResults,
   onStartEdit,
   onEditChange,
   onCancelEdit,
@@ -307,13 +319,18 @@ function ConsoleItemLine({
   editingMessageId: string | null;
   editingContent: string;
   generating: boolean;
+  showToolCalls: boolean;
+  showToolResults: boolean;
   onStartEdit: (event: StreamEvent) => void;
   onEditChange: (value: string) => void;
   onCancelEdit: () => void;
   onSubmitEdit: () => void;
 }) {
   if (isToolCallView(item)) {
-    return <ToolCallLine item={item} />;
+    return <ToolCallLine item={item} showToolCalls={showToolCalls} showToolResults={showToolResults} />;
+  }
+  if (item.type === "tool_result" && (!showToolCalls || !showToolResults)) {
+    return null;
   }
   return (
     <EventLine
@@ -346,6 +363,8 @@ export default function LiveConsole() {
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
   const [focusedItemIndex, setFocusedItemIndex] = useState<number | null>(null);
   const [sidebarTab, setSidebarTab] = useState<"overview" | "permissions" | "systemPrompt">("overview");
+  const [showToolCalls, setShowToolCalls] = useState(true);
+  const [showToolResults, setShowToolResults] = useState(true);
 
   const entry = sessionId ? sessions[sessionId] : undefined;
 
@@ -424,6 +443,11 @@ export default function LiveConsole() {
     e.preventDefault();
     const currentIndex = focusedItemIndex ?? consoleItems.length - 1;
     scrollToConsoleItem(e.key === "ArrowUp" ? currentIndex - 1 : currentIndex + 1);
+  };
+
+  const handleShowToolCallsChange = (show: boolean) => {
+    setShowToolCalls(show);
+    if (!show) setShowToolResults(false);
   };
 
   const handleSend = () => {
@@ -526,6 +550,8 @@ export default function LiveConsole() {
                 editingMessageId={editingMessageId}
                 editingContent={editingContent}
                 generating={generating}
+                showToolCalls={showToolCalls}
+                showToolResults={showToolResults}
                 onStartEdit={(event) => {
                   if (generating || event.type !== "user" || !event.message_id) return;
                   setEditingMessageId(event.message_id);
@@ -554,7 +580,7 @@ export default function LiveConsole() {
           <div className="shrink-0 flex gap-1 border-b border-gray-800 p-2">
             {[
               ["overview", "Overview"],
-              ["permissions", "Tool Permissions"],
+              ["permissions", "Tools"],
               ["systemPrompt", "System Prompt"],
             ].map(([key, label]) => (
               <button
@@ -585,7 +611,15 @@ export default function LiveConsole() {
                 </div>
               </div>
             )}
-            {sidebarTab === "permissions" && <ToolPermissionsPanel session={session} />}
+            {sidebarTab === "permissions" && (
+              <ToolPermissionsPanel
+                session={session}
+                showToolCalls={showToolCalls}
+                showToolResults={showToolResults}
+                onShowToolCallsChange={handleShowToolCallsChange}
+                onShowToolResultsChange={setShowToolResults}
+              />
+            )}
             {sidebarTab === "systemPrompt" && <SystemPromptPanel session={session} />}
           </div>
         </aside>

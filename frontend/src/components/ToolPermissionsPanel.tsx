@@ -34,7 +34,19 @@ function permissionsFromConfig(config: Record<string, unknown> | null): unknown 
   return config?.tool_permissions ?? DEFAULT_TOOL_PERMISSIONS;
 }
 
-export default function ToolPermissionsPanel({ session }: { session: Session }) {
+export default function ToolPermissionsPanel({
+  session,
+  showToolCalls,
+  showToolResults,
+  onShowToolCallsChange,
+  onShowToolResultsChange,
+}: {
+  session: Session;
+  showToolCalls: boolean;
+  showToolResults: boolean;
+  onShowToolCallsChange: (show: boolean) => void;
+  onShowToolResultsChange: (show: boolean) => void;
+}) {
   const [sessionConfig, setSessionConfig] = useState<Record<string, unknown> | null>(null);
   const [draft, setDraft] = useState(pretty(DEFAULT_TOOL_PERMISSIONS));
   const [loading, setLoading] = useState(false);
@@ -127,7 +139,7 @@ export default function ToolPermissionsPanel({ session }: { session: Session }) 
     <section className="flex-1 flex flex-col min-h-0">
       <div className="shrink-0 flex items-center justify-between px-2 pb-1.5">
         <h2 className="text-xs font-semibold uppercase tracking-wide text-gray-400">
-          Tool Permissions
+          Tools
         </h2>
         <span className="text-[10px] text-gray-500 font-mono truncate max-w-[9rem]" title={session.id}>
           {session.id.slice(0, 8)}…
@@ -223,6 +235,28 @@ export default function ToolPermissionsPanel({ session }: { session: Session }) 
               Saved and applied to this session.
             </div>
           )}
+
+          <div className="mt-3 shrink-0 space-y-2 rounded-lg border border-gray-800 bg-gray-950/60 p-2.5">
+            <label className="flex cursor-pointer items-center justify-between">
+              <span className="text-xs text-gray-300">显示ToolCall</span>
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-indigo-500"
+                checked={showToolCalls}
+                onChange={(e) => onShowToolCallsChange(e.target.checked)}
+              />
+            </label>
+            <label className={`flex items-center justify-between ${showToolCalls ? "cursor-pointer" : "cursor-not-allowed opacity-50"}`}>
+              <span className="text-xs text-gray-300">显示ToolResults</span>
+              <input
+                type="checkbox"
+                className="h-4 w-4 accent-indigo-500"
+                checked={showToolResults}
+                disabled={!showToolCalls}
+                onChange={(e) => onShowToolResultsChange(e.target.checked)}
+              />
+            </label>
+          </div>
         </>
       )}
     </section>
