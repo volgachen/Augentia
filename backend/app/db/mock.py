@@ -169,6 +169,39 @@ class MockMemoryDatabase(IAgentDatabase):
         await self.get_session(session_id)
         return [m for m in self._messages[session_id] if m.deleted_at is None]
 
+    async def clone_messages(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        *,
+        before_message_id: str | None = None,
+    ) -> List[Message]:
+        await self.get_session(source_session_id)
+        await self.get_session(target_session_id)
+        source = sorted(
+            (m for m in self._messages[source_session_id] if m.deleted_at is None),
+            key=lambda message: (message.created_at, message.id),
+        )
+        if before_message_id is not None:
+            index = next((i for i, m in enumerate(source) if m.id == before_message_id), None)
+            if index is None:
+                raise KeyError(f"Message '{before_message_id}' not found")
+            source = source[:index]
+        cloned = []
+        for original in source:
+            message = Message(
+                session_id=target_session_id,
+                role=original.role,
+                content=original.content,
+                from_session_id=original.from_session_id,
+            )
+            message.created_at = original.created_at
+            self._messages[target_session_id].append(message)
+            cloned.append(message)
+        if cloned:
+            self._sessions[target_session_id].last_message_at = cloned[-1].created_at
+        return cloned
+
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)
         messages = self._messages[session_id]

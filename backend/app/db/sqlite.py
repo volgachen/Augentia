@@ -450,10 +450,49 @@ class SqliteDatabase(IAgentDatabase):
     async def get_messages(self, session_id: str) -> list[Message]:
         await self.get_session(session_id)
         rows = self._rows(
-            "SELECT * FROM messages WHERE session_id = ? AND deleted_at IS NULL ORDER BY created_at",
+            "SELECT * FROM messages WHERE session_id = ? AND deleted_at IS NULL ORDER BY created_at, id",
             (session_id,),
         )
         return [_message(r) for r in rows]
+
+    async def clone_messages(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        *,
+        before_message_id: str | None = None,
+    ) -> list[Message]:
+        await self.get_session(source_session_id)
+        await self.get_session(target_session_id)
+        source = await self.get_messages(source_session_id)
+        if before_message_id is not None:
+            index = next((i for i, message in enumerate(source) if message.id == before_message_id), None)
+            if index is None:
+                raise KeyError(f"Message '{before_message_id}' not found")
+            source = source[:index]
+        cloned: list[Message] = []
+        with self._conn:
+            for original in source:
+                message = Message(
+                    session_id=target_session_id,
+                    role=original.role,
+                    content=original.content,
+                    from_session_id=original.from_session_id,
+                    created_at=original.created_at,
+                )
+                self._execute(
+                    """INSERT INTO messages
+                       (id, session_id, role, content, from_session_id, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (message.id, message.session_id, message.role.value, message.content,
+                     message.from_session_id, _iso(message.created_at)),
+                )
+                cloned.append(message)
+            self._execute(
+                "UPDATE sessions SET last_message_at = ? WHERE id = ?",
+                (_iso(cloned[-1].created_at) if cloned else None, target_session_id),
+            )
+        return cloned
 
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)

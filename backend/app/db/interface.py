@@ -87,6 +87,15 @@ class IAgentDatabase(ABC):
     async def get_messages(self, session_id: str) -> List[Message]: pass
 
     @abstractmethod
+    async def clone_messages(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        *,
+        before_message_id: str | None = None,
+    ) -> List[Message]: pass
+
+    @abstractmethod
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message: pass
 
     # ------- Plugin instances/runs/logs -------

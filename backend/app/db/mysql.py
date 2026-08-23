@@ -725,6 +725,68 @@ class MySqlDatabase(IAgentDatabase):
                 rows = await cur.fetchall()
         return [_row_to_message(r) for r in rows]
 
+    async def clone_messages(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        *,
+        before_message_id: str | None = None,
+    ) -> list[Message]:
+        await self.get_session(source_session_id)
+        await self.get_session(target_session_id)
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(DictCursor) as cur:
+                    await cur.execute(
+                        """SELECT * FROM messages
+                           WHERE session_id = %s AND deleted_at IS NULL
+                           ORDER BY created_at, id""",
+                        (source_session_id,),
+                    )
+                    rows = await cur.fetchall()
+                    originals = [_row_to_message(row) for row in rows]
+                    if before_message_id is not None:
+                        index = next(
+                            (i for i, message in enumerate(originals) if message.id == before_message_id),
+                            None,
+                        )
+                        if index is None:
+                            raise KeyError(f"Message '{before_message_id}' not found")
+                        originals = originals[:index]
+                    cloned: list[Message] = []
+                    for original in originals:
+                        message = Message(
+                            session_id=target_session_id,
+                            role=original.role,
+                            content=original.content,
+                            from_session_id=original.from_session_id,
+                            created_at=original.created_at,
+                        )
+                        await cur.execute(
+                            """INSERT INTO messages
+                               (id, session_id, role, content, from_session_id, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            (
+                                message.id,
+                                message.session_id,
+                                message.role.value,
+                                message.content,
+                                message.from_session_id,
+                                message.created_at,
+                            ),
+                        )
+                        cloned.append(message)
+                    await cur.execute(
+                        "UPDATE sessions SET last_message_at = %s WHERE id = %s",
+                        (cloned[-1].created_at if cloned else None, target_session_id),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return cloned
+
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)
         async with self._pool.acquire() as conn:

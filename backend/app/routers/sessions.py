@@ -2,9 +2,11 @@ import asyncio
 import json
 import logging
 import uuid
+import os
 from enum import Enum
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from openai import AsyncOpenAI
 from pydantic import BaseModel
 from app.db.interface import IAgentDatabase
 from app.db.deps import get_db
@@ -75,6 +77,41 @@ class PostMessageRequest(BaseModel):
 
 class RetryMessageRequest(BaseModel):
     content: str
+
+
+class DeriveSessionRequest(BaseModel):
+    title: str | None = None
+
+
+async def _create_derived_session(
+    source: Session,
+    db: IAgentDatabase,
+    registry: AdapterRegistry,
+    *,
+    title: str | None,
+    before_message_id: str | None = None,
+) -> Session:
+    agent = await db.get_agent(source.agent_id)
+    if agent.agent_type != AgentType.TOOL_USE:
+        raise HTTPException(status_code=409, detail="derived sessions currently support only tool_use sessions")
+    target = await db.create_session(
+        source.agent_id,
+        working_dir=source.working_dir,
+        title=title,
+        parent_session_id=source.id,
+        additional_prompt=source.additional_prompt,
+        additional_prompt_path=source.additional_prompt_path,
+        system_prompt_snapshot=source.system_prompt_snapshot,
+    )
+    try:
+        await db.clone_messages(source.id, target.id, before_message_id=before_message_id)
+        await build_runner(target, agent, db, registry)
+        await db.update_session_status(target.id, SessionStatus.WAITING_USER)
+        return await db.get_session(target.id)
+    except Exception:
+        await registry.remove(target.id)
+        await db.soft_delete_session(target.id)
+        raise
 
 
 @router.post("", response_model=Session, status_code=201)
@@ -305,6 +342,106 @@ async def get_messages(session_id: str, db: IAgentDatabase = Depends(get_db)):
         return await db.get_messages(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)
+async def diverge_from_message(
+    session_id: str,
+    message_id: str,
+    body: DeriveSessionRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    try:
+        source = await db.get_session(session_id)
+        messages = await db.get_messages(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    target = next((message for message in messages if message.id == message_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
+    if target.role != MessageRole.USER:
+        raise HTTPException(status_code=400, detail="only user messages can be used as a divergence point")
+    try:
+        return await _create_derived_session(
+            source, db, registry,
+            title=body.title or f"{source.title or 'Session'} · Branch",
+            before_message_id=message_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("failed to diverge session=%s message=%s", session_id, message_id)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{session_id}/compress", response_model=Session, status_code=201)
+async def compress_session(
+    session_id: str,
+    body: DeriveSessionRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    try:
+        source = await db.get_session(session_id)
+        agent = await db.get_agent(source.agent_id)
+        history = await db.get_messages(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if agent.agent_type != AgentType.TOOL_USE:
+        raise HTTPException(status_code=409, detail="compression currently supports only tool_use sessions")
+    if not history:
+        raise HTTPException(status_code=400, detail="session has no messages to compress")
+    api_key = os.getenv("OPENAI_API_KEY")
+    client_kwargs = {"api_key": api_key} if api_key else {}
+    if agent.openai_base_url or os.getenv("OPENAI_BASE_URL"):
+        client_kwargs["base_url"] = agent.openai_base_url or os.getenv("OPENAI_BASE_URL")
+    client = AsyncOpenAI(**client_kwargs)
+    transcript = "\n\n".join(f"[{message.role.value}]\n{message.content}" for message in history)
+    try:
+        response = await client.chat.completions.create(
+            model=agent.openai_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Compress the conversation into a concise but complete factual context for continuing it. Preserve goals, decisions, constraints, file changes, unresolved issues, and relevant tool results. Output only the context summary.",
+                },
+                {"role": "user", "content": transcript},
+            ],
+        )
+        summary = (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.exception("failed to compress session=%s", session_id)
+        raise HTTPException(status_code=502, detail=f"compression model request failed: {e}")
+    finally:
+        await client.close()
+    if not summary:
+        raise HTTPException(status_code=502, detail="compression model returned an empty summary")
+    target: Session | None = None
+    try:
+        target = await db.create_session(
+            source.agent_id,
+            working_dir=source.working_dir,
+            title=body.title or f"{source.title or 'Session'} · Compressed",
+            parent_session_id=source.id,
+            additional_prompt=source.additional_prompt,
+            additional_prompt_path=source.additional_prompt_path,
+            system_prompt_snapshot=source.system_prompt_snapshot,
+        )
+        await db.add_message(
+            target.id,
+            MessageRole.USER,
+            "以下是此前对话的压缩上下文，请将其视为已经发生的历史背景：\n\n" + summary,
+        )
+        await build_runner(target, agent, db, registry)
+        await db.update_session_status(target.id, SessionStatus.WAITING_USER)
+        return await db.get_session(target.id)
+    except Exception as e:
+        if target is not None:
+            await registry.remove(target.id)
+            await db.soft_delete_session(target.id)
+        logger.exception("failed to create compressed session from=%s", session_id)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/{session_id}/messages", status_code=202)

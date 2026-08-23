@@ -169,6 +169,16 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ content }),
       }),
+    divergeFromMessage: (id: string, messageId: string) =>
+      request<Session>(`/sessions/${id}/messages/${messageId}/diverge`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    compress: (id: string) =>
+      request<Session>(`/sessions/${id}/compress`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
     tasks: (id: string) => request<Task[]>(`/sessions/${id}/tasks`),
     delete: (id: string) =>
       request<void>(`/sessions/${id}`, { method: "DELETE" }),

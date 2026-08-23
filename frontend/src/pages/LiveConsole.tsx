@@ -232,6 +232,7 @@ function EventLine({
   onEditChange = () => {},
   onCancelEdit = () => {},
   onSubmitEdit = () => {},
+  onDiverge = () => {},
 }: {
   event: StreamEvent;
   editing?: boolean;
@@ -241,6 +242,7 @@ function EventLine({
   onEditChange?: (value: string) => void;
   onCancelEdit?: () => void;
   onSubmitEdit?: () => void;
+  onDiverge?: () => void;
 }) {
   const style = EVENT_STYLE[event.type] ?? "text-gray-300";
   const prefix =
@@ -280,7 +282,15 @@ function EventLine({
             disabled={!editValue.trim() || generating || !event.message_id}
             className="px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs text-white"
           >
-            Send from here
+            Rewrite from here
+          </button>
+          <button
+            type="button"
+            onClick={onDiverge}
+            disabled={generating || !event.message_id}
+            className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-xs text-white"
+          >
+            Diverge from here
           </button>
         </div>
       </div>
@@ -315,6 +325,7 @@ function ConsoleItemLine({
   onEditChange,
   onCancelEdit,
   onSubmitEdit,
+  onDiverge,
 }: {
   item: ConsoleItem;
   editingMessageId: string | null;
@@ -326,6 +337,7 @@ function ConsoleItemLine({
   onEditChange: (value: string) => void;
   onCancelEdit: () => void;
   onSubmitEdit: () => void;
+  onDiverge: (messageId: string) => void;
 }) {
   if (isToolCallView(item)) {
     return <ToolCallLine item={item} showToolCalls={showToolCalls} showToolResults={showToolResults} />;
@@ -343,6 +355,7 @@ function ConsoleItemLine({
       onEditChange={onEditChange}
       onCancelEdit={onCancelEdit}
       onSubmitEdit={onSubmitEdit}
+      onDiverge={() => item.message_id && onDiverge(item.message_id)}
     />
   );
 }
@@ -354,6 +367,8 @@ export default function LiveConsole() {
   const sendMessage = useStore((s) => s.sendMessage);
   const cancelGeneration = useStore((s) => s.cancelGeneration);
   const retryMessage = useStore((s) => s.retryMessage);
+  const divergeFromMessage = useStore((s) => s.divergeFromMessage);
+  const compressSession = useStore((s) => s.compressSession);
   const resolveConfirm = useStore((s) => s.resolveConfirm);
   const openSession = useStore((s) => s.openSession);
   const fetchTasks = useStore((s) => s.fetchTasks);
@@ -367,6 +382,7 @@ export default function LiveConsole() {
   const [sidebarTab, setSidebarTab] = useState<"overview" | "permissions" | "systemPrompt" | "sessions">("overview");
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [showToolResults, setShowToolResults] = useState(true);
+  const [deriving, setDeriving] = useState(false);
 
   const entry = sessionId ? sessions[sessionId] : undefined;
 
@@ -467,6 +483,28 @@ export default function LiveConsole() {
     setEditingContent("");
   };
 
+  const handleDiverge = async (messageId: string) => {
+    if (!sessionId || generating || deriving) return;
+    setDeriving(true);
+    try {
+      const newSessionId = await divergeFromMessage(sessionId, messageId);
+      navigate(`/console/${newSessionId}`);
+    } finally {
+      setDeriving(false);
+    }
+  };
+
+  const handleCompress = async () => {
+    if (!sessionId || generating || deriving) return;
+    setDeriving(true);
+    try {
+      const newSessionId = await compressSession(sessionId);
+      navigate(`/console/${newSessionId}`);
+    } finally {
+      setDeriving(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -565,6 +603,7 @@ export default function LiveConsole() {
                   setEditingContent("");
                 }}
                 onSubmitEdit={handleRetrySend}
+                onDiverge={handleDiverge}
               />
             </div>
           ))}
@@ -611,6 +650,16 @@ export default function LiveConsole() {
                     agents={children}
                     onOpen={(id) => navigate(`/console/${id}`)}
                   />
+                </div>
+                <div className="shrink-0 border-t border-gray-800 pt-3">
+                  <button
+                    type="button"
+                    onClick={handleCompress}
+                    disabled={generating || deriving || events.length === 0}
+                    className="w-full rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
+                  >
+                    {deriving ? "Creating session…" : "Compress"}
+                  </button>
                 </div>
               </div>
             )}

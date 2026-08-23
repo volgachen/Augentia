@@ -133,6 +133,8 @@ interface Store {
   sendMessage: (sessionId: string, content: string) => void;
   cancelGeneration: (sessionId: string) => void;
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
+  divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
+  compressSession: (sessionId: string) => Promise<string>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
   disconnectSession: (sessionId: string) => void;
   closeSession: (sessionId: string) => Promise<void>;
@@ -543,6 +545,18 @@ export const useStore = create<Store>((set, get) => {
           },
         };
       });
+    },
+
+    divergeFromMessage: async (sessionId, messageId) => {
+      const session = await api.sessions.divergeFromMessage(sessionId, messageId);
+      await get().hydrateSessions();
+      return session.id;
+    },
+
+    compressSession: async (sessionId) => {
+      const session = await api.sessions.compress(sessionId);
+      await get().hydrateSessions();
+      return session.id;
     },
 
     resolveConfirm: (sessionId, callId, approved, message) => {
