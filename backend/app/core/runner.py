@@ -180,20 +180,29 @@ class SessionRunner:
                 self._turn_task = None
 
     async def _run_turn(self, item: _InboxItem) -> None:
-        # Persist the raw content + sender separately; the agent stdin gets a
-        # prefixed view so it can route its reply.
-        user_message = await self._db.add_message(
-            self._session_id,
-            MessageRole.USER,
-            item.content,
-            from_session_id=item.from_session_id,
-        )
+        # Adapters that persist their own conversation rows (CAgentAdapter,
+        # whose loop writes through its Store) skip the runner's second-write
+        # persistence; the runner only relays their events. The raw content and
+        # sender are still broadcast, and the from-session prefix stays baked
+        # into the delivered text the same way.
+        persists_own = getattr(self._adapter, "persists_own_messages", False)
         delivered = (
             f"[from-session:{item.from_session_id}] {item.content}"
             if item.from_session_id
             else item.content
         )
-        self._broadcast(StreamEvent(type=StreamEventType.USER, data=delivered, message_id=user_message.id))
+        if not persists_own:
+            user_message = await self._db.add_message(
+                self._session_id,
+                MessageRole.USER,
+                item.content,
+                from_session_id=item.from_session_id,
+            )
+            self._broadcast(StreamEvent(
+                type=StreamEventType.USER, data=delivered, message_id=user_message.id
+            ))
+        else:
+            self._broadcast(StreamEvent(type=StreamEventType.USER, data=delivered))
 
         agent_buf: list[str] = []
         saw_native_messages = False
@@ -221,7 +230,14 @@ class SessionRunner:
                 await self._db.update_session_status(
                     self._session_id, SessionStatus.RUNNING
                 )
-            if event.type == StreamEventType.ASSISTANT_MESSAGE:
+            if persists_own:
+                # The adapter's loop already persisted every row; the runner
+                # only applies the same broadcast suppression rules.
+                if event.type == StreamEventType.ASSISTANT_MESSAGE:
+                    saw_native_messages = True
+                elif event.type == StreamEventType.TEXT and saw_native_messages:
+                    should_broadcast = False
+            elif event.type == StreamEventType.ASSISTANT_MESSAGE:
                 saw_native_messages = True
                 message = await self._db.add_message(
                     self._session_id, MessageRole.AGENT, event.data

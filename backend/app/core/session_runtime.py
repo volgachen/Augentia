@@ -2,6 +2,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.adapters.claude_code import ClaudeCodeAdapter
+from app.adapters.cagent_adapter import CAgentAdapter
 from app.adapters.openai_tool_use import OpenAIToolUseAdapter
 from app.adapters.registry import AdapterRegistry
 from app.core.runner import SessionRunner
@@ -29,11 +30,30 @@ async def ensure_system_prompt_snapshot(
     return await db.update_session_system_prompt_snapshot(session.id, prompt)
 
 
-def build_adapter(session: Session, agent: AgentTemplate) -> "BaseAgentAdapter":
+def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | None = None) -> "BaseAgentAdapter":
     session_config = ensure_session_config(session.id, agent.config)
     if agent.agent_type == AgentType.CLAUDE_CODE:
         return ClaudeCodeAdapter(working_dir=session.working_dir, session_id=session.id)
     if agent.agent_type == AgentType.TOOL_USE:
+        # config.engine selects the agent loop: "cagent" runs the CAgent
+        # framework loop (persist-first history, paired tool results, turn-end
+        # marks), anything else runs the original in-adapter loop. Both read
+        # and write the same persisted history format.
+        engine = (agent.config or {}).get("engine", "legacy")
+        if engine == "cagent":
+            config = dict(session_config)
+            for key in ("max_steps", "compression_token_threshold", "compression_turn_threshold"):
+                if key in (agent.config or {}):
+                    config[key] = agent.config[key]
+            return CAgentAdapter(
+                db=db,
+                tool_names=agent.tool_names,
+                model=agent.openai_model,
+                base_url=agent.openai_base_url,
+                session_id=session.id,
+                working_dir=session.working_dir,
+                config=config,
+            )
         return OpenAIToolUseAdapter(
             tool_names=agent.tool_names,
             model=agent.openai_model,
@@ -57,7 +77,7 @@ async def build_runner(
     session = await ensure_system_prompt_snapshot(
         session, agent, db, additional_prompt, additional_prompt_path
     )
-    adapter = build_adapter(session, agent)
+    adapter = build_adapter(session, agent, db)
     await adapter.start(session.system_prompt_snapshot or "")
     history = await db.get_messages(session.id)
     if history:

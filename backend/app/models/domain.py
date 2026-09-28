@@ -23,6 +23,11 @@ class MessageRole(str, Enum):
     AGENT = "agent"
     TOOL_CALL = "tool_call"
     TOOL = "tool"
+    # CAgent framework bookkeeping rows (turn_end / compression_started /
+    # compression_completed). Content is JSON {"name", "metadata", "content"}.
+    # Persisted for the agent loop's turn accounting and compression boundaries;
+    # filtered out of client-facing message listings.
+    MARK = "mark"
 
 
 class AgentType(str, Enum):

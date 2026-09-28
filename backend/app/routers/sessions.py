@@ -339,9 +339,12 @@ async def test_tool_permission(
 @router.get("/{session_id}/messages")
 async def get_messages(session_id: str, db: IAgentDatabase = Depends(get_db)):
     try:
-        return await db.get_messages(session_id)
+        messages = await db.get_messages(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # Framework mark rows (turn_end / compression boundaries) are internal
+    # bookkeeping for the CAgent engine loop, not conversation content.
+    return [m for m in messages if m.role != MessageRole.MARK]
 
 
 @router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)
