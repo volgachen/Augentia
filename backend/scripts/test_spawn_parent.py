@@ -1,7 +1,7 @@
-"""Hermetic check for parent_session_id: persistence + template copy + 404.
+"""Hermetic check for parent_session_id: persistence + working dir + 404.
 
 Runs the real FastAPI app via TestClient (no network/port). Exercises the
-sessions router and the mock DB.
+sessions router and the mock DB with a tool_use agent.
 """
 import tempfile
 from pathlib import Path
@@ -13,28 +13,35 @@ from fastapi.testclient import TestClient
 from app.main import app
 
 API = "/api/v1/sessions"
-AGENT = "agent-claude-code-001"
+
+
+def _pick_agent(client: TestClient) -> str:
+    r = client.get("/api/v1/agents")
+    r.raise_for_status()
+    agents = r.json()
+    tool_use = [a["id"] for a in agents if a["agent_type"] == "tool_use"]
+    assert tool_use, f"no tool_use agent available: {agents}"
+    return tool_use[0]
 
 
 def main() -> None:
     with TestClient(app) as client, tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
-        template_dir = tmp / "tpl"
-        template_dir.mkdir()
-        (template_dir / "CLAUDE.md").write_text("dummy template\n", encoding="utf-8")
-        child_wd = tmp / "child"  # must NOT exist (copy target)
+        agent = _pick_agent(client)
+        child_source = tmp / "src"
+        child_source.mkdir()
+        (child_source / "note.txt").write_text("workspace file\n", encoding="utf-8")
 
         # 1) parent session
-        r = client.post(API, json={"agent_id": AGENT})
+        r = client.post(API, json={"agent_id": agent})
         assert r.status_code == 201, (r.status_code, r.text)
         parent_id = r.json()["id"]
         print("parent created:", parent_id)
 
-        # 2) child spawned by parent
+        # 2) child spawned by parent, sharing the parent's workspace source
         r = client.post(API, json={
-            "agent_id": AGENT,
-            "working_dir": str(child_wd),
-            "template_dir": str(template_dir),
+            "agent_id": agent,
+            "source_dir": str(child_source),
             "parent_session_id": parent_id,
         })
         assert r.status_code == 201, (r.status_code, r.text)
@@ -42,13 +49,11 @@ def main() -> None:
         print("child created:", child["id"], "parent_session_id=", child["parent_session_id"])
         assert child["parent_session_id"] == parent_id, child
 
-        # 3) template copy landed, and the server wrote no .env of its own
-        assert (child_wd / "CLAUDE.md").read_text(encoding="utf-8") == "dummy template\n"
-        assert not (child_wd / ".env").exists(), "server must not write a .env"
-        print("template copied; no .env written OK")
+        # 3) the child's working dir is the requested source dir
+        assert child["working_dir"] == str(child_source), child
 
         # 4) unknown parent -> 404
-        r = client.post(API, json={"agent_id": AGENT, "parent_session_id": "does-not-exist"})
+        r = client.post(API, json={"agent_id": agent, "parent_session_id": "does-not-exist"})
         assert r.status_code == 404, (r.status_code, r.text)
         print("unknown parent -> 404 OK:", r.json()["detail"])
 

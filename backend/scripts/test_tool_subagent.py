@@ -23,8 +23,18 @@ import httpx
 from app.main import app
 from app.adapters.tools.subagent import SubagentTool
 
-AGENT = "agent-claude-code-001"
-RESEARCH_AGENT = "agent-research-001"  # TOOL_USE: no `claude` subprocess
+
+async def _ensure_agent(client: httpx.AsyncClient) -> str:
+    """Create a minimal tool-use agent template; return its id."""
+    r = await client.post("/api/v1/agents", json={
+        "name": "subagent-e2e",
+        "description": "tool-use agent for the subagent e2e check",
+        "agent_type": "tool_use",
+        "system_prompt": "You are a test agent.",
+        "tool_names": ["read"],
+    })
+    assert r.status_code == 201, (r.status_code, r.text)
+    return r.json()["id"]
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -106,8 +116,7 @@ async def main() -> int:
 async def _execute_e2e(tool: SubagentTool, td: Path) -> int:
     # Redirect every httpx.AsyncClient the tool creates to the ASGI app, so
     # GET /sessions/{parent} and POST /sessions / messages hit the real router.
-    # Use a tool-use agent (not Claude Code) so execute() doesn't spawn a real
-    # `claude` subprocess that holds the worktree dir open on Windows.
+    # Uses a tool-use agent so the spawned session's adapter starts in-process.
     transport = httpx.ASGITransport(app=app)
     real_client = httpx.AsyncClient
 
@@ -124,8 +133,9 @@ async def _execute_e2e(tool: SubagentTool, td: Path) -> int:
         sa.httpx.AsyncClient = patched  # type: ignore[assignment]
 
         async with real_client(transport=transport, base_url="http://test") as c:
+            agent_id = await _ensure_agent(c)
             r = await c.post("/api/v1/sessions", json={
-                "agent_id": RESEARCH_AGENT, "working_dir": str(parent_repo),
+                "agent_id": agent_id, "source_dir": str(parent_repo),
             })
             assert r.status_code == 201, (r.status_code, r.text)
             parent_id = r.json()["id"]
@@ -140,7 +150,7 @@ async def _execute_e2e(tool: SubagentTool, td: Path) -> int:
 
         tool.session_id = parent_id
         result = await tool.execute(
-            agent_id=RESEARCH_AGENT, task="say hi", isolation="worktree",
+            agent_id=agent_id, task="say hi", isolation="worktree",
         )
         info(result.splitlines()[0])
 

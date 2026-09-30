@@ -32,7 +32,6 @@ class MessageRole(str, Enum):
 
 class AgentType(str, Enum):
     TOOL_USE = "tool_use"
-    CLAUDE_CODE = "claude_code"
 
 
 class AgentTemplate(BaseModel):

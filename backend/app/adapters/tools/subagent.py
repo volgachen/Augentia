@@ -37,7 +37,8 @@ class SubagentTool(BaseTool):
         "session automatically.\n\n"
         "You can only launch available agent templates.\n\n"
         "Choose isolation=\"worktree\" when the subagent needs its own isolated "
-        "working directory (recommended for Claude Code agents). This creates a "
+        "working directory (e.g. for tasks that commit changes you want to "
+        "review and merge separately). This creates a "
         "real git worktree off your working directory on a new branch "
         "(subagent/<id>), so the subagent sees your current code and its commits "
         "land on that branch for you to merge later. If your working directory "
@@ -52,8 +53,8 @@ class SubagentTool(BaseTool):
                 "agent_id": {
                     "type": "string",
                     "description": (
-                        "Agent template ID. Available: 'agent-claude-code-001' "
-                        "(Claude Code CLI) or 'agent-research-001' (OpenAI tool-use)."
+                        "Agent template ID to spawn. Only templates registered "
+                        "in the gateway are available."
                     ),
                 },
                 "task": {

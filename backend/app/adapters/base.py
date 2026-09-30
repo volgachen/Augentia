@@ -79,9 +79,8 @@ class BaseAgentAdapter(ABC):
         adapter is blocked on. If supplementary_msg is provided, the adapter
         should append it as a user message after the tool result. If denied
         without a message, the adapter should skip the next LLM call.
-        Default is a no-op — adapters that don't gate tools (e.g. Claude Code,
-        whose tools run in the CLI subprocess with its own permission flow)
-        simply ignore it.
+        Default is a no-op — adapters that don't gate tools simply
+        ignore it.
         """
         return
 

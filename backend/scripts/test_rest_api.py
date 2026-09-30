@@ -1,7 +1,7 @@
 """REST smoke test — requires `uvicorn app.main:app` running on :12598.
 
 Exercises: list agents -> create session -> get session -> get messages -> delete.
-Uses the Claude Code seed agent because it starts without needing OPENAI env vars.
+Picks the first tool_use agent from the registry automatically.
 Set AUGENTIA_AGENT_ID to override the target agent.
 """
 import os
@@ -28,10 +28,16 @@ def main() -> int:
             for a in agents:
                 info(f"{a['id']}  ({a['agent_type']})  {a['name']}")
 
-            agent_id = os.getenv("AUGENTIA_AGENT_ID") or "agent-claude-code-001"
+            agent_id = os.getenv("AUGENTIA_AGENT_ID")
+            if not agent_id:
+                tool_use = [a["id"] for a in agents if a["agent_type"] == "tool_use"]
+                if not tool_use:
+                    fail("no tool_use agent available to create a session with")
+                    return 1
+                agent_id = tool_use[0]
             info(f"Using agent: {agent_id}")
 
-            r = c.post("/api/v1/sessions", json={"agent_id": agent_id, "initial_prompt": "hello"})
+            r = c.post("/api/v1/sessions", json={"agent_id": agent_id})
             if r.status_code != 201:
                 fail(f"POST /api/v1/sessions -> {r.status_code}: {r.text}")
                 return 1

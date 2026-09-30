@@ -128,7 +128,6 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
               onChange={(e) => patch({ agent_type: e.target.value as AgentType })}
             >
               <option value="tool_use">Tool Use</option>
-              <option value="claude_code">Claude Code</option>
             </select>
           )}
         </label>

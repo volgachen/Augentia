@@ -1,4 +1,4 @@
-export type AgentType = "tool_use" | "claude_code";
+export type AgentType = "tool_use";
 
 export type SessionStatus =
   | "INITIALIZING"

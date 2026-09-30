@@ -8,7 +8,6 @@ import AgentDetailModal from "../components/AgentDetailModal";
 
 const AGENT_TYPE_LABEL: Record<string, string> = {
   tool_use: "Tool Use",
-  claude_code: "Claude Code",
 };
 
 export default function AgentRegistry() {

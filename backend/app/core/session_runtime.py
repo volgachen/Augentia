@@ -1,7 +1,6 @@
 import logging
 from typing import TYPE_CHECKING
 
-from app.adapters.claude_code import ClaudeCodeAdapter
 from app.adapters.cagent_adapter import CAgentAdapter
 from app.adapters.openai_tool_use import OpenAIToolUseAdapter
 from app.adapters.registry import AdapterRegistry
@@ -32,8 +31,6 @@ async def ensure_system_prompt_snapshot(
 
 def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | None = None) -> "BaseAgentAdapter":
     session_config = ensure_session_config(session.id, agent.config)
-    if agent.agent_type == AgentType.CLAUDE_CODE:
-        return ClaudeCodeAdapter(working_dir=session.working_dir, session_id=session.id)
     if agent.agent_type == AgentType.TOOL_USE:
         # config.engine selects the agent loop: "cagent" runs the CAgent
         # framework loop (persist-first history, paired tool results, turn-end

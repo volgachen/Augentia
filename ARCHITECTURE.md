@@ -2,7 +2,7 @@
 
 ## 一、项目愿景与目标
 
-本项目旨在构建一个高扩展性的 **Agent Gateway（智能体网关）**，为多种底层智能体架构提供统一入口，包括基础 Tool-use Agent、CLI 驱动的 Claude Code Agent 等。
+本项目旨在构建一个高扩展性的 **Agent Gateway（智能体网关）**，为多种底层智能体架构提供统一入口，当前以 Tool-use Agent（OpenAI 兼容工具调用循环）为核心。
 
 网关负责智能体模板管理、会话持久化、工具调用、人工确认、流式状态监控，以及前端控制台与底层 Agent Adapter 之间的通信协调。
 
@@ -37,7 +37,6 @@ backend/app/
 │   └── deps.py             # FastAPI dependency injection
 ├── adapters/
 │   ├── base.py             # BaseAgentAdapter interface + StreamEvent types
-│   ├── claude_code.py      # Claude Code CLI adapter (subprocess per turn)
 │   ├── openai_tool_use.py  # OpenAI tool-calling loop + confirm gate (legacy engine)
 │   ├── cagent_adapter.py   # CAgent-framework engine: event queue + confirm gate
 │   ├── cagent_agent.py     # Per-session dynamic BaseAgent subclass (hooks → adapter)
@@ -168,7 +167,6 @@ Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 
 不同类型的 Agent 通过 `BaseAgentAdapter` 接入系统，并由 `SessionRunner` 统一调度。
 
 - **Tool-use Agent**：通过 OpenAI 兼容接口进行工具调用循环，解析模型返回的 `tool_calls`，并在执行需要确认的工具前通过 `tool_confirm` 事件等待人工批准。`config.engine` 选择循环实现：`legacy`（适配器内自研循环，默认）或 `cagent`（基于 CAgent 框架的 `run_turn`：落库优先的历史、配对工具结果、协作式打断、轮末 turn_end/compression 记账；压缩阈值默认关闭，可通过 `config.compression_token_threshold` / `compression_turn_threshold` / `max_steps` 开启）。两种引擎读写同一套消息行格式，可在同一部署中共存与切换；`mark` 角色行为框架内部记账，消息接口对客户端过滤。
-- **Claude Code Agent**：通过 CLI 子进程方式接入，按会话工作目录运行，并将输出转化为统一的流式事件。
 
 ---
 

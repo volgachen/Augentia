@@ -44,8 +44,8 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
         self._api_key = api_key
         # Pass-through to filesystem tools so bash/read/write/edit run in the
         # session's working_dir instead of the backend process's cwd. The
-        # ClaudeCode adapter handles this naturally by spawning the CLI with
-        # cwd=working_dir; tool-use has to thread it into each tool itself.
+        # tools can't rely on the process cwd; the adapter threads the
+        # session's working dir into each tool explicitly.
         self._working_dir = working_dir
         self._tools: list[BaseTool] = []
         self._messages: list[dict] = []
