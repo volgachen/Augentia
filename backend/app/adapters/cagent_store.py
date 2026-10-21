@@ -218,12 +218,16 @@ class AugentiaStore:
             "tool_call_id": message["tool_call_id"],
             "content": message.get("content", ""),
         }
+        # CAgent keeps tool-result image references (and any host metadata)
+        # in metadata; the row content stays the OpenAI-native tool JSON.
+        metadata = dict(message.get("metadata") or {})
         row = await self._db.add_message(
-            session_id, MessageRole.TOOL, json.dumps(payload, ensure_ascii=False)
+            session_id, MessageRole.TOOL, json.dumps(payload, ensure_ascii=False),
+            metadata=metadata,
         )
         return self._record(
             row, role="tool", content=payload["content"],
-            tool_call_id=payload["tool_call_id"],
+            tool_call_id=payload["tool_call_id"], metadata=dict(row.metadata),
         )
 
     async def _save_mark(self, session_id: str, message: dict) -> dict:
@@ -366,6 +370,7 @@ class AugentiaStore:
                 tool_row, tool_content = available.pop(call_id)
                 records.append(self._record(
                     tool_row, role="tool", content=tool_content, tool_call_id=call_id,
+                    metadata=dict(tool_row.metadata or {}),
                 ))
             else:
                 # Cancelled turn: synthesize the missing paired result.

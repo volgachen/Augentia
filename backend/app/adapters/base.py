@@ -35,8 +35,9 @@ class StreamEvent(BaseModel):
     type: StreamEventType
     data: str
     message_id: str | None = None
-    # USER events only: image references attached to the user turn
-    # ([{"ref": "att:<sha256>", "detail"?: ...}]). None for every other event.
+    # Image references ([{"ref": "att:<sha256>", "detail"?: ...}]) on USER
+    # events (images attached to the turn) and TOOL_RESULT events (images the
+    # tool returned). None for every other event.
     images: list[dict] | None = None
 
 

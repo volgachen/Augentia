@@ -1,5 +1,35 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 import os
+
+
+@dataclass(frozen=True)
+class ToolImage:
+    """Raw image bytes produced by a tool (png/jpeg/webp/gif)."""
+
+    data: bytes
+    # Optional per-image detail hint for the model: "auto", "low" or "high".
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class ToolOutput:
+    """A tool result carrying images alongside its text.
+
+    Tools return a plain ``str`` normally; return ``ToolOutput`` when the
+    result includes images (screenshots, image files). The engine stores the
+    bytes in the attachment store and sends them to the model as part of the
+    tool result. Engines or agents that can't take images keep only the text,
+    with a note saying how many images were dropped.
+    """
+
+    text: str
+    images: list[ToolImage] = field(default_factory=list)
+
+    def text_without_images(self, reason: str) -> str:
+        if not self.images:
+            return self.text
+        return f"{self.text}\n[{len(self.images)} image(s) omitted: {reason}]"
 
 
 class BaseTool(ABC):
@@ -37,8 +67,8 @@ class BaseTool(ABC):
         """Return JSON Schema for the tool's parameters."""
 
     @abstractmethod
-    async def execute(self, **kwargs) -> str:
-        """Run the tool and return a string result."""
+    async def execute(self, **kwargs) -> "str | ToolOutput":
+        """Run the tool and return a string result, or ToolOutput when it carries images."""
 
     async def aclose(self) -> None:
         """Release any per-session resources (long-lived subprocesses, etc.).

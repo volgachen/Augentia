@@ -28,10 +28,12 @@ import re
 
 from openai import AsyncOpenAI
 
+from cagent import ToolResult, relocate_tool_images
+
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.adapters.cagent_agent import make_agent_class
 from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
-from app.adapters.tools.base import BaseTool  # noqa: F401 — type hint for tests
+from app.adapters.tools.base import BaseTool, ToolOutput  # noqa: F401 — BaseTool for type hints
 from app.adapters.tools.permissions import decide_tool_permission
 from app.adapters.tools.registry import load_tools
 from app.core import attachments
@@ -42,12 +44,28 @@ _TOOL_RESULT_MAX = 8000
 _EVENT_QUEUE_MAX = 256
 _FROM_SESSION_RE = re.compile(r"^\[from-session:([^\]]+)\]\s")
 _DEFAULT_MAX_STEPS = 50
+# Screenshots arrive every step in browser sessions; only the newest few are
+# worth re-sending each turn. config.tool_image_limit overrides (null = all).
+_DEFAULT_TOOL_IMAGE_LIMIT = 3
 
 
 def _truncate_result(result: str) -> str:
     if len(result) <= _TOOL_RESULT_MAX:
         return result
     return result[:_TOOL_RESULT_MAX] + "\n...[truncated]"
+
+
+def _relocating_tool_images(model):
+    """Wrap a model callable so tool images travel in a follow-up user message.
+
+    For endpoints that enforce the Chat Completions schema (text-only tool
+    messages); see cagent.relocate_tool_images.
+    """
+
+    async def relocated(*, messages, tools):
+        return await model(messages=relocate_tool_images(messages), tools=tools)
+
+    return relocated
 
 
 def _make_model(client: AsyncOpenAI, model_name: str):
@@ -162,6 +180,20 @@ class CAgentAdapter(BaseAgentAdapter):
         self._call_info: dict[str, dict] = {}
         self._context_tokens = 0
         self._alive = False
+        # Agent-level image settings, snapshotted at construction: reload_config
+        # only carries the per-session config file, which doesn't hold them.
+        cfg = self._config
+        self._vision = bool(cfg.get("vision"))
+        detail = cfg.get("image_detail")
+        self._image_detail = detail if detail in ("auto", "low", "high") else None
+        limit = cfg.get("tool_image_limit", _DEFAULT_TOOL_IMAGE_LIMIT)
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 0):
+            raise ValueError("config.tool_image_limit must be a non-negative integer or null")
+        self._tool_image_limit = limit
+        mode = cfg.get("tool_image_mode", "inline")
+        if mode not in ("inline", "user_message"):
+            raise ValueError("config.tool_image_mode must be 'inline' or 'user_message'")
+        self._tool_image_mode = mode
 
     # ---- properties used by the generated agent class ----
 
@@ -201,11 +233,15 @@ class CAgentAdapter(BaseAgentAdapter):
             max_steps=int(self._config.get("max_steps", _DEFAULT_MAX_STEPS)),
             compression_token_threshold=self._config.get("compression_token_threshold"),
             compression_turn_threshold=self._config.get("compression_turn_threshold"),
+            tool_image_limit=self._tool_image_limit,
         )
-        self._model = (
+        model = (
             self._model_callable
             if self._model_callable is not None
             else _make_model(self._client, self._model_name)
+        )
+        self._model = (
+            _relocating_tool_images(model) if self._tool_image_mode == "user_message" else model
         )
         self._alive = True
         logger.info(
@@ -348,6 +384,36 @@ class CAgentAdapter(BaseAgentAdapter):
         # File I/O off the event loop; CAgent caches the result per turn.
         return await asyncio.to_thread(attachments.data_url, image["ref"])
 
+    async def tool_output_result(self, output: ToolOutput):
+        """Turn a tool's ToolOutput into what the CAgent loop records.
+
+        Images are stored in the attachment store and passed on as references
+        (CAgent ToolResult.images). Without config.vision the model may not
+        accept images at all, so only the text goes through, with a note.
+        Images the store rejects (format/size) are dropped with a note too.
+        """
+        if not output.images:
+            return output.text
+        if not self._vision:
+            return output.text_without_images("this agent does not accept images (config.vision is off)")
+        refs: list[dict] = []
+        problems: list[str] = []
+        for image in output.images:
+            try:
+                stored = await asyncio.to_thread(attachments.save_attachment, image.data)
+            except attachments.AttachmentError as exc:
+                problems.append(str(exc))
+                continue
+            ref = {"ref": stored.ref}
+            detail = image.detail if image.detail in ("auto", "low", "high") else self._image_detail
+            if detail:
+                ref["detail"] = detail
+            refs.append(ref)
+        text = output.text
+        if problems:
+            text += f"\n[{len(problems)} image(s) dropped: {'; '.join(problems)}]"
+        return ToolResult(text, images=refs) if refs else text
+
     # ---- gating (called by the generated agent class) ----
 
     async def gate_tool_call(self, store, ctx, tool_call) -> str | None:
@@ -444,11 +510,11 @@ class CAgentAdapter(BaseAgentAdapter):
                     "call_id": call_id,
                     "name": info.get("name", "unknown"),
                     "result": _truncate_result(message.get("content", "")),
-                })
+                }, images=(message.get("metadata") or {}).get("images") or None)
 
-    async def _emit(self, event_type: StreamEventType, data) -> None:
+    async def _emit(self, event_type: StreamEventType, data, images: list[dict] | None = None) -> None:
         if not isinstance(data, str):
             data = json.dumps(data, ensure_ascii=False)
         # Bounded queue: the agent loop blocks until the consumer drains, which
         # keeps a long turn from outrunning the runner's event relay.
-        await self._events.put(StreamEvent(type=event_type, data=data))
+        await self._events.put(StreamEvent(type=event_type, data=data, images=images))

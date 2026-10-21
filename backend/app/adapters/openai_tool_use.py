@@ -8,7 +8,7 @@ from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.models.domain import Message, MessageRole
 import app.adapters.tools  # noqa: F401 — triggers tool registration
 from app.adapters.tools.registry import load_tools
-from app.adapters.tools.base import BaseTool
+from app.adapters.tools.base import BaseTool, ToolOutput
 from app.adapters.tools.permissions import decide_tool_permission
 
 logger = logging.getLogger("augentia.adapter.tool_use")
@@ -363,6 +363,9 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
                     else:
                         try:
                             result = await tool.execute(**fn_args)
+                            if isinstance(result, ToolOutput):
+                                result = result.text_without_images(
+                                    "the legacy engine does not support tool images")
                             logger.debug("tool %s result len=%d", fn_name, len(result))
                         except Exception as e:
                             logger.exception("tool %s raised", fn_name)

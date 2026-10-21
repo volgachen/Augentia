@@ -14,15 +14,23 @@ from __future__ import annotations
 
 from cagent import BaseAgent, Tool
 
-from app.adapters.tools.base import BaseTool
+from app.adapters.tools.base import BaseTool, ToolOutput
 
 
-def _wrap_tool(base_tool: BaseTool) -> Tool:
-    """Adapt a registered BaseTool to CAgent's Tool (handler receives store/ctx/agent_cls)."""
+def _wrap_tool(base_tool: BaseTool, adapter) -> Tool:
+    """Adapt a registered BaseTool to CAgent's Tool (handler receives store/ctx/agent_cls).
+
+    A ToolOutput result (text + image bytes) is converted by the adapter into
+    a CAgent ToolResult with stored image references, or into plain text when
+    the agent can't take images.
+    """
 
     async def handler(*, store=None, ctx=None, agent_cls=None, **kwargs):
         # The framework's injected dependencies are not tool parameters.
-        return await base_tool.execute(**kwargs)
+        result = await base_tool.execute(**kwargs)
+        if isinstance(result, ToolOutput):
+            return await adapter.tool_output_result(result)
+        return result
 
     return Tool(
         handler,
@@ -39,6 +47,7 @@ def make_agent_class(
     max_steps: int = 50,
     compression_token_threshold: int | None = None,
     compression_turn_threshold: int | None = None,
+    tool_image_limit: int | None = None,
 ) -> type[BaseAgent]:
     """Build the per-session BaseAgent subclass bound to one adapter instance."""
 
@@ -50,10 +59,12 @@ def make_agent_class(
         # agent template config flips it on without code changes.
         COMPRESSION_TOKEN_THRESHOLD = compression_token_threshold
         COMPRESSION_TURN_THRESHOLD = compression_turn_threshold
+        # Only the newest N tool-result images are sent to the model.
+        TOOL_IMAGE_LIMIT = tool_image_limit
 
         @classmethod
         def get_tools(cls, ctx):
-            return {tool.name: _wrap_tool(tool) for tool in adapter.tools}
+            return {tool.name: _wrap_tool(tool, adapter) for tool in adapter.tools}
 
         @classmethod
         async def approve_tool_call(cls, store, ctx, tool_call, tool):

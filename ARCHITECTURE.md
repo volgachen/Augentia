@@ -172,7 +172,14 @@ Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 
 - 图片字节存放在 `AUGENTIA_HOME/attachments/`，按 sha256 命名（相同图片自动去重）；格式按文件头判定，仅接受 png/jpeg/webp/gif，大小上限默认 10MB（`AUGENTIA_ATTACHMENT_MAX_BYTES`）。
 - 消息历史只存引用：user 行的 `metadata.images = [{"ref": "att:<sha256>", "detail"?}]`，文本 `content` 保持纯文本。每次调用模型前，CAgent 引擎通过 `resolve_image` 把引用解析为 data URL（同一轮内缓存）；历史中的图片在后续轮次仍会发送，直到压缩边界之后。
 - 只有 `config.engine` 为 `cagent` 且 `config.vision` 为 true 的 agent 接受图片；其余情况 HTTP 返回 400、WS 返回 `error` 帧，且不会开始新的一轮。可选 `config.image_detail`（`auto`/`low`/`high`）作为默认 detail。
-- 编辑重发（retry）默认保留原消息的图片；分叉（diverge）复制图片引用。第一版不支持工具结果中的图片和跨会话传图。
+- 编辑重发（retry）默认保留原消息的图片；分叉（diverge）复制图片引用。第一版不支持跨会话传图。
+
+#### 工具返回图片
+
+- 工具 `execute` 返回普通 `str`，或在结果带图时返回 `ToolOutput(text, images=[ToolImage(bytes, detail?)])`（`app/adapters/tools/base.py`）。目前 `read` 读到 png/jpeg/webp/gif（按文件头判断）时返回图片。
+- CAgent 引擎把图片字节存入附件存储，以 CAgent `ToolResult(images=[...])` 交给框架：tool 行 `metadata.images` 只存引用，`TOOL_RESULT` 事件带 `images` 字段。发给模型时图片在 tool 消息内（`[文本, image_url]`）。
+- agent 配置：`vision` 关闭时工具图片被丢弃并在文本中注明；`tool_image_limit`（默认 3，`null` 为全部）只把最近 N 张工具图片发给模型，更早的替换为文字说明（存储不删）；`tool_image_mode` 为 `inline`（默认，图片放在 tool 消息内，Chat Completions 的公开 schema 只允许文本，但很多网关接受）或 `user_message`（图片移到这批工具结果之后的一条 user 消息，适用于严格按 schema 校验的端点）。
+- legacy 引擎只保留文本并注明图片被省略。浏览器截图（node_repl 的 `emitImage`）尚未接入。
 
 ### 4. Agent 适配器模式
 

@@ -110,7 +110,12 @@ function messageToEvent(m: Message): StreamEvent {
     case "tool_call":
       return { type: "tool_call", data: m.content, message_id: m.id };
     case "tool":
-      return { type: "tool_result", data: toolMessageToEventData(m.content), message_id: m.id };
+      return {
+        type: "tool_result",
+        data: toolMessageToEventData(m.content),
+        message_id: m.id,
+        images: m.metadata?.images?.length ? m.metadata.images : undefined,
+      };
     case "system":
       return { type: "status", data: m.content, message_id: m.id };
     case "agent":

@@ -85,7 +85,7 @@ export interface Message {
   role: MessageRole;
   content: string;
   from_session_id: string | null;
-  // User rows may carry { images: ImageRef[] }.
+  // User and tool rows may carry { images: ImageRef[] }.
   metadata?: { images?: ImageRef[]; [key: string]: unknown };
   created_at: string;
   deleted_at: string | null;
@@ -95,7 +95,8 @@ export interface StreamEvent {
   type: StreamEventType;
   data: string;
   message_id?: string;
-  // Only on "user" events: images attached to that turn.
+  // On "user" events: images attached to that turn; on "tool_result" events:
+  // images the tool returned.
   images?: ImageRef[] | null;
 }
 

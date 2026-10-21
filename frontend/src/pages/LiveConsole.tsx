@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { useStore } from "../store/sessions";
 import { api } from "../api/client";
 import { agentAcceptsImages } from "../api/types";
-import type { AgentTemplate, StreamEvent } from "../api/types";
+import type { AgentTemplate, ImageRef, StreamEvent } from "../api/types";
 import TaskListPanel from "../components/TaskListPanel";
 import SubAgentListPanel from "../components/SubAgentListPanel";
 import SessionListPanel from "../components/SessionListPanel";
@@ -49,6 +49,8 @@ interface ToolCallView {
   name: string;
   args: unknown;
   result?: unknown;
+  // Images the tool returned (e.g. read on an image file).
+  resultImages?: ImageRef[];
 }
 
 type ConsoleItem = StreamEvent | ToolCallView;
@@ -101,9 +103,18 @@ function toOneLine(s: string, max = 200): string {
 function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
   const items: ConsoleItem[] = [];
   const toolCallsById = new Map<string, ToolCallView>();
-  const attachResult = (callId: string | undefined, name: string | undefined, result: unknown): boolean => {
+  const attachResult = (
+    callId: string | undefined,
+    name: string | undefined,
+    result: unknown,
+    images: ImageRef[] | undefined,
+  ): boolean => {
+    const set = (item: ToolCallView) => {
+      item.result = result;
+      if (images?.length) item.resultImages = images;
+    };
     if (callId && toolCallsById.has(callId)) {
-      toolCallsById.get(callId)!.result = result;
+      set(toolCallsById.get(callId)!);
       return true;
     }
 
@@ -114,7 +125,7 @@ function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
       (item) => item.result === undefined && (!name || item.name === name),
     );
     if (fallback) {
-      fallback.result = result;
+      set(fallback);
       return true;
     }
 
@@ -175,6 +186,7 @@ function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
         typeof obj?.call_id === "string" ? obj.call_id : undefined,
         typeof obj?.name === "string" ? obj.name : undefined,
         obj?.result ?? obj?.content ?? event.data,
+        event.images ?? undefined,
       );
       if (!attached) {
         items.push(event);
@@ -222,6 +234,11 @@ function ToolCallLine({
         <pre className="mt-1 ml-4 px-2 py-1.5 bg-gray-950/60 border border-gray-800 rounded whitespace-pre-wrap break-all text-xs text-amber-200 overflow-auto max-h-72">
           {resultToText(item.result)}
         </pre>
+      )}
+      {showToolResults && item.resultImages && (
+        <div className="ml-4">
+          <ImageThumbs images={item.resultImages} />
+        </div>
       )}
     </div>
   );
