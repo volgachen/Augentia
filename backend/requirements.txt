@@ -9,4 +9,4 @@ aiomysql
 markdownify
 # CAgent agent-loop framework (engine="cagent"). Local-first setup: editable
 # install from the sibling checkout; adjust the path to your CAgent clone.
-cagent @ git+ssh://git@github.com/volgachen/CAgent.git@2940b00
+cagent @ git+ssh://git@github.com/volgachen/CAgent.git@dde4d13
