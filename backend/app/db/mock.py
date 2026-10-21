@@ -148,6 +148,7 @@ class MockMemoryDatabase(IAgentDatabase):
         content: str,
         *,
         from_session_id: str | None = None,
+        metadata: dict | None = None,
     ) -> Message:
         session = await self.get_session(session_id)  # validate session exists
         message = Message(
@@ -155,6 +156,7 @@ class MockMemoryDatabase(IAgentDatabase):
             role=role,
             content=content,
             from_session_id=from_session_id,
+            metadata=dict(metadata or {}),
         )
         self._messages[session_id].append(message)
         session.last_message_at = message.created_at
@@ -194,6 +196,7 @@ class MockMemoryDatabase(IAgentDatabase):
                 role=original.role,
                 content=original.content,
                 from_session_id=original.from_session_id,
+                metadata=dict(original.metadata),
             )
             message.created_at = original.created_at
             self._messages[target_session_id].append(message)

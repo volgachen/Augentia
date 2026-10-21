@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useStore } from "../store/sessions";
-import type { StreamEvent } from "../api/types";
+import { api } from "../api/client";
+import { agentAcceptsImages } from "../api/types";
+import type { AgentTemplate, StreamEvent } from "../api/types";
 import TaskListPanel from "../components/TaskListPanel";
 import SubAgentListPanel from "../components/SubAgentListPanel";
 import SessionListPanel from "../components/SessionListPanel";
@@ -9,6 +11,8 @@ import ToolConfirmPanel from "../components/ToolConfirmPanel";
 import ToolPermissionsPanel from "../components/ToolPermissionsPanel";
 import SystemPromptPanel from "../components/SystemPromptPanel";
 import ToolPreview from "../components/ToolPreview";
+import { AttachmentTray, ImageThumbs } from "../components/ImageAttachments";
+import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAttachments";
 import { getToolSummary } from "../config/toolDisplay";
 
 const EVENT_STYLE: Record<string, string> = {
@@ -257,6 +261,7 @@ function EventLine({
             : "";
   const body =
     typeof event.data === "string" ? event.data : JSON.stringify(event.data);
+  const hasImages = event.type === "user" && !!event.images?.length;
   if (event.type === "user" && editing) {
     return (
       <div className="flex flex-col gap-2 rounded-lg border border-indigo-700 bg-indigo-950/30 p-2">
@@ -268,6 +273,12 @@ function EventLine({
           disabled={generating}
           autoFocus
         />
+        {hasImages && (
+          <div className="flex flex-col gap-1">
+            <ImageThumbs images={event.images} />
+            <span className="text-xs text-indigo-400/70">Images are kept when you rewrite.</span>
+          </div>
+        )}
         <div className="flex justify-end gap-2">
           <button
             type="button"
@@ -279,7 +290,7 @@ function EventLine({
           <button
             type="button"
             onClick={onSubmitEdit}
-            disabled={!editValue.trim() || generating || !event.message_id}
+            disabled={(!editValue.trim() && !hasImages) || generating || !event.message_id}
             className="px-3 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs text-white"
           >
             Rewrite from here
@@ -306,6 +317,7 @@ function EventLine({
     >
       {prefix}
       {event.type === "tool_result" ? toOneLine(body) : body}
+      {hasImages && <ImageThumbs images={event.images} />}
     </div>
   );
 }
@@ -428,6 +440,29 @@ export default function LiveConsole() {
     itemRefs.current = itemRefs.current.slice(0, entry?.events.length ?? 0);
   }, [entry?.events.length]);
 
+  // Image input: only offered when the session's agent accepts images
+  // (cagent engine + config.vision); the backend enforces the same rule.
+  // Draft images and the hint are scoped to the session they were added in.
+  const attachments = useImageAttachments(sessionId);
+  const [agent, setAgent] = useState<AgentTemplate | null>(null);
+  const [attachHint, setAttachHint] = useState<{ scope: string; text: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const agentId = entry?.session.agent_id;
+  useEffect(() => {
+    if (!agentId) return;
+    let cancelled = false;
+    api.agents
+      .get(agentId)
+      .then((a) => !cancelled && setAgent(a))
+      .catch(() => !cancelled && setAgent(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
+  // A previous session's agent must not decide the current composer.
+  const canAttachImages = agent?.id === agentId && agentAcceptsImages(agent);
+  const hintText = attachHint && attachHint.scope === sessionId ? attachHint.text : null;
+
   if (!entry) {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-3 text-gray-400">
@@ -468,16 +503,53 @@ export default function LiveConsole() {
     if (!show) setShowToolResults(false);
   };
 
+  const readyImages = canAttachImages ? attachments.readyImages() : [];
+
   const handleSend = () => {
     const msg = input.trim();
-    if (!msg || !sessionId || generating) return;
-    sendMessage(sessionId, msg);
+    if ((!msg && readyImages.length === 0) || !sessionId || generating || attachments.uploading) return;
+    sendMessage(sessionId, msg, readyImages);
     setInput("");
+    attachments.clear();
+    setAttachHint(null);
+  };
+
+  const handleFiles = (files: File[]): boolean => {
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (images.length === 0 || !sessionId) return false;
+    if (!canAttachImages) {
+      setAttachHint({
+        scope: sessionId,
+        text: "This agent doesn't accept images — enable “Accept image input (vision)” in the agent settings.",
+      });
+      return true;
+    }
+    setAttachHint(null);
+    attachments.addFiles(images);
+    return true;
+  };
+
+  const handlePaste = (e: React.ClipboardEvent) => {
+    // Only swallow the paste when it carries images; plain text pastes as usual.
+    if (handleFiles(Array.from(e.clipboardData.files))) e.preventDefault();
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer.types).includes("Files")) e.preventDefault();
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    if (e.dataTransfer.files.length === 0) return;
+    e.preventDefault();
+    handleFiles(Array.from(e.dataTransfer.files));
   };
 
   const handleRetrySend = async () => {
     const msg = editingContent.trim();
-    if (!msg || !sessionId || !editingMessageId || generating) return;
+    const editingHasImages = !!events.find(
+      (e) => e.type === "user" && e.message_id === editingMessageId,
+    )?.images?.length;
+    if ((!msg && !editingHasImages) || !sessionId || !editingMessageId || generating) return;
     await retryMessage(sessionId, editingMessageId, msg);
     setEditingMessageId(null);
     setEditingContent("");
@@ -705,38 +777,70 @@ export default function LiveConsole() {
       )}
 
       {/* Input */}
-      <div className="flex gap-2">
-        <textarea
-          className="flex-1 bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 resize-none focus:outline-none focus:border-indigo-500 disabled:opacity-50"
-          rows={2}
-          placeholder={
-            generating
-              ? "Agent is generating… wait for it to finish"
-              : "Send a message… (Enter to send, Shift+Enter for newline)"
-          }
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          disabled={generating}
-        />
-        {generating ? (
-          <button
-            type="button"
-            onClick={() => sessionId && cancelGeneration(sessionId)}
-            className="px-4 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white text-sm font-medium transition-colors self-end"
-          >
-            Stop
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!input.trim()}
-            className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium transition-colors self-end"
-          >
-            Send
-          </button>
-        )}
+      <div className="flex flex-col gap-2" onDragOver={handleDragOver} onDrop={handleDrop}>
+        <AttachmentTray items={attachments.items} onRemove={attachments.remove} />
+        {hintText && <div className="text-xs text-amber-400">{hintText}</div>}
+        <div className="flex gap-2">
+          {canAttachImages && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ACCEPTED_IMAGE_TYPES}
+                multiple
+                hidden
+                onChange={(e) => {
+                  handleFiles(Array.from(e.target.files ?? []));
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={generating}
+                title="Attach images (you can also paste or drop them)"
+                className="px-3 py-2 rounded-lg bg-gray-800 border border-gray-600 hover:border-indigo-500 disabled:opacity-40 text-gray-300 text-sm self-end"
+              >
+                Image
+              </button>
+            </>
+          )}
+          <textarea
+            className="flex-1 bg-gray-800 border border-gray-600 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 resize-none focus:outline-none focus:border-indigo-500 disabled:opacity-50"
+            rows={2}
+            placeholder={
+              generating
+                ? "Agent is generating… wait for it to finish"
+                : canAttachImages
+                  ? "Send a message… (Enter to send, Shift+Enter for newline; paste or drop images)"
+                  : "Send a message… (Enter to send, Shift+Enter for newline)"
+            }
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            onPaste={handlePaste}
+            disabled={generating}
+          />
+          {generating ? (
+            <button
+              type="button"
+              onClick={() => sessionId && cancelGeneration(sessionId)}
+              className="px-4 py-2 rounded-lg bg-red-700 hover:bg-red-600 text-white text-sm font-medium transition-colors self-end"
+            >
+              Stop
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={(!input.trim() && readyImages.length === 0) || attachments.uploading}
+              title={attachments.uploading ? "Waiting for images to finish uploading" : undefined}
+              className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium transition-colors self-end"
+            >
+              Send
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

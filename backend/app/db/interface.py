@@ -81,6 +81,7 @@ class IAgentDatabase(ABC):
         content: str,
         *,
         from_session_id: str | None = None,
+        metadata: dict | None = None,
     ) -> Message: pass
 
     @abstractmethod

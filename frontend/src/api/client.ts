@@ -39,6 +39,42 @@ export interface DirEntry {
   is_dir: boolean;
 }
 
+export interface UploadedAttachment {
+  id: string;
+  ref: string;
+  mime: string;
+  size: number;
+}
+
+// URL for displaying a stored image ("att:<sha256>" -> download endpoint).
+export function attachmentUrl(ref: string): string {
+  const id = ref.startsWith("att:") ? ref.slice(4) : ref;
+  return `${BASE}/attachments/${encodeURIComponent(id)}`;
+}
+
+async function uploadAttachment(file: Blob): Promise<UploadedAttachment> {
+  // Raw bytes body (not JSON / multipart); the backend sniffs the format.
+  const res = await fetch(`${BASE}/attachments`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (res.status === 401) {
+    window.dispatchEvent(new Event("augentia:unauthorized"));
+  }
+  if (!res.ok) {
+    let detail = await res.text();
+    try {
+      detail = JSON.parse(detail).detail ?? detail;
+    } catch {
+      // keep raw text
+    }
+    throw new Error(detail);
+  }
+  return res.json() as Promise<UploadedAttachment>;
+}
+
 export interface BrowseResponse {
   path: string;
   parent: string | null;
@@ -117,6 +153,9 @@ export const api = {
   },
   tools: {
     list: () => request<string[]>("/tools"),
+  },
+  attachments: {
+    upload: uploadAttachment,
   },
   sessions: {
     create: (

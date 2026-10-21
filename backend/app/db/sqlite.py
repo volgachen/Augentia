@@ -78,8 +78,13 @@ def _message(row: sqlite3.Row) -> Message:
     return Message(
         id=row["id"], session_id=row["session_id"], role=MessageRole(row["role"]),
         content=row["content"], from_session_id=row["from_session_id"],
+        metadata=_json(row["metadata"], {}) or {},
         created_at=_dt(row["created_at"]), deleted_at=_dt(row["deleted_at"]),
     )
+
+
+def _metadata_json(metadata: dict) -> str | None:
+    return json.dumps(metadata, ensure_ascii=False) if metadata else None
 
 
 def _plugin_instance(row: sqlite3.Row) -> PluginInstance:
@@ -187,6 +192,7 @@ class SqliteDatabase(IAgentDatabase):
                 role TEXT NOT NULL,
                 content TEXT NOT NULL,
                 from_session_id TEXT DEFAULT NULL,
+                metadata TEXT DEFAULT NULL,
                 created_at TEXT NOT NULL,
                 deleted_at TEXT DEFAULT NULL,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
@@ -295,6 +301,14 @@ class SqliteDatabase(IAgentDatabase):
             "CREATE INDEX IF NOT EXISTS idx_plugin_logs_session_ts "
             "ON plugin_logs (session_id, ts)"
         )
+
+        message_columns = {
+            row["name"] for row in self._conn.execute("PRAGMA table_info(messages)")
+        }
+        if "metadata" not in message_columns:
+            self._conn.execute(
+                "ALTER TABLE messages ADD COLUMN metadata TEXT DEFAULT NULL"
+            )
 
     def _seed_agents(self) -> None:
         now = datetime.now(timezone.utc)
@@ -431,13 +445,17 @@ class SqliteDatabase(IAgentDatabase):
 
     async def add_message(self, session_id: str, role: MessageRole, content: str, **kwargs: Any) -> Message:
         await self.get_session(session_id)
-        message = Message(session_id=session_id, role=role, content=content, from_session_id=kwargs.get("from_session_id"))
+        message = Message(
+            session_id=session_id, role=role, content=content,
+            from_session_id=kwargs.get("from_session_id"),
+            metadata=dict(kwargs.get("metadata") or {}),
+        )
         self._execute(
             """INSERT INTO messages
-               (id, session_id, role, content, from_session_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               (id, session_id, role, content, from_session_id, metadata, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
             (message.id, message.session_id, message.role.value, message.content,
-             message.from_session_id, _iso(message.created_at)),
+             message.from_session_id, _metadata_json(message.metadata), _iso(message.created_at)),
         )
         self._execute("UPDATE sessions SET last_message_at = ? WHERE id = ?", (_iso(message.created_at), session_id))
         await get_plugin_event_bus().publish(PluginEvent(
@@ -478,14 +496,16 @@ class SqliteDatabase(IAgentDatabase):
                     role=original.role,
                     content=original.content,
                     from_session_id=original.from_session_id,
+                    metadata=dict(original.metadata),
                     created_at=original.created_at,
                 )
                 self._execute(
                     """INSERT INTO messages
-                       (id, session_id, role, content, from_session_id, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                       (id, session_id, role, content, from_session_id, metadata, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (message.id, message.session_id, message.role.value, message.content,
-                     message.from_session_id, _iso(message.created_at)),
+                     message.from_session_id, _metadata_json(message.metadata),
+                     _iso(message.created_at)),
                 )
                 cloned.append(message)
             self._execute(

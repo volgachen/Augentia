@@ -28,20 +28,18 @@ PROMPT = (
 
 async def run_engine(c: httpx.AsyncClient, engine: str) -> bool:
     wd = Path(tempfile.mkdtemp(prefix=f"augentia-{engine}-"))
-    if engine == "cagent":
-        r = await c.post(f"{BASE}/agents", json={
-            "name": f"ws-flow-{engine}",
-            "description": "cagent engine WS flow test agent",
-            "agent_type": "tool_use",
-            "system_prompt": "You are a test agent. Use the write tool when asked.",
-            "tool_names": ["write", "read"],
-            "config": {"engine": "cagent"},
-        })
-        r.raise_for_status()
-        agent_id = r.json()["id"]
-    else:
-        agents = (await c.get(f"{BASE}/agents")).json()
-        agent_id = next(a["id"] for a in agents if a["agent_type"] == "tool_use")
+    # Explicit engine per run: the default is cagent, so the legacy run must
+    # opt in.
+    r = await c.post(f"{BASE}/agents", json={
+        "name": f"ws-flow-{engine}",
+        "description": f"{engine} engine WS flow test agent",
+        "agent_type": "tool_use",
+        "system_prompt": "You are a test agent. Use the write tool when asked.",
+        "tool_names": ["write", "read"],
+        "config": {"engine": engine},
+    })
+    r.raise_for_status()
+    agent_id = r.json()["id"]
 
     r = await c.post(f"{BASE}/sessions", json={"agent_id": agent_id, "source_dir": str(wd)})
     r.raise_for_status()

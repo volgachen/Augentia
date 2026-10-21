@@ -46,8 +46,8 @@ def make_agent_class(
         NAME = name
         SYSTEM_PROMPT = system_prompt or "You are a helpful assistant."
         MAX_STEPS = max_steps
-        # Compression stays off by default in PR1 (thresholds None); enabling it
-        # per agent template config flips it on without code changes.
+        # Compression stays off by default (thresholds None); enabling it per
+        # agent template config flips it on without code changes.
         COMPRESSION_TOKEN_THRESHOLD = compression_token_threshold
         COMPRESSION_TURN_THRESHOLD = compression_turn_threshold
 
@@ -58,6 +58,12 @@ def make_agent_class(
         @classmethod
         async def approve_tool_call(cls, store, ctx, tool_call, tool):
             return await adapter.gate_tool_call(store, ctx, tool_call)
+
+        @classmethod
+        async def resolve_image(cls, store, ctx, image):
+            # Stored references are att:<sha256>; bytes come from the local
+            # attachment store and reach the model as a data URL.
+            return await adapter.resolve_image(image)
 
     SessionAgent.__name__ = f"SessionAgent[{name}]"
     SessionAgent.__qualname__ = SessionAgent.__name__

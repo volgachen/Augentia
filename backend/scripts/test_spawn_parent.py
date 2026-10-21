@@ -8,6 +8,8 @@ from pathlib import Path
 
 import _common  # noqa: F401 — sys.path + .env
 
+_common.use_isolated_state("augentia-spawn-")
+
 from fastapi.testclient import TestClient
 
 from app.main import app

@@ -21,7 +21,7 @@ from app.plugins.service import (
     register_plugin_event_delivery,
     stop_running_plugin_instances,
 )
-from app.routers import agents, auth, sessions, fs, plugins, tools, tasks
+from app.routers import agents, attachments, auth, sessions, fs, plugins, tools, tasks
 
 
 @asynccontextmanager
@@ -76,6 +76,7 @@ app.include_router(fs.router, prefix="/api/v1")
 app.include_router(plugins.router, prefix="/api/v1")
 app.include_router(tools.router, prefix="/api/v1")
 app.include_router(tasks.router, prefix="/api/v1")
+app.include_router(attachments.router, prefix="/api/v1")
 
 
 @app.get("/health")

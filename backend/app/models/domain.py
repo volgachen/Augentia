@@ -94,6 +94,11 @@ class Message(BaseModel):
     role: MessageRole
     content: str
     from_session_id: Optional[str] = None
+    # Structured extras that don't belong in the text content. Currently only
+    # user rows use it: {"images": [{"ref": "att:<sha256>", "detail"?: ...}]},
+    # image references attached to the turn (bytes live in the attachment
+    # store). Empty for every other row.
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     deleted_at: Optional[datetime] = None
 

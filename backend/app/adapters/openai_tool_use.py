@@ -93,7 +93,11 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
             self._model, base_url, [t.name for t in self._tools],
         )
 
-    async def send(self, message: str) -> None:
+    async def send(self, message: str, images: list[dict] | None = None) -> None:
+        if images:
+            # Routers reject images for legacy-engine agents before they get
+            # here; this guards any other caller.
+            raise ValueError("the legacy engine does not support image input")
         self._pending = message
 
     async def restore_history(self, messages: list[Message]) -> None:

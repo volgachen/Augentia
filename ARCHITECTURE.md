@@ -50,6 +50,7 @@ backend/app/
     ├── tools.py
     ├── tasks.py
     ├── fs.py
+    ├── attachments.py      # Image upload/download (raw bytes, sha256-addressed)
     └── plugins.py
 
 frontend/src/
@@ -145,16 +146,20 @@ class IAgentDatabase(ABC):
 | GET | `/api/v1/fs/browse` | Browse directories for pickers |
 | GET | `/api/v1/fs/templates` | Browse template directories |
 | GET | `/api/v1/fs/home` | Get home, project root and templates root |
+| POST | `/api/v1/attachments` | Upload an image (raw bytes body); returns `{id, ref, mime, size}` |
+| GET | `/api/v1/attachments/{id}` | Download a stored image |
 
 ### 2. WebSocket 事件
 
-Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 和 `data` 字段，常见类型包括：`text`、`tool_call`、`tool_confirm`、`tool_result`、`status`、`error`、`done`、`user`、`session_state`。
+Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 和 `data` 字段，常见类型包括：`text`、`tool_call`、`tool_confirm`、`tool_result`、`status`、`error`、`done`、`user`、`session_state`。`user` 事件可额外带 `images` 字段（本轮附带的图片引用）。
 
 客户端发送到 Session WebSocket 的消息分为两类：
 
 ```json
-{ "content": "user message" }
+{ "content": "user message", "images": [{ "ref": "att:<sha256>", "detail": "low" }] }
 ```
+
+`images` 可选；有图时 `content` 可为空。
 
 或用于确认工具调用：
 
@@ -162,11 +167,18 @@ Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 
 { "decision": "approve", "call_id": "...", "message": "optional supplementary message" }
 ```
 
-### 3. Agent 适配器模式
+### 3. 图片输入
+
+- 图片字节存放在 `AUGENTIA_HOME/attachments/`，按 sha256 命名（相同图片自动去重）；格式按文件头判定，仅接受 png/jpeg/webp/gif，大小上限默认 10MB（`AUGENTIA_ATTACHMENT_MAX_BYTES`）。
+- 消息历史只存引用：user 行的 `metadata.images = [{"ref": "att:<sha256>", "detail"?}]`，文本 `content` 保持纯文本。每次调用模型前，CAgent 引擎通过 `resolve_image` 把引用解析为 data URL（同一轮内缓存）；历史中的图片在后续轮次仍会发送，直到压缩边界之后。
+- 只有 `config.engine` 为 `cagent` 且 `config.vision` 为 true 的 agent 接受图片；其余情况 HTTP 返回 400、WS 返回 `error` 帧，且不会开始新的一轮。可选 `config.image_detail`（`auto`/`low`/`high`）作为默认 detail。
+- 编辑重发（retry）默认保留原消息的图片；分叉（diverge）复制图片引用。第一版不支持工具结果中的图片和跨会话传图。
+
+### 4. Agent 适配器模式
 
 不同类型的 Agent 通过 `BaseAgentAdapter` 接入系统，并由 `SessionRunner` 统一调度。
 
-- **Tool-use Agent**：通过 OpenAI 兼容接口进行工具调用循环，解析模型返回的 `tool_calls`，并在执行需要确认的工具前通过 `tool_confirm` 事件等待人工批准。`config.engine` 选择循环实现：`legacy`（适配器内自研循环，默认）或 `cagent`（基于 CAgent 框架的 `run_turn`：落库优先的历史、配对工具结果、协作式打断、轮末 turn_end/compression 记账；压缩阈值默认关闭，可通过 `config.compression_token_threshold` / `compression_turn_threshold` / `max_steps` 开启）。两种引擎读写同一套消息行格式，可在同一部署中共存与切换；`mark` 角色行为框架内部记账，消息接口对客户端过滤。
+- **Tool-use Agent**：通过 OpenAI 兼容接口进行工具调用循环，解析模型返回的 `tool_calls`，并在执行需要确认的工具前通过 `tool_confirm` 事件等待人工批准。`config.engine` 选择循环实现：`cagent`（默认，基于 CAgent 框架的 `run_turn`：落库优先的历史、配对工具结果、协作式打断、轮末 turn_end/compression 记账、图片输入；压缩阈值默认关闭，可通过 `config.compression_token_threshold` / `compression_turn_threshold` / `max_steps` 开启）或 `legacy`（适配器内自研循环，不支持图片）。两种引擎读写同一套消息行格式，可在同一部署中共存与切换；`mark` 角色行为框架内部记账，消息接口对客户端过滤。
 
 ---
 

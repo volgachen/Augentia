@@ -35,6 +35,9 @@ class StreamEvent(BaseModel):
     type: StreamEventType
     data: str
     message_id: str | None = None
+    # USER events only: image references attached to the user turn
+    # ([{"ref": "att:<sha256>", "detail"?: ...}]). None for every other event.
+    images: list[dict] | None = None
 
 
 class BaseAgentAdapter(ABC):
@@ -51,8 +54,8 @@ class BaseAgentAdapter(ABC):
         """启动 Agent，建立底层进程或连接。"""
 
     @abstractmethod
-    async def send(self, message: str) -> None:
-        """向 Agent 发送用户消息。"""
+    async def send(self, message: str, images: list[dict] | None = None) -> None:
+        """向 Agent 发送用户消息；images 为本轮附带的图片引用（仅支持图片的引擎接受）。"""
 
     @abstractmethod
     async def stream(self) -> AsyncGenerator[StreamEvent, None]:

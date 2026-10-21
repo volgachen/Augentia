@@ -18,6 +18,9 @@ _SUBSCRIBER_QUEUE_MAX = 256
 class _InboxItem:
     content: str
     from_session_id: str | None = None
+    # Validated image references for this turn ([{"ref", "detail"?}]); routers
+    # check engine/vision support before anything reaches the inbox.
+    images: list[dict] | None = None
 
 
 class SessionRunner:
@@ -79,8 +82,15 @@ class SessionRunner:
         except Exception:
             logger.exception("adapter.stop raised session=%s", self._session_id)
 
-    async def submit(self, content: str, from_session_id: str | None = None) -> None:
-        await self._inbox.put(_InboxItem(content=content, from_session_id=from_session_id))
+    async def submit(
+        self,
+        content: str,
+        from_session_id: str | None = None,
+        images: list[dict] | None = None,
+    ) -> None:
+        await self._inbox.put(_InboxItem(
+            content=content, from_session_id=from_session_id, images=images or None,
+        ))
 
     async def cancel_turn(self) -> None:
         turn_task = self._turn_task
@@ -197,18 +207,25 @@ class SessionRunner:
                 MessageRole.USER,
                 item.content,
                 from_session_id=item.from_session_id,
+                metadata={"images": item.images} if item.images else None,
             )
             self._broadcast(StreamEvent(
-                type=StreamEventType.USER, data=delivered, message_id=user_message.id
+                type=StreamEventType.USER, data=delivered,
+                message_id=user_message.id, images=item.images,
             ))
         else:
-            self._broadcast(StreamEvent(type=StreamEventType.USER, data=delivered))
+            self._broadcast(StreamEvent(
+                type=StreamEventType.USER, data=delivered, images=item.images,
+            ))
 
         agent_buf: list[str] = []
         saw_native_messages = False
         errored = False
         awaiting_confirm = False
-        await self._adapter.send(delivered)
+        if item.images:
+            await self._adapter.send(delivered, images=item.images)
+        else:
+            await self._adapter.send(delivered)
         async for event in self._adapter.stream():
             should_broadcast = True
             # Reflect a pending confirm in the session status so the

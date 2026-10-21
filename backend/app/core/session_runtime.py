@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 from app.adapters.cagent_adapter import CAgentAdapter
 from app.adapters.openai_tool_use import OpenAIToolUseAdapter
 from app.adapters.registry import AdapterRegistry
+from app.core.attachments import agent_engine
 from app.core.runner import SessionRunner
 from app.core.session_config import ensure_session_config
 from app.core.session_prompt import effective_system_prompt
@@ -32,14 +33,15 @@ async def ensure_system_prompt_snapshot(
 def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | None = None) -> "BaseAgentAdapter":
     session_config = ensure_session_config(session.id, agent.config)
     if agent.agent_type == AgentType.TOOL_USE:
-        # config.engine selects the agent loop: "cagent" runs the CAgent
-        # framework loop (persist-first history, paired tool results, turn-end
-        # marks), anything else runs the original in-adapter loop. Both read
-        # and write the same persisted history format.
-        engine = (agent.config or {}).get("engine", "legacy")
+        # config.engine selects the agent loop: "cagent" (the default) runs the
+        # CAgent framework loop (persist-first history, paired tool results,
+        # turn-end marks, image input); "legacy" runs the original in-adapter
+        # loop. Both read and write the same persisted history format.
+        engine = agent_engine(agent)
         if engine == "cagent":
             config = dict(session_config)
-            for key in ("max_steps", "compression_token_threshold", "compression_turn_threshold"):
+            for key in ("max_steps", "compression_token_threshold", "compression_turn_threshold",
+                        "vision", "image_detail"):
                 if key in (agent.config or {}):
                     config[key] = agent.config[key]
             return CAgentAdapter(

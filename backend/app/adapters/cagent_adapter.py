@@ -34,6 +34,7 @@ from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
 from app.adapters.tools.base import BaseTool  # noqa: F401 — type hint for tests
 from app.adapters.tools.permissions import decide_tool_permission
 from app.adapters.tools.registry import load_tools
+from app.core import attachments
 
 logger = logging.getLogger("augentia.adapter.cagent")
 
@@ -152,6 +153,7 @@ class CAgentAdapter(BaseAgentAdapter):
         self._agent_cls = None
         self._system_prompt: str | None = None
         self._pending: str | None = None
+        self._pending_images: list[dict] | None = None
         self._pending_from_session: str | None = None
         self._pending_confirms: dict[str, tuple[asyncio.Future, str]] = {}
         self._events: asyncio.Queue | None = None
@@ -211,8 +213,9 @@ class CAgentAdapter(BaseAgentAdapter):
             self._model_name, base_url, [t.name for t in self._tools],
         )
 
-    async def send(self, message: str) -> None:
+    async def send(self, message: str, images: list[dict] | None = None) -> None:
         self._pending = message
+        self._pending_images = list(images) if images else None
         match = _FROM_SESSION_RE.match(message)
         if match:
             self._pending_from_session = match.group(1)
@@ -221,14 +224,15 @@ class CAgentAdapter(BaseAgentAdapter):
         if self._pending is None or self._agent_cls is None:
             return
         content, self._pending = self._pending, None
-        if not content.strip():
+        images, self._pending_images = self._pending_images, None
+        if not content.strip() and not images:
             return
         self._announced_assistant_id = None
         self._call_info = {}
         self._store.pending_from_session = self._pending_from_session
         self._pending_from_session = None
         self._events = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
-        turn_task = asyncio.create_task(self._run_turn_task(content))
+        turn_task = asyncio.create_task(self._run_turn_task(content, images))
         self._turn_task = turn_task
         try:
             while True:
@@ -302,7 +306,7 @@ class CAgentAdapter(BaseAgentAdapter):
 
     # ---- turn execution ----
 
-    async def _run_turn_task(self, content: str) -> None:
+    async def _run_turn_task(self, content: str, images: list[dict] | None = None) -> None:
         try:
             ctx = await self._agent_cls.run_turn(
                 content,
@@ -310,6 +314,9 @@ class CAgentAdapter(BaseAgentAdapter):
                 store=self._store,
                 model=self._model,
                 on_event=self._on_event,
+                # None (not []) for text-only turns: CAgent rejects empty text
+                # unless at least one image is attached.
+                images=images or None,
             )
         except asyncio.CancelledError:
             raise
@@ -334,6 +341,12 @@ class CAgentAdapter(BaseAgentAdapter):
             "completion_tokens": completion_tokens,
         })
         await self._emit(StreamEventType.DONE, "")
+
+    # ---- image resolution (called by the generated agent class) ----
+
+    async def resolve_image(self, image: dict) -> str:
+        # File I/O off the event loop; CAgent caches the result per turn.
+        return await asyncio.to_thread(attachments.data_url, image["ref"])
 
     # ---- gating (called by the generated agent class) ----
 

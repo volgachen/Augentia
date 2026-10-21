@@ -2,6 +2,8 @@ import os
 
 import _common  # noqa: F401
 
+_common.use_isolated_state("augentia-auth-")
+
 os.environ["AUGENTIA_AUTH_ENABLED"] = "true"
 os.environ["AUGENTIA_SESSION_SECRET"] = "session-secret-0123456789-0123456789"
 os.environ["AUGENTIA_INTERNAL_TOKEN"] = "internal-token-0123456789-0123456789"

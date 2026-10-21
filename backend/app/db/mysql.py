@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS messages (
     role             VARCHAR(20)  NOT NULL,
     content          LONGTEXT     NOT NULL,
     from_session_id  VARCHAR(100) DEFAULT NULL,
+    metadata         JSON         DEFAULT NULL,
     created_at       DATETIME(3)  NOT NULL,
     deleted_at       DATETIME(3)  DEFAULT NULL,
     INDEX idx_messages_session (session_id),
@@ -198,6 +199,11 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
         ["ALTER TABLE messages ADD COLUMN deleted_at DATETIME(3) DEFAULT NULL AFTER created_at"],
     ),
     (
+        "messages",
+        "metadata",
+        ["ALTER TABLE messages ADD COLUMN metadata JSON DEFAULT NULL AFTER from_session_id"],
+    ),
+    (
         "plugin_logs",
         "session_id",
         [
@@ -251,15 +257,25 @@ def _row_to_session(row: dict[str, Any]) -> Session:
 
 
 def _row_to_message(row: dict[str, Any]) -> Message:
+    # aiomysql returns JSON columns as strings; `.get` keeps databases that
+    # predate the metadata column loadable until the migration runs.
+    metadata = row.get("metadata")
+    if isinstance(metadata, str):
+        metadata = json.loads(metadata)
     return Message(
         id=row["id"],
         session_id=row["session_id"],
         role=MessageRole(row["role"]),
         content=row["content"],
         from_session_id=row["from_session_id"],
+        metadata=metadata or {},
         created_at=row["created_at"],
         deleted_at=row.get("deleted_at"),
     )
+
+
+def _metadata_json(metadata: dict) -> str | None:
+    return json.dumps(metadata, ensure_ascii=False) if metadata else None
 
 
 def _json_col(value: Any, default: Any) -> Any:
@@ -674,6 +690,7 @@ class MySqlDatabase(IAgentDatabase):
         content: str,
         *,
         from_session_id: str | None = None,
+        metadata: dict | None = None,
     ) -> Message:
         await self.get_session(session_id)
         message = Message(
@@ -681,19 +698,21 @@ class MySqlDatabase(IAgentDatabase):
             role=role,
             content=content,
             from_session_id=from_session_id,
+            metadata=dict(metadata or {}),
         )
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """INSERT INTO messages
-                       (id, session_id, role, content, from_session_id, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s)""",
+                       (id, session_id, role, content, from_session_id, metadata, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                     (
                         message.id,
                         message.session_id,
                         message.role.value,
                         message.content,
                         message.from_session_id,
+                        _metadata_json(message.metadata),
                         message.created_at,
                     ),
                 )
@@ -761,18 +780,20 @@ class MySqlDatabase(IAgentDatabase):
                             role=original.role,
                             content=original.content,
                             from_session_id=original.from_session_id,
+                            metadata=dict(original.metadata),
                             created_at=original.created_at,
                         )
                         await cur.execute(
                             """INSERT INTO messages
-                               (id, session_id, role, content, from_session_id, created_at)
-                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                               (id, session_id, role, content, from_session_id, metadata, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                             (
                                 message.id,
                                 message.session_id,
                                 message.role.value,
                                 message.content,
                                 message.from_session_id,
+                                _metadata_json(message.metadata),
                                 message.created_at,
                             ),
                         )

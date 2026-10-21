@@ -32,11 +32,30 @@ export interface AgentTemplate {
   // map overriding each tool's backend default; other keys reserved for future use.
   config: {
     tool_approvals?: Record<string, boolean>;
+    // Agent loop implementation; the backend defaults to "cagent".
+    engine?: "cagent" | "legacy";
+    // Accept image input (cagent engine only; the model must support vision).
+    vision?: boolean;
+    image_detail?: ImageDetail;
     [key: string]: unknown;
   };
   openai_model: string;
   openai_base_url: string | null;
   created_at: string;
+}
+
+export type ImageDetail = "auto" | "low" | "high";
+
+// A stored image reference attached to a user turn. Bytes live in the
+// backend attachment store; ref is "att:<sha256>".
+export interface ImageRef {
+  ref: string;
+  detail?: ImageDetail;
+}
+
+export function agentAcceptsImages(agent: AgentTemplate | null | undefined): boolean {
+  if (!agent) return false;
+  return (agent.config.engine ?? "cagent") === "cagent" && agent.config.vision === true;
 }
 
 export type SessionCreateMode =
@@ -66,6 +85,8 @@ export interface Message {
   role: MessageRole;
   content: string;
   from_session_id: string | null;
+  // User rows may carry { images: ImageRef[] }.
+  metadata?: { images?: ImageRef[]; [key: string]: unknown };
   created_at: string;
   deleted_at: string | null;
 }
@@ -74,6 +95,8 @@ export interface StreamEvent {
   type: StreamEventType;
   data: string;
   message_id?: string;
+  // Only on "user" events: images attached to that turn.
+  images?: ImageRef[] | null;
 }
 
 export type TaskStatus = "pending" | "in_progress" | "completed";

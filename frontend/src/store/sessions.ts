@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
+import type { ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
 import { api, createSessionSocket } from "../api/client";
 import { useToastStore } from "./toasts";
 
@@ -101,7 +101,12 @@ function toolMessageToEventData(content: string): string {
 function messageToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user":
-      return { type: "user", data: m.content, message_id: m.id };
+      return {
+        type: "user",
+        data: m.content,
+        message_id: m.id,
+        images: m.metadata?.images?.length ? m.metadata.images : undefined,
+      };
     case "tool_call":
       return { type: "tool_call", data: m.content, message_id: m.id };
     case "tool":
@@ -130,7 +135,7 @@ interface Store {
     additionalPrompt?: string | null,
     additionalPromptPath?: string | null,
   ) => Promise<string>;
-  sendMessage: (sessionId: string, content: string) => void;
+  sendMessage: (sessionId: string, content: string, images?: ImageRef[]) => void;
   cancelGeneration: (sessionId: string) => void;
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
@@ -465,10 +470,12 @@ export const useStore = create<Store>((set, get) => {
       return session.id;
     },
 
-    sendMessage: (sessionId, content) => {
+    sendMessage: (sessionId, content, images) => {
       const entry = get().sessions[sessionId];
       if (!entry?.socket) return;
-      entry.socket.send(JSON.stringify({ content }));
+      entry.socket.send(
+        JSON.stringify(images && images.length ? { content, images } : { content }),
+      );
       set((s) => {
         const cur = s.sessions[sessionId];
         if (!cur) return s;

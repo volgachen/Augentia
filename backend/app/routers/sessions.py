@@ -23,6 +23,7 @@ from app.core.workspace import (
     worktree_root,
 )
 from app.adapters.tools.permissions import explain_tool_permission, validate_tool_permissions_config
+from app.core.attachments import AttachmentError, normalize_turn_images
 
 logger = logging.getLogger("augentia.sessions")
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -71,16 +72,29 @@ class TestToolPermissionRequest(BaseModel):
 
 
 class PostMessageRequest(BaseModel):
-    content: str
+    content: str = ""
     from_session_id: str | None = None
+    # Image references from POST /attachments: "att:<sha256>" strings or
+    # {"ref", "detail"} objects. Only cagent-engine agents with config.vision.
+    images: list[str | dict] | None = None
 
 
 class RetryMessageRequest(BaseModel):
-    content: str
+    content: str = ""
+    # None keeps the edited message's original images; [] drops them.
+    images: list[str | dict] | None = None
 
 
 class DeriveSessionRequest(BaseModel):
     title: str | None = None
+
+
+async def _turn_images(db: IAgentDatabase, session: Session, images) -> list[dict]:
+    """Validate a turn's images against the session's agent; AttachmentError on rejection."""
+    if not images:
+        return []
+    agent = await db.get_agent(session.agent_id)
+    return normalize_turn_images(agent, images)
 
 
 async def _create_derived_session(
@@ -400,7 +414,16 @@ async def compress_session(
     if agent.openai_base_url or os.getenv("OPENAI_BASE_URL"):
         client_kwargs["base_url"] = agent.openai_base_url or os.getenv("OPENAI_BASE_URL")
     client = AsyncOpenAI(**client_kwargs)
-    transcript = "\n\n".join(f"[{message.role.value}]\n{message.content}" for message in history)
+
+    def _transcript_entry(message) -> str:
+        # The summary model here is text-only; mark where images were.
+        images = (message.metadata or {}).get("images") or []
+        placeholder = "".join("\n[image]" for _ in images)
+        return f"[{message.role.value}]\n{message.content}{placeholder}"
+
+    transcript = "\n\n".join(
+        _transcript_entry(message) for message in history if message.role != MessageRole.MARK
+    )
     try:
         response = await client.chat.completions.create(
             model=agent.openai_model,
@@ -458,12 +481,18 @@ async def post_message(
         session = await db.get_session(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    try:
+        images = await _turn_images(db, session, body.images)
+    except AttachmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not body.content.strip() and not images:
+        raise HTTPException(status_code=400, detail="content must not be empty")
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    logger.info("HTTP submit session=%s len=%d from=%s",
-                session_id, len(body.content), body.from_session_id)
-    await runner.submit(body.content, from_session_id=body.from_session_id)
+    logger.info("HTTP submit session=%s len=%d images=%d from=%s",
+                session_id, len(body.content), len(images), body.from_session_id)
+    await runner.submit(body.content, from_session_id=body.from_session_id, images=images)
     return {"status": "queued"}
 
 
@@ -476,8 +505,6 @@ async def retry_from_message(
     registry: AdapterRegistry = Depends(get_registry),
 ):
     content = body.content.strip()
-    if not content:
-        raise HTTPException(status_code=400, detail="content must not be empty")
     try:
         session = await db.get_session(session_id)
         messages = await db.get_messages(session_id)
@@ -494,6 +521,17 @@ async def retry_from_message(
             status_code=409,
             detail="retrying from history is currently supported only for tool_use sessions",
         )
+    # Editing a message keeps its images unless the client sends a new list.
+    requested_images = (
+        body.images if body.images is not None
+        else (target.metadata or {}).get("images") or []
+    )
+    try:
+        images = await _turn_images(db, session, requested_images)
+    except AttachmentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not content and not images:
+        raise HTTPException(status_code=400, detail="content must not be empty")
     await db.soft_delete_messages_from(session_id, message_id)
 
     # Drop any in-memory context that still contains the deleted suffix, then
@@ -503,8 +541,9 @@ async def retry_from_message(
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    logger.info("HTTP retry session=%s message=%s len=%d", session_id, message_id, len(content))
-    await runner.submit(content)
+    logger.info("HTTP retry session=%s message=%s len=%d images=%d",
+                session_id, message_id, len(content), len(images))
+    await runner.submit(content, images=images)
     return {"status": "queued"}
 
 
@@ -575,8 +614,16 @@ async def session_stream(
                     await runner.resolve_decision(call_id, approved, supplementary_msg)
                 continue
             content = payload.get("content", "")
-            logger.info("WS recv session=%s len=%d", session_id, len(content))
-            await runner.submit(content)
+            try:
+                images = await _turn_images(db, session, payload.get("images"))
+            except AttachmentError as e:
+                # Rejected before it reaches the runner; only this client sees it.
+                await ws.send_text(json.dumps({"type": "error", "data": str(e)}))
+                continue
+            if not content.strip() and not images:
+                continue
+            logger.info("WS recv session=%s len=%d images=%d", session_id, len(content), len(images))
+            await runner.submit(content, images=images)
 
     async def outbound() -> None:
         async with runner.subscribe() as events:

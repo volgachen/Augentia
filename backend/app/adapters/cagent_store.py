@@ -186,11 +186,15 @@ class AugentiaStore:
         if from_session is None and self.pending_from_session is not None:
             from_session = self.pending_from_session
             self.pending_from_session = None
+        # CAgent keeps image references in metadata.images; the row's text
+        # content stays plain so text-only readers are unaffected.
+        metadata = dict(message.get("metadata") or {})
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,
+            metadata=metadata,
         )
-        return self._record(row, role="user", content=row.content)
+        return self._record(row, role="user", content=row.content, metadata=dict(row.metadata))
 
     async def _save_assistant(self, session_id: str, message: dict) -> dict:
         payload: dict[str, Any] = {
@@ -265,7 +269,9 @@ class AugentiaStore:
         while i < n:
             row = rows[i]
             if row.role == MessageRole.USER:
-                records.append(self._record(row, role="user", content=row.content))
+                records.append(self._record(
+                    row, role="user", content=row.content, metadata=dict(row.metadata or {}),
+                ))
                 i += 1
             elif row.role == MessageRole.AGENT:
                 i = self._read_assistant(rows, i, records)

@@ -27,6 +27,26 @@ BASE_URL = os.getenv("AUGENTIA_BASE_URL", "http://localhost:12598")
 WS_BASE_URL = BASE_URL.replace("http://", "ws://").replace("https://", "wss://")
 
 
+def use_isolated_state(prefix: str = "augentia-test-") -> Path:
+    """Point the in-process app at throwaway state before importing app.main.
+
+    backend/.env usually names the developer's real database; hermetic scripts
+    that drive the app in-process (TestClient / ASGITransport) must never write
+    into it. Redirects the DB (temp SQLite), AUGENTIA_HOME (session configs,
+    attachments) and the worktree root into a fresh temp dir.
+    """
+    import tempfile
+
+    root = Path(tempfile.mkdtemp(prefix=prefix))
+    os.environ["DB_TYPE"] = "sqlite"
+    os.environ["SQLITE_PATH"] = str(root / "test.db")
+    os.environ["AUGENTIA_HOME"] = str(root / "home")
+    os.environ["AUGENTIA_WORKTREE_ROOT"] = str(root / "worktrees")
+    from app.config import get_settings
+    get_settings.cache_clear()
+    return root
+
+
 class Colors:
     OK = "\033[92m"
     WARN = "\033[93m"

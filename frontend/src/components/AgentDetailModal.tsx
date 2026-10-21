@@ -181,6 +181,25 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
                 }
               />
             </label>
+
+            <div className="flex flex-col gap-1 text-sm text-gray-300">
+              <label className="flex items-center gap-2 text-sm text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={form.config?.vision === true}
+                  disabled={form.config?.engine === "legacy"}
+                  onChange={(e) =>
+                    patch({ config: { ...form.config, vision: e.target.checked } })
+                  }
+                />
+                Accept image input (vision)
+              </label>
+              <span className="text-xs text-gray-500">
+                {form.config?.engine === "legacy"
+                  ? "Not available on the legacy engine."
+                  : "The model above must support image input."}
+              </span>
+            </div>
           </>
         )}
 

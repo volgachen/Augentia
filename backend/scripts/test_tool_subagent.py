@@ -19,6 +19,8 @@ from pathlib import Path
 import _common  # noqa: F401 — sys.path + .env
 from _common import ok, fail, info, section
 
+_common.use_isolated_state("augentia-subagent-")
+
 import httpx
 from app.main import app
 from app.adapters.tools.subagent import SubagentTool
