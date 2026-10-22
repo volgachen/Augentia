@@ -233,6 +233,8 @@ class CAgentAdapter(BaseAgentAdapter):
             max_steps=int(self._config.get("max_steps", _DEFAULT_MAX_STEPS)),
             compression_token_threshold=self._config.get("compression_token_threshold"),
             compression_turn_threshold=self._config.get("compression_turn_threshold"),
+            turn_compression_tool_call_threshold=self._config.get(
+                "turn_compression_tool_call_threshold"),
             tool_image_limit=self._tool_image_limit,
         )
         model = (

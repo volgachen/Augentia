@@ -374,6 +374,85 @@ async def test_legacy_history_repair(db, wd) -> bool:
         await registry.remove(session.id)
 
 
+async def test_turn_compression(db, wd) -> bool:
+    section("CAgent engine: turn_compression_tool_call_threshold summarizes a tool-heavy turn")
+    import app.adapters.cagent_adapter as cagent_adapter_module
+
+    seen = []
+
+    async def model(*, messages, tools):
+        seen.append(messages)
+        system = messages[0]["content"] if messages else ""
+        if "Summarize part of a conversation" in system:
+            return {"content": "User asked to read notes.txt; it says hello."}
+        if any(m["role"] == "tool" for m in messages):
+            return {"content": "notes.txt says hello"}
+        if any(m["content"].startswith("Summary of an earlier turn") for m in messages
+               if m["role"] == "user" and isinstance(m["content"], str)):
+            return {"content": "follow-up answered from summary"}
+        return {"tool_calls": [{"id": "read-1", "name": "read",
+                                "arguments": {"path": "notes.txt"}}]}
+
+    original_make_model = cagent_adapter_module._make_model
+    cagent_adapter_module._make_model = lambda client, name: model
+    registry = AdapterRegistry()
+    try:
+        agent = await db.create_agent(AgentTemplate(
+            name="cagent-test-turn-compression", description="turn compression test agent",
+            agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+            tool_names=TOOL_NAMES,
+            config={"engine": "cagent", "turn_compression_tool_call_threshold": 1},
+            openai_model="test-model",
+        ))
+        wd.mkdir(parents=True, exist_ok=True)
+        (wd / "notes.txt").write_text("hello " * 400, encoding="utf-8")
+        session = await db.create_session(agent.id, working_dir=str(wd), session_id="s-turn-comp")
+        runner = await build_runner(session, agent, db, registry)
+    finally:
+        cagent_adapter_module._make_model = original_make_model
+    async def approve(event):
+        # The workspace permission policy may gate read; approve inline.
+        data = json.loads(event.data) if isinstance(event.data, str) else event.data
+        await runner.resolve_decision(data["call_id"], True)
+
+    async def run(text):
+        async def consume():
+            async with runner.subscribe() as events:
+                return await collect_until_done(events, on_confirm=approve)
+        await runner.submit(text)
+        return await asyncio.wait_for(consume(), 15)
+
+    try:
+        await run("read notes.txt")
+        store = AugentiaStore(db, session.id)
+        records = await store.list_messages(session.id)
+        summaries = [r for r in records if r["role"] == "user" and r["name"] == "turn_summary"]
+        if len(summaries) != 1 or not summaries[0]["metadata"].get("replaced_message_ids"):
+            fail(f"turn summary row missing or unnamed: {[(r['role'], r['name']) for r in records]}")
+            return False
+        projected = Context(session.id, messages=records).model_messages()
+        if [m["role"] for m in projected] != ["user"] or "hello" not in projected[0]["content"]:
+            fail(f"reloaded history not compacted: {projected}")
+            return False
+        mark = json.loads((await db.get_messages(session.id))[-1].content)
+        if not mark["metadata"].get("turn_compression_applied"):
+            fail(f"turn_end does not record compression: {mark}")
+            return False
+
+        seen.clear()
+        await run("and then?")
+        sent = seen[0]
+        if any(m["role"] == "tool" for m in sent) or not any(
+                isinstance(m["content"], str) and m["content"].startswith("Summary of an earlier turn")
+                for m in sent):
+            fail(f"next turn did not see the summary instead of tool history: {sent}")
+            return False
+        ok("turn compression: summary persisted, reload + next turn see only the summary")
+        return True
+    finally:
+        await registry.remove(session.id)
+
+
 async def test_model_error_path(db, wd) -> bool:
     section("CAgent adapter: model failure emits ERROR then DONE (no hang)")
     session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-error")
@@ -422,6 +501,7 @@ async def main() -> int:
             await test_runner_flow(db, wd / "runner"),
             await test_cancel_during_confirm(db, wd / "cancel"),
             await test_legacy_history_repair(db, wd / "legacy"),
+            await test_turn_compression(db, wd / "turn-compression"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):

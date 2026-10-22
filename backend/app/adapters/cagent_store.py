@@ -67,6 +67,11 @@ _STATUS_TO_FRAMEWORK = {
 }
 
 
+# A user row's framework ``name`` (e.g. CAgent's turn_summary) has no column of
+# its own; it rides in metadata under this key and is lifted back out on read.
+_NAME_KEY = "cagent_name"
+
+
 def _parse_json(content: str) -> Any:
     try:
         return json.loads(content)
@@ -175,9 +180,12 @@ class AugentiaStore:
         return saved
 
     async def delete_message(self, session_id: str, message_id: str) -> None:
-        # IAgentDatabase only offers delete-from-message-onward (diverge);
-        # single-row soft delete is not needed by the framework core.
-        raise NotImplementedError("Single-message soft delete is not supported by IAgentDatabase")
+        # IAgentDatabase only offers delete-from-message-onward (diverge), so
+        # single-row soft delete is a no-op. CAgent only calls this to tidy
+        # rows a saved turn_summary already lists in replaced_message_ids;
+        # those stay hidden from the model, while the client message list
+        # keeps showing the original turn alongside its summary.
+        logger.debug("delete_message is a no-op for session=%s message=%s", session_id, message_id)
 
     # ------- persistence helpers -------
 
@@ -189,12 +197,14 @@ class AugentiaStore:
         # CAgent keeps image references in metadata.images; the row's text
         # content stays plain so text-only readers are unaffected.
         metadata = dict(message.get("metadata") or {})
+        if message.get("name"):
+            metadata[_NAME_KEY] = message["name"]
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,
             metadata=metadata,
         )
-        return self._record(row, role="user", content=row.content, metadata=dict(row.metadata))
+        return self._user_record(row)
 
     async def _save_assistant(self, session_id: str, message: dict) -> dict:
         payload: dict[str, Any] = {
@@ -244,6 +254,12 @@ class AugentiaStore:
             metadata=dict(payload["metadata"]),
         )
 
+    @classmethod
+    def _user_record(cls, row: Message) -> dict:
+        metadata = dict(row.metadata or {})
+        name = metadata.pop(_NAME_KEY, None)
+        return cls._record(row, role="user", name=name, content=row.content, metadata=metadata)
+
     @staticmethod
     def _record(row: Message, **fields: Any) -> dict:
         record = {
@@ -273,9 +289,7 @@ class AugentiaStore:
         while i < n:
             row = rows[i]
             if row.role == MessageRole.USER:
-                records.append(self._record(
-                    row, role="user", content=row.content, metadata=dict(row.metadata or {}),
-                ))
+                records.append(self._user_record(row))
                 i += 1
             elif row.role == MessageRole.AGENT:
                 i = self._read_assistant(rows, i, records)

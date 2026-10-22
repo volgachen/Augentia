@@ -47,6 +47,7 @@ def make_agent_class(
     max_steps: int = 50,
     compression_token_threshold: int | None = None,
     compression_turn_threshold: int | None = None,
+    turn_compression_tool_call_threshold: int | None = None,
     tool_image_limit: int | None = None,
 ) -> type[BaseAgent]:
     """Build the per-session BaseAgent subclass bound to one adapter instance."""
@@ -59,6 +60,9 @@ def make_agent_class(
         # agent template config flips it on without code changes.
         COMPRESSION_TOKEN_THRESHOLD = compression_token_threshold
         COMPRESSION_TURN_THRESHOLD = compression_turn_threshold
+        # Turn-scoped compression: once one turn makes this many tool calls,
+        # the turn is replaced by a summary before turn_end (None disables).
+        TURN_COMPRESSION_TOOL_CALL_THRESHOLD = turn_compression_tool_call_threshold
         # Only the newest N tool-result images are sent to the model.
         TOOL_IMAGE_LIMIT = tool_image_limit
 
