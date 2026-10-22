@@ -47,6 +47,17 @@ def runtime_context_prompt(session: Session) -> str:
     )
 
 
+def append_runtime_context(agent: AgentTemplate) -> bool:
+    """Whether sessions of this agent append the runtime context block.
+
+    Defaults to True (the historical behavior). Agents that want a clean
+    system prompt — e.g. benchmarking against a fixed template — can set
+    config.append_runtime_context = false on the agent template.
+    """
+    value = (agent.config or {}).get("append_runtime_context", True)
+    return bool(value)
+
+
 def effective_system_prompt(
     agent: AgentTemplate,
     session: Session,
@@ -65,4 +76,6 @@ def effective_system_prompt(
             raise ValueError(
                 f"failed to read additional system prompt from {additional_prompt_path}: {e}"
             )
+    if not append_runtime_context(agent):
+        return system_prompt
     return system_prompt + "\n\n" + runtime_context_prompt(session)

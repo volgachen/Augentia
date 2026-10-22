@@ -257,6 +257,25 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
                   : "The model above must support image input."}
               </span>
             </div>
+
+            <div className="flex flex-col gap-1 text-sm text-gray-300">
+              <label className="flex items-center gap-2 text-sm text-gray-200">
+                <input
+                  type="checkbox"
+                  checked={form.config?.append_runtime_context !== false}
+                  onChange={(e) =>
+                    patch({
+                      config: { ...form.config, append_runtime_context: e.target.checked },
+                    })
+                  }
+                />
+                Append runtime context
+              </label>
+              <span className="text-xs text-gray-500">
+                Append OS, working directory and session start time to the system prompt
+                when a session starts.
+              </span>
+            </div>
           </>
         )}
 

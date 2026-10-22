@@ -3,6 +3,10 @@
 - **修改已开始 session 的 System Prompt**：新增 `PUT /api/v1/sessions/{session_id}/system-prompt`（body：`{"system_prompt": "..."}`），整体替换该 session 的最终 system prompt（不会再拼接 agent 模板 prompt、additional prompt 或 runtime context）。新值写入 `sessions.system_prompt_snapshot`；若 runner 在线则通过 `adapter.set_system_prompt` 原地替换，下一次模型请求即生效，WS 连接不受影响，历史消息不变。回合进行中或等待工具确认时返回 409，空 prompt 返回 400。返回体中的 `applied` 为 `live_adapter` / `persisted`（无在线 runner）/ `runner_restarted`（adapter 不支持原地替换时重建 runner）。测试：`backend/scripts/test_session_system_prompt.py`。
 - **System Prompt 页签可编辑**：Live Console 右侧 System Prompt 页签新增 Edit / Save / Cancel，保存即调用上述 PUT 接口；回合进行中或等待工具确认时 Save 置灰并提示，409 会给出友好提示。
 
+# 2026-10-22
+
+- **Runtime Context 开关**：新增 agent 级配置 `config.append_runtime_context`（默认 `true`，保持既有行为）。设为 `false` 时，开 session 不再往 system prompt 末尾拼接 runtime 信息（操作系统、工作目录、session 开始时间、bash 路径说明）。实现位于 `backend/app/core/session_prompt.py::effective_system_prompt`，所有 prompt 入口（session 启动快照、`GET /sessions/{id}/system-prompt` 重算路径）统一生效。前端 Agent 编辑弹窗新增 "Append runtime context" 复选框（与 vision 开关同级，两种 engine 均可用）。已有会话因启动时已写入 `system_prompt_snapshot`，不受开关变更影响。
+
 # 2026-08-06
 
 - **Active sessions 支持主动断开**：每个 WebSocket session 右侧新增 `×` 按钮，可断开当前前端连接，并清理对应的会话状态。

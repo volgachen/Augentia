@@ -44,6 +44,9 @@ export interface AgentTemplate {
     model_params?: Record<string, unknown>;
     // Summarizer-only replacement for model_params (CAgent engine).
     compression_model_params?: Record<string, unknown>;
+    // Append the runtime context block (OS, cwd, session start time, shell
+    // notes) to the system prompt when a session starts. Defaults to true.
+    append_runtime_context?: boolean;
     [key: string]: unknown;
   };
   openai_model: string;

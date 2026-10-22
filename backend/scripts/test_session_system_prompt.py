@@ -11,6 +11,8 @@ Covers:
   - adapter without in-place support: runner is dropped and rebuilt
   - legacy OpenAIToolUseAdapter.set_system_prompt swaps/inserts/drops the
     leading system message
+  - config.append_runtime_context: the runtime context block is appended by
+    default and left out when the agent sets it to false
 
 Run from backend/:  python scripts/test_session_system_prompt.py
 """
@@ -175,7 +177,27 @@ async def test_legacy_adapter() -> None:
     check(a._messages == [{"role": "user", "content": "hi"}], "empty prompt drops it")
 
 
+def test_append_runtime_context() -> None:
+    section("config.append_runtime_context")
+    from app.core.session_prompt import effective_system_prompt, runtime_context_prompt
+    from app.models.domain import AgentTemplate, AgentType, Session
+
+    session = Session(agent_id="a", working_dir="D:/work")
+    runtime = runtime_context_prompt(session)
+
+    def prompt(config):
+        agent = AgentTemplate(name="a", description="", agent_type=AgentType.TOOL_USE,
+                              system_prompt="BASE", config=config)
+        return effective_system_prompt(agent, session, additional_prompt="EXTRA")
+
+    check(prompt({}) == "BASE\n\nEXTRA\n\n" + runtime, "default appends the runtime context")
+    check(prompt({"append_runtime_context": True}) == prompt({}), "true is the default")
+    check(prompt({"append_runtime_context": False}) == "BASE\n\nEXTRA",
+          "false keeps the prompt clean (additional prompt still added)")
+
+
 if __name__ == "__main__":
+    test_append_runtime_context()
     asyncio.run(test_legacy_adapter())
     test_http()
     if FAILURES:
