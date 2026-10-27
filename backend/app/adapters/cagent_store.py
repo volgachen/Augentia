@@ -346,7 +346,24 @@ class AugentiaStore:
                 i += 1
             else:
                 i += 1
-        return records
+        return self._drop_orphan_compression(records)
+
+    @staticmethod
+    def _drop_orphan_compression(records: list[dict]) -> list[dict]:
+        # A diverged/cloned session copies compression marks verbatim, but their
+        # through_message_id still names a row of the *source* session. CAgent
+        # treats a missing boundary as corrupt history, so drop such marks: the
+        # branch simply runs uncompressed until it compresses again.
+        ids = {r["id"] for r in records}
+        kept = []
+        for record in records:
+            if (record["role"] == "mark"
+                    and record.get("name") in ("compression_started", "compression_completed")
+                    and (record.get("metadata") or {}).get("through_message_id") not in ids):
+                logger.info("ignoring compression mark with foreign boundary id=%s", record["id"])
+                continue
+            kept.append(record)
+        return kept
 
     def _read_assistant(self, rows: list[Message], i: int, records: list[dict]) -> int:
         """Translate one agent row, pairing its native tool results with repair."""

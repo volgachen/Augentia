@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
+import type { CompressResult, ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
 import { api, createSessionSocket } from "../api/client";
 import { useToastStore } from "./toasts";
 
@@ -120,6 +120,16 @@ function messageToEvent(m: Message): StreamEvent {
       return { type: "status", data: m.content, message_id: m.id };
     case "agent":
       return { type: "assistant_message", data: m.content, message_id: m.id };
+    case "mark": {
+      // Only compression_completed marks are requested; data is the summary.
+      let summary = "";
+      try {
+        summary = String(JSON.parse(m.content)?.content ?? "");
+      } catch {
+        // malformed mark — show an empty summary
+      }
+      return { type: "compression", data: summary, message_id: m.id };
+    }
     default:
       return { type: "text", data: m.content, message_id: m.id };
   }
@@ -144,7 +154,7 @@ interface Store {
   cancelGeneration: (sessionId: string) => void;
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
-  compressSession: (sessionId: string) => Promise<string>;
+  compressSession: (sessionId: string) => Promise<CompressResult>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
   disconnectSession: (sessionId: string) => void;
   closeSession: (sessionId: string) => Promise<void>;
@@ -566,9 +576,23 @@ export const useStore = create<Store>((set, get) => {
     },
 
     compressSession: async (sessionId) => {
-      const session = await api.sessions.compress(sessionId);
-      await get().hydrateSessions();
-      return session.id;
+      const result = await api.sessions.compress(sessionId);
+      if (result.status === "compressed") {
+        // Reload history so the compression divider appears in place; keep
+        // the live socket and any events it delivered meanwhile.
+        const messages = await api.sessions.messages(sessionId);
+        set((s) => {
+          const cur = s.sessions[sessionId];
+          if (!cur) return s;
+          return {
+            sessions: {
+              ...s.sessions,
+              [sessionId]: { ...cur, events: messages.map(messageToEvent) },
+            },
+          };
+        });
+      }
+      return result;
     },
 
     resolveConfirm: (sessionId, callId, approved, message) => {

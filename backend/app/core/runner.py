@@ -21,6 +21,9 @@ class _InboxItem:
     # Validated image references for this turn ([{"ref", "detail"?}]); routers
     # check engine/vision support before anything reaches the inbox.
     images: list[dict] | None = None
+    # Set for a manual compression job instead of a user turn: the loop runs
+    # adapter.compress() and resolves this future with its result dict.
+    compress_result: "asyncio.Future[dict] | None" = None
 
 
 class SessionRunner:
@@ -91,6 +94,16 @@ class SessionRunner:
         await self._inbox.put(_InboxItem(
             content=content, from_session_id=from_session_id, images=images or None,
         ))
+
+    @property
+    def is_busy(self) -> bool:
+        return self._turn_task is not None or not self._inbox.empty()
+
+    async def compress(self) -> dict:
+        """Queue a manual compression behind any pending turns and await it."""
+        future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
+        await self._inbox.put(_InboxItem(content="", compress_result=future))
+        return await future
 
     async def cancel_turn(self) -> None:
         turn_task = self._turn_task
@@ -163,9 +176,28 @@ class SessionRunner:
                     self._session_id, event.type,
                 )
 
+    async def _run_compress(self, future: "asyncio.Future[dict]") -> None:
+        # Runs on the loop like a turn, so it never overlaps one. CAgent's
+        # compress_session flips RUNNING/IDLE itself; DB status follows it.
+        try:
+            result = await self._adapter.compress()
+        except asyncio.CancelledError:
+            if not future.done():
+                future.cancel()
+            raise
+        except Exception as e:
+            logger.exception("manual compression crashed session=%s", self._session_id)
+            result = {"status": "failed", "reason": str(e)}
+            await self._db.update_session_status(self._session_id, SessionStatus.WAITING_USER)
+        if not future.done():
+            future.set_result(result)
+
     async def _loop(self) -> None:
         while True:
             item = await self._inbox.get()
+            if item.compress_result is not None:
+                await self._run_compress(item.compress_result)
+                continue
             await self._db.update_session_status(self._session_id, SessionStatus.RUNNING)
             self._turn_task = asyncio.create_task(
                 self._run_turn(item), name=f"turn:{self._session_id}"

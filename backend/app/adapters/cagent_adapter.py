@@ -348,6 +348,48 @@ class CAgentAdapter(BaseAgentAdapter):
     def current_system_prompt(self) -> str | None:
         return self._system_prompt
 
+    async def compress(self) -> dict:
+        """Manually compress this session's history in place (CAgent compress_session).
+
+        Same summarizer, instruction and image handling as threshold-triggered
+        compression. The caller (SessionRunner) guarantees no turn is running.
+        Returns {"status": "compressed"|"skipped"|"failed", "reason", tokens...}.
+        """
+        if self._agent_cls is None or self._store is None or self._model is None:
+            return {"status": "failed", "reason": "engine is not started"}
+        try:
+            ctx = await self._agent_cls.compress_session(
+                session_id=self.session_id, store=self._store, model=self._model,
+                system_prompt=self._system_prompt,
+            )
+        except ValueError as exc:
+            return {"status": "skipped", "reason": str(exc)}
+        if ctx.compression_applied:
+            completion = next(
+                (m for m in reversed(ctx.messages)
+                 if m["role"] == "mark" and m.get("name") == "compression_completed"),
+                None,
+            )
+            meta = (completion or {}).get("metadata") or {}
+            self._context_tokens = ctx.num_tokens or self._context_tokens
+            return {
+                "status": "compressed",
+                "num_tokens_before": meta.get("num_tokens_before"),
+                "num_tokens_after": meta.get("num_tokens_after"),
+                "token_count_is_estimate": meta.get("token_count_is_estimate"),
+            }
+        if ctx.compression_error:
+            return {"status": "failed", "reason": ctx.compression_error}
+        if ctx.stop_reason != "completed":
+            has_turn = any(
+                m["role"] == "mark" and m.get("name") == "turn_end" for m in ctx.messages
+            )
+            reason = ("the last turn did not complete normally" if has_turn
+                      else "no completed turns to compress yet")
+        else:
+            reason = "no new completed turns since the last compression"
+        return {"status": "skipped", "reason": reason}
+
     @property
     def context_tokens(self) -> int:
         return self._context_tokens

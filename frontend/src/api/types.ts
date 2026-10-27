@@ -8,7 +8,7 @@ export type SessionStatus =
   | "COMPLETED"
   | "ERROR";
 
-export type MessageRole = "system" | "user" | "agent" | "tool_call" | "tool";
+export type MessageRole = "system" | "user" | "agent" | "tool_call" | "tool" | "mark";
 
 export type StreamEventType =
   | "text"
@@ -19,7 +19,9 @@ export type StreamEventType =
   | "status"
   | "error"
   | "done"
-  | "user";
+  | "user"
+  // Client-only: a compression_completed mark loaded from history.
+  | "compression";
 
 export interface AgentTemplate {
   id: string;
@@ -92,6 +94,14 @@ export interface Message {
   metadata?: { images?: ImageRef[]; [key: string]: unknown };
   created_at: string;
   deleted_at: string | null;
+}
+
+export interface CompressResult {
+  status: "compressed" | "skipped" | "failed";
+  reason?: string;
+  num_tokens_before?: number | null;
+  num_tokens_after?: number | null;
+  token_count_is_estimate?: boolean | null;
 }
 
 export interface StreamEvent {

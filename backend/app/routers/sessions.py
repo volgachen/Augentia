@@ -2,11 +2,9 @@ import asyncio
 import json
 import logging
 import uuid
-import os
 from enum import Enum
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 from app.db.interface import IAgentDatabase
 from app.db.deps import get_db
@@ -23,7 +21,7 @@ from app.core.workspace import (
     worktree_root,
 )
 from app.adapters.tools.permissions import explain_tool_permission, validate_tool_permissions_config
-from app.core.attachments import AttachmentError, normalize_turn_images
+from app.core.attachments import AttachmentError, agent_engine, normalize_turn_images
 
 logger = logging.getLogger("augentia.sessions")
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -351,14 +349,28 @@ async def test_tool_permission(
 
 
 @router.get("/{session_id}/messages")
-async def get_messages(session_id: str, db: IAgentDatabase = Depends(get_db)):
+async def get_messages(
+    session_id: str,
+    include_compression: bool = False,
+    db: IAgentDatabase = Depends(get_db),
+):
     try:
         messages = await db.get_messages(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # Framework mark rows (turn_end / compression boundaries) are internal
-    # bookkeeping for the CAgent engine loop, not conversation content.
-    return [m for m in messages if m.role != MessageRole.MARK]
+    # bookkeeping for the CAgent engine loop, not conversation content. The
+    # console opts in to compression_completed marks to draw a divider.
+    def keep(m) -> bool:
+        if m.role != MessageRole.MARK:
+            return True
+        if not include_compression:
+            return False
+        try:
+            return json.loads(m.content).get("name") == "compression_completed"
+        except (ValueError, AttributeError):
+            return False
+    return [m for m in messages if keep(m)]
 
 
 @router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)
@@ -395,82 +407,34 @@ async def diverge_from_message(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{session_id}/compress", response_model=Session, status_code=201)
+@router.post("/{session_id}/compress")
 async def compress_session(
     session_id: str,
-    body: DeriveSessionRequest,
     db: IAgentDatabase = Depends(get_db),
     registry: AdapterRegistry = Depends(get_registry),
 ):
+    """Manually compress the session's history in place (CAgent engine only).
+
+    Uses CAgent's compress_session: the same summarizer, instruction and image
+    handling as threshold-triggered compression. The summary covers history
+    through the last completed turn; the model then sees only the summary plus
+    later messages, while the original rows stay visible to clients.
+    """
     try:
-        source = await db.get_session(session_id)
-        agent = await db.get_agent(source.agent_id)
-        history = await db.get_messages(session_id)
+        session = await db.get_session(session_id)
+        agent = await db.get_agent(session.agent_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    if agent.agent_type != AgentType.TOOL_USE:
-        raise HTTPException(status_code=409, detail="compression currently supports only tool_use sessions")
-    if not history:
-        raise HTTPException(status_code=400, detail="session has no messages to compress")
-    api_key = os.getenv("OPENAI_API_KEY")
-    client_kwargs = {"api_key": api_key} if api_key else {}
-    if agent.openai_base_url or os.getenv("OPENAI_BASE_URL"):
-        client_kwargs["base_url"] = agent.openai_base_url or os.getenv("OPENAI_BASE_URL")
-    client = AsyncOpenAI(**client_kwargs)
-
-    def _transcript_entry(message) -> str:
-        # The summary model here is text-only; mark where images were.
-        images = (message.metadata or {}).get("images") or []
-        placeholder = "".join("\n[image]" for _ in images)
-        return f"[{message.role.value}]\n{message.content}{placeholder}"
-
-    transcript = "\n\n".join(
-        _transcript_entry(message) for message in history if message.role != MessageRole.MARK
-    )
-    try:
-        response = await client.chat.completions.create(
-            model=agent.openai_model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Compress the conversation into a concise but complete factual context for continuing it. Preserve goals, decisions, constraints, file changes, unresolved issues, and relevant tool results. Output only the context summary.",
-                },
-                {"role": "user", "content": transcript},
-            ],
-        )
-        summary = (response.choices[0].message.content or "").strip()
-    except Exception as e:
-        logger.exception("failed to compress session=%s", session_id)
-        raise HTTPException(status_code=502, detail=f"compression model request failed: {e}")
-    finally:
-        await client.close()
-    if not summary:
-        raise HTTPException(status_code=502, detail="compression model returned an empty summary")
-    target: Session | None = None
-    try:
-        target = await db.create_session(
-            source.agent_id,
-            working_dir=source.working_dir,
-            title=body.title or f"{source.title or 'Session'} · Compressed",
-            parent_session_id=source.id,
-            additional_prompt=source.additional_prompt,
-            additional_prompt_path=source.additional_prompt_path,
-            system_prompt_snapshot=source.system_prompt_snapshot,
-        )
-        await db.add_message(
-            target.id,
-            MessageRole.USER,
-            "以下是此前对话的压缩上下文，请将其视为已经发生的历史背景：\n\n" + summary,
-        )
-        await build_runner(target, agent, db, registry)
-        await db.update_session_status(target.id, SessionStatus.WAITING_USER)
-        return await db.get_session(target.id)
-    except Exception as e:
-        if target is not None:
-            await registry.remove(target.id)
-            await db.soft_delete_session(target.id)
-        logger.exception("failed to create compressed session from=%s", session_id)
-        raise HTTPException(status_code=500, detail=str(e))
+    if agent.agent_type != AgentType.TOOL_USE or agent_engine(agent) != "cagent":
+        raise HTTPException(status_code=409, detail="manual compression is only supported by the cagent engine")
+    runner = await get_or_rehydrate(session, db, registry)
+    if runner is None:
+        raise HTTPException(status_code=409, detail="session has no live adapter")
+    if runner.is_busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+        raise HTTPException(status_code=409, detail="session is running; compress after the turn finishes")
+    result = await runner.compress()
+    logger.info("manual compression session=%s result=%s", session_id, result.get("status"))
+    return result
 
 
 @router.post("/{session_id}/messages", status_code=202)

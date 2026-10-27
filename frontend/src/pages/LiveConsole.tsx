@@ -438,6 +438,31 @@ function DivergeIcon() {
   );
 }
 
+function CompressionDivider({ summary }: { summary: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="my-2 text-left">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full flex items-center gap-2 text-[11px] text-emerald-400/80 hover:text-emerald-300"
+        title="The model now sees this summary instead of the messages above"
+      >
+        <span className="flex-1 border-t border-dashed border-emerald-800" />
+        <span className="shrink-0">
+          {expanded ? "▾" : "▸"} 已压缩到此处：上方消息已被摘要替代
+        </span>
+        <span className="flex-1 border-t border-dashed border-emerald-800" />
+      </button>
+      {expanded && (
+        <div className="mt-1 rounded border border-emerald-900 bg-emerald-950/20 px-2 py-1.5 font-mono text-xs text-emerald-200/90 whitespace-pre-wrap break-words">
+          {summary || "(empty summary)"}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function isToolCallView(item: ConsoleItem): item is ToolCallView {
   return "kind" in item && item.kind === "tool_call";
 }
@@ -471,6 +496,9 @@ function ConsoleItemLine({
 }) {
   if (isToolCallView(item)) {
     return <ToolCallLine item={item} showToolCalls={showToolCalls} showToolResults={showToolResults} />;
+  }
+  if (item.type === "compression") {
+    return <CompressionDivider summary={String(item.data ?? "")} />;
   }
   if (item.type === "tool_result" && (!showToolCalls || !showToolResults)) {
     return null;
@@ -514,6 +542,10 @@ export default function LiveConsole() {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [showToolResults, setShowToolResults] = useState(true);
   const [deriving, setDeriving] = useState(false);
+  const [compressing, setCompressing] = useState(false);
+  const [compressNote, setCompressNote] = useState<
+    { scope: string; ok: boolean; text: string } | null
+  >(null);
   // Follow-the-tail while the agent streams; persisted so the choice survives reloads.
   const [autoScroll, setAutoScroll] = useState(
     () => localStorage.getItem("liveConsole.autoScroll") !== "false",
@@ -590,6 +622,11 @@ export default function LiveConsole() {
   // A previous session's agent must not decide the current composer.
   const canAttachImages = agent?.id === agentId && agentAcceptsImages(agent);
   const hintText = attachHint && attachHint.scope === sessionId ? attachHint.text : null;
+  // Manual in-place compression is a CAgent feature; legacy sessions get a
+  // disabled button. Unknown until the agent loads.
+  const agentLoaded = agent?.id === agentId;
+  const isCagent = agentLoaded && (agent?.config?.engine ?? "cagent") === "cagent";
+  const note = compressNote && compressNote.scope === sessionId ? compressNote : null;
 
   if (!entry) {
     return (
@@ -697,13 +734,26 @@ export default function LiveConsole() {
   };
 
   const handleCompress = async () => {
-    if (!sessionId || generating || deriving) return;
-    setDeriving(true);
+    if (!sessionId || generating || compressing || !isCagent) return;
+    setCompressing(true);
+    setCompressNote(null);
     try {
-      const newSessionId = await compressSession(sessionId);
-      navigate(`/console/${newSessionId}`);
+      const r = await compressSession(sessionId);
+      const est = r.token_count_is_estimate ? "≈" : "";
+      setCompressNote({
+        scope: sessionId,
+        ok: r.status === "compressed",
+        text:
+          r.status === "compressed"
+            ? `已压缩：上下文 ${est}${r.num_tokens_before ?? "?"} → ${est}${r.num_tokens_after ?? "?"} tokens`
+            : r.status === "skipped"
+              ? `无需压缩：${r.reason ?? ""}`
+              : `压缩失败：${r.reason ?? ""}`,
+      });
+    } catch (e) {
+      setCompressNote({ scope: sessionId, ok: false, text: `压缩失败：${(e as Error).message}` });
     } finally {
-      setDeriving(false);
+      setCompressing(false);
     }
   };
 
@@ -870,11 +920,26 @@ export default function LiveConsole() {
                   <button
                     type="button"
                     onClick={handleCompress}
-                    disabled={generating || deriving || events.length === 0}
+                    disabled={generating || compressing || !isCagent || events.length === 0}
+                    title={
+                      !agentLoaded
+                        ? undefined
+                        : !isCagent
+                          ? "Manual compression is only supported by the cagent engine"
+                          : "Summarize history through the last completed turn, in place. Earlier messages stay visible but the model sees only the summary."
+                    }
                     className="w-full rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
                   >
-                    {deriving ? "Creating session…" : "Compress"}
+                    {compressing ? "Compressing…" : "Compress"}
                   </button>
+                  {agentLoaded && !isCagent && (
+                    <p className="mt-1.5 text-[11px] text-gray-500">仅 cagent 引擎支持压缩</p>
+                  )}
+                  {note && (
+                    <p className={`mt-1.5 text-[11px] break-words ${note.ok ? "text-emerald-400" : "text-amber-400"}`}>
+                      {note.text}
+                    </p>
+                  )}
                 </div>
               </div>
             )}
