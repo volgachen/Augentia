@@ -9,6 +9,8 @@ no network. Covers:
     turns re-send it from history
   - config: vision off drops images with a note, tool_image_limit trims older
     tool images, tool_image_mode=user_message relocates them, image_detail
+  - interleaved output: order seen by the model, stored "at" offsets, limit,
+    vision off / rejected images leave markers, user_message relocation
   - legacy engine: ToolOutput degrades to text instead of crashing the loop
 
 Run from backend/:  python scripts/test_tool_images.py
@@ -31,7 +33,7 @@ from _common import ok, fail, section  # noqa: E402
 from app.adapters.base import StreamEventType  # noqa: E402
 from app.adapters.cagent_adapter import CAgentAdapter  # noqa: E402
 from app.adapters.openai_tool_use import OpenAIToolUseAdapter  # noqa: E402
-from app.adapters.tools.base import ToolOutput  # noqa: E402
+from app.adapters.tools.base import ToolImage, ToolOutput  # noqa: E402
 from app.adapters.tools.registry import load_tools  # noqa: E402
 from app.core import attachments  # noqa: E402
 from app.db.sqlite import SqliteDatabase  # noqa: E402
@@ -214,6 +216,119 @@ async def test_engine(h: Harness) -> None:
             check(True, f"rejects {config}")
 
 
+# ------------------------------------------------------------ interleaved
+
+def interleaving_read(red: bytes, blue: bytes):
+    """A read.execute replacement returning text and two images interleaved."""
+
+    async def execute(self, path, offset=None, limit=None):
+        return ToolOutput.interleaved(["Page 1:", ToolImage(red), "Page 2:", ToolImage(blue, detail="high"), "end"])
+
+    return execute
+
+
+def part_kinds(content) -> list[str]:
+    return [p["text"] if p["type"] == "text" else "IMG" for p in content]
+
+
+async def test_interleaved_unit() -> None:
+    section("ToolOutput: interleaved construction")
+    out = ToolOutput.interleaved(["A", ToolImage(b"1"), "B", ToolImage(b"2")])
+    check(out.text == "AB" and [i.at for i in out.images] == [1, 2], "text concatenated, images get offsets")
+    check([s if isinstance(s, str) else "IMG" for s in out.segments()] == ["A", "IMG", "B", "IMG"],
+          "segments() rebuilds the order")
+    check(out.is_interleaved and not ToolOutput("x", [ToolImage(b"1")]).is_interleaved, "is_interleaved")
+    check(out.text_without_images("why") == "A[image omitted]B[image omitted]\n[2 image(s) omitted: why]",
+          "text_without_images marks each image position")
+    for bad in (lambda: ToolOutput("ab", [ToolImage(b"1", at=2), ToolImage(b"2", at=1)]),
+                lambda: ToolOutput("ab", [ToolImage(b"1", at=5)])):
+        try:
+            bad()
+            check(False, "rejects bad offsets")
+        except ValueError:
+            check(True, "rejects bad offsets")
+
+
+async def test_interleaved_engine(h: Harness) -> None:
+    from app.adapters.tools.read import ReadTool
+
+    red, blue = (WORKDIR / "red.png").read_bytes(), (WORKDIR / "blue.png").read_bytes()
+    original = ReadTool.execute
+    ReadTool.execute = interleaving_read(red, blue)
+    try:
+        section("CAgent engine: interleaved tool output")
+        model, calls = reader("x", final="ok")
+        adapter = await h.adapter(model, vision=True)
+        events = await h.turn(adapter)
+        tool_msg = [m for m in calls[1] if m["role"] == "tool"][0]
+        check(part_kinds(tool_msg["content"]) == ["Page 1:", "IMG", "Page 2:", "IMG", "end"],
+              "model sees text and images in the tool's order")
+        check(tool_msg["content"][3]["image_url"].get("detail") == "high", "per-image detail kept")
+        result_event = next(e for e in events if e.type == StreamEventType.TOOL_RESULT)
+        check([i.get("at") for i in result_event.images or []] == [7, 14], "TOOL_RESULT images carry at offsets")
+        check(json.loads(result_event.data)["result"] == "Page 1:Page 2:end", "event result is the joined text")
+        rows = await h.db.get_messages(adapter.session_id)
+        tool_row = next(r for r in rows if r.role == MessageRole.TOOL)
+        check([i.get("at") for i in tool_row.metadata.get("images") or []] == [7, 14], "tool row persists at")
+
+        async def followup(*, messages, tools):
+            calls.append(messages)
+            return {"content": "again"}
+
+        adapter._model = followup
+        await h.turn(adapter, "again?")
+        tool_msg = [m for m in calls[-1] if m["role"] == "tool"][0]
+        check(part_kinds(tool_msg["content"]) == ["Page 1:", "IMG", "Page 2:", "IMG", "end"],
+              "order preserved when re-sent from history")
+        await adapter.stop()
+
+        section("CAgent engine: interleaved + tool_image_limit=1")
+        model, calls = reader("x")
+        adapter = await h.adapter(model, vision=True, tool_image_limit=1)
+        await h.turn(adapter)
+        tool_msg = [m for m in calls[1] if m["role"] == "tool"][0]
+        kinds = part_kinds(tool_msg["content"])
+        check(kinds.count("IMG") == 1 and kinds[0].startswith("Page 1:Page 2:"),
+              "older image of the same result dropped, newest kept in place")
+        await adapter.stop()
+
+        section("CAgent engine: interleaved, vision off")
+        model, calls = reader("x")
+        adapter = await h.adapter(model)
+        await h.turn(adapter)
+        tool_msg = [m for m in calls[1] if m["role"] == "tool"][0]
+        check(isinstance(tool_msg["content"], str)
+              and tool_msg["content"].startswith("Page 1:[image omitted]Page 2:[image omitted]end")
+              and "2 image(s) omitted" in tool_msg["content"], "markers left where images were")
+        await adapter.stop()
+
+        section("CAgent engine: interleaved, one image rejected by the store")
+        ReadTool.execute = interleaving_read(b"not an image", blue)
+        model, calls = reader("x")
+        adapter = await h.adapter(model, vision=True)
+        await h.turn(adapter)
+        tool_msg = [m for m in calls[1] if m["role"] == "tool"][0]
+        kinds = part_kinds(tool_msg["content"])
+        check(kinds[0] == "Page 1:[image omitted]Page 2:" and kinds[1] == "IMG"
+              and "1 image(s) dropped" in kinds[2], "rejected image marked in place, the other still sent")
+        await adapter.stop()
+        ReadTool.execute = interleaving_read(red, blue)
+
+        section("CAgent engine: interleaved + tool_image_mode=user_message")
+        model, calls = reader("x")
+        adapter = await h.adapter(model, vision=True, tool_image_mode="user_message")
+        await h.turn(adapter)
+        sent = calls[1]
+        tool_msg = [m for m in sent if m["role"] == "tool"][0]
+        check(isinstance(tool_msg["content"], str) and tool_msg["content"].startswith("Page 1:Page 2:end"),
+              "tool message keeps the text only")
+        after = sent[sent.index(tool_msg) + 1]
+        check(after["role"] == "user" and len(image_urls(after["content"])) == 2, "both images relocated")
+        await adapter.stop()
+    finally:
+        ReadTool.execute = original
+
+
 # ------------------------------------------------------------ legacy
 
 class _FakeCompletions:
@@ -265,7 +380,10 @@ async def main() -> int:
     await test_read_tool()
     db = SqliteDatabase(_TMP / "engine.db")
     await db.connect()
-    await test_engine(Harness(db))
+    harness = Harness(db)
+    await test_engine(harness)
+    await test_interleaved_unit()
+    await test_interleaved_engine(harness)
     await test_legacy()
     if FAILURES:
         print(f"\n{len(FAILURES)} CHECK(S) FAILED")

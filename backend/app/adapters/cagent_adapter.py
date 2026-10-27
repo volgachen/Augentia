@@ -28,12 +28,14 @@ import re
 
 from openai import AsyncOpenAI
 
-from cagent import ToolResult, relocate_tool_images
+from cagent import Image, ToolResult, relocate_tool_images
 
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.adapters.cagent_agent import make_agent_class
 from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
-from app.adapters.tools.base import BaseTool, ToolOutput  # noqa: F401 — BaseTool for type hints
+from app.adapters.tools.base import (  # noqa: F401 — BaseTool for type hints
+    IMAGE_OMITTED_MARKER, BaseTool, ToolOutput,
+)
 from app.adapters.tools.permissions import decide_tool_permission
 from app.adapters.tools.registry import load_tools
 from app.core import attachments
@@ -394,28 +396,41 @@ class CAgentAdapter(BaseAgentAdapter):
         (CAgent ToolResult.images). Without config.vision the model may not
         accept images at all, so only the text goes through, with a note.
         Images the store rejects (format/size) are dropped with a note too.
+
+        Interleaved output (images with an ``at`` offset) is passed to CAgent
+        as an interleaved content list, so the model sees text and images in
+        the tool's order; a dropped image leaves a marker in its place.
         """
         if not output.images:
             return output.text
         if not self._vision:
             return output.text_without_images("this agent does not accept images (config.vision is off)")
+        interleaved = output.is_interleaved
+        parts: list = []  # interleaved content for CAgent: str and Image
         refs: list[dict] = []
         problems: list[str] = []
-        for image in output.images:
+        for segment in output.segments():
+            if isinstance(segment, str):
+                parts.append(segment)
+                continue
             try:
-                stored = await asyncio.to_thread(attachments.save_attachment, image.data)
+                stored = await asyncio.to_thread(attachments.save_attachment, segment.data)
             except attachments.AttachmentError as exc:
                 problems.append(str(exc))
+                if interleaved:
+                    parts.append(IMAGE_OMITTED_MARKER)
                 continue
-            ref = {"ref": stored.ref}
-            detail = image.detail if image.detail in ("auto", "low", "high") else self._image_detail
-            if detail:
-                ref["detail"] = detail
-            refs.append(ref)
-        text = output.text
-        if problems:
-            text += f"\n[{len(problems)} image(s) dropped: {'; '.join(problems)}]"
-        return ToolResult(text, images=refs) if refs else text
+            detail = segment.detail if segment.detail in ("auto", "low", "high") else self._image_detail
+            image = Image(stored.ref, detail) if detail else Image(stored.ref)
+            parts.append(image)
+            refs.append(image.as_dict())
+        note = f"\n[{len(problems)} image(s) dropped: {'; '.join(problems)}]" if problems else ""
+        if not refs:
+            text = "".join(p for p in parts if isinstance(p, str)) if interleaved else output.text
+            return text + note
+        if interleaved:
+            return ToolResult(parts + [note] if note else parts)
+        return ToolResult(output.text + note, images=refs)
 
     # ---- gating (called by the generated agent class) ----
 

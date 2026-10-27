@@ -231,14 +231,75 @@ function ToolCallLine({
         </div>
       )}
       {showToolResults && item.result !== undefined && (
-        <pre className="mt-1 ml-4 px-2 py-1.5 bg-gray-950/60 border border-gray-800 rounded whitespace-pre-wrap break-all text-xs text-amber-200 overflow-auto max-h-72">
-          {resultToText(item.result)}
-        </pre>
+        <ToolResultBody result={item.result} images={item.resultImages} />
       )}
-      {showToolResults && item.resultImages && (
+      {showToolResults && item.result === undefined && item.resultImages && (
         <div className="ml-4">
           <ImageThumbs images={item.resultImages} />
         </div>
+      )}
+    </div>
+  );
+}
+
+type ResultSegment = { text: string } | { images: ImageRef[] };
+
+/**
+ * Split tool result text at image offsets ("at") so interleaved images show
+ * where the tool put them. Images without "at", or past the end of a
+ * truncated result, follow all text.
+ */
+function interleaveResult(text: string, images: ImageRef[]): ResultSegment[] {
+  const segments: ResultSegment[] = [];
+  let cursor = 0;
+  const pushImage = (image: ImageRef) => {
+    const last = segments[segments.length - 1];
+    if (last && "images" in last) last.images.push(image);
+    else segments.push({ images: [image] });
+  };
+  for (const image of images) {
+    const at = typeof image.at === "number" ? Math.min(Math.max(image.at, cursor), text.length) : text.length;
+    if (at > cursor) segments.push({ text: text.slice(cursor, at) });
+    pushImage(image);
+    cursor = at;
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor) });
+  return segments;
+}
+
+const RESULT_TEXT_CLASS =
+  "whitespace-pre-wrap break-all text-xs text-amber-200";
+
+function ToolResultBody({ result, images }: { result: unknown; images?: ImageRef[] }) {
+  const text = resultToText(result);
+  const interleaved =
+    typeof result === "string" && !!images?.some((image) => typeof image.at === "number");
+  if (!interleaved) {
+    return (
+      <>
+        <pre className={`mt-1 ml-4 px-2 py-1.5 bg-gray-950/60 border border-gray-800 rounded overflow-auto max-h-72 ${RESULT_TEXT_CLASS}`}>
+          {text}
+        </pre>
+        {images && images.length > 0 && (
+          <div className="ml-4">
+            <ImageThumbs images={images} />
+          </div>
+        )}
+      </>
+    );
+  }
+  return (
+    <div className="mt-1 ml-4 px-2 py-1.5 bg-gray-950/60 border border-gray-800 rounded overflow-auto max-h-[36rem]">
+      {interleaveResult(text, images!).map((segment, index) =>
+        "text" in segment ? (
+          <pre key={index} className={RESULT_TEXT_CLASS}>
+            {segment.text}
+          </pre>
+        ) : (
+          <div key={index} className="mb-1">
+            <ImageThumbs images={segment.images} />
+          </div>
+        ),
       )}
     </div>
   );

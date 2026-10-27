@@ -10,6 +10,14 @@ class ToolImage:
     data: bytes
     # Optional per-image detail hint for the model: "auto", "low" or "high".
     detail: str | None = None
+    # Character offset in ToolOutput.text where the image sits. None = after
+    # all text. Usually set by ToolOutput.interleaved rather than by hand.
+    at: int | None = None
+
+
+# Left in the text where an interleaved image could not be delivered, so the
+# model still sees that something was there.
+IMAGE_OMITTED_MARKER = "[image omitted]"
 
 
 @dataclass(frozen=True)
@@ -21,15 +29,64 @@ class ToolOutput:
     bytes in the attachment store and sends them to the model as part of the
     tool result. Engines or agents that can't take images keep only the text,
     with a note saying how many images were dropped.
+
+    Images either follow all text (``ToolOutput(text, images=[...])``) or are
+    interleaved with it (``ToolOutput.interleaved(["Page 1:", img1, "Page 2:",
+    img2])``), in which case each image's ``at`` is its offset in ``text`` and
+    the model sees text and images in that order.
     """
 
     text: str
     images: list[ToolImage] = field(default_factory=list)
 
+    def __post_init__(self):
+        cursor = 0
+        for image in self.images:
+            at = len(self.text) if image.at is None else image.at
+            if isinstance(at, bool) or not isinstance(at, int) or not cursor <= at <= len(self.text):
+                raise ValueError("ToolImage.at offsets must be ordered positions within the text")
+            cursor = at
+
+    @classmethod
+    def interleaved(cls, parts: "list[str | ToolImage]") -> "ToolOutput":
+        """Build from a list of text strings and ToolImage objects, kept in order."""
+        text, images = "", []
+        for part in parts:
+            if isinstance(part, str):
+                text += part
+            elif isinstance(part, ToolImage):
+                images.append(ToolImage(part.data, part.detail, at=len(text)))
+            else:
+                raise TypeError("Interleaved tool output may only contain str and ToolImage")
+        return cls(text, images)
+
+    @property
+    def is_interleaved(self) -> bool:
+        return any(image.at is not None for image in self.images)
+
+    def segments(self) -> "list[str | ToolImage]":
+        """The output as ordered parts: text strings and images at their offsets."""
+        parts: list[str | ToolImage] = []
+        cursor = 0
+        for image in self.images:
+            at = len(self.text) if image.at is None else image.at
+            if self.text[cursor:at]:
+                parts.append(self.text[cursor:at])
+            parts.append(image)
+            cursor = at
+        if self.text[cursor:]:
+            parts.append(self.text[cursor:])
+        return parts
+
     def text_without_images(self, reason: str) -> str:
         if not self.images:
             return self.text
-        return f"{self.text}\n[{len(self.images)} image(s) omitted: {reason}]"
+        if self.is_interleaved:
+            # Keep the layout readable: mark where each image was.
+            text = "".join(p if isinstance(p, str) else IMAGE_OMITTED_MARKER for p in self.segments())
+        else:
+            text = self.text
+        return f"{text}\n[{len(self.images)} image(s) omitted: {reason}]"
 
 
 class BaseTool(ABC):

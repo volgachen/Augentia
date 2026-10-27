@@ -27,7 +27,7 @@ Each exits 0 on success, nonzero on failure — so they compose in CI or a shell
 | `test_spawn_parent.py` | `parent_session_id`: persistence, source working dir, unknown parent → 404 | none (TestClient + mock DB) |
 | `test_tool_subagent.py` | `subagent` tool: git worktree creation + non-git fallback, child spawn through the router | `git` in PATH (TestClient + temp SQLite) |
 | `test_multimodal.py` | Image input: attachment store, per-turn validation, CAgent turns with images, HTTP upload/messages/retry/diverge | none (TestClient + temp SQLite, scripted model) |
-| `test_tool_images.py` | Images in tool results via `read`: tool output, model input, events, storage, vision off, `tool_image_limit`, `tool_image_mode`, legacy fallback | none (temp SQLite, scripted model) |
+| `test_tool_images.py` | Images in tool results via `read`: tool output, model input, events, storage, vision off, `tool_image_limit`, `tool_image_mode`, interleaved text/images, legacy fallback | none (temp SQLite, scripted model) |
 | `test_cagent_adapter.py` | CAgent engine: confirm approve/deny, runner status, cancel pairing, legacy history repair, error path | none (mock DB, scripted model) |
 
 In-process scripts (TestClient / ASGITransport) call `_common.use_isolated_state()`

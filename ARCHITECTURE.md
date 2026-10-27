@@ -177,6 +177,7 @@ Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 
 #### 工具返回图片
 
 - 工具 `execute` 返回普通 `str`，或在结果带图时返回 `ToolOutput(text, images=[ToolImage(bytes, detail?)])`（`app/adapters/tools/base.py`）。目前 `read` 读到 png/jpeg/webp/gif（按文件头判断）时返回图片。
+- 图文交错：`ToolOutput.interleaved(["第 1 页：", ToolImage(...), "第 2 页：", ToolImage(...)])`，每张图记录 `at`（在 `text` 中的字符偏移），经 CAgent 交错 `ToolResult` 交给框架，模型看到的顺序与列表一致；`metadata.images` 与 `TOOL_RESULT` 事件里的引用带 `at`，前端据此把缩略图插在结果文本对应位置。vision 关闭或存储拒收时，该图原位置留下 `[image omitted]`。`tool_image_mode=user_message` 下图片集中移到后续 user 消息，交错顺序不保留。
 - CAgent 引擎把图片字节存入附件存储，以 CAgent `ToolResult(images=[...])` 交给框架：tool 行 `metadata.images` 只存引用，`TOOL_RESULT` 事件带 `images` 字段。发给模型时图片在 tool 消息内（`[文本, image_url]`）。
 - agent 配置：`vision` 关闭时工具图片被丢弃并在文本中注明；`tool_image_limit`（默认 3，`null` 为全部）只把最近 N 张工具图片发给模型，更早的替换为文字说明（存储不删）；`tool_image_mode` 为 `inline`（默认，图片放在 tool 消息内，Chat Completions 的公开 schema 只允许文本，但很多网关接受）或 `user_message`（图片移到这批工具结果之后的一条 user 消息，适用于严格按 schema 校验的端点）。
 - legacy 引擎只保留文本并注明图片被省略。浏览器截图（node_repl 的 `emitImage`）尚未接入。

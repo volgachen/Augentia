@@ -51,6 +51,9 @@ export type ImageDetail = "auto" | "low" | "high";
 export interface ImageRef {
   ref: string;
   detail?: ImageDetail;
+  // Interleaved content only: character offset in the message/tool result
+  // text where the image sits. Absent = after all text.
+  at?: number;
 }
 
 export function agentAcceptsImages(agent: AgentTemplate | null | undefined): boolean {
