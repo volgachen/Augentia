@@ -214,9 +214,10 @@ class SessionRunner:
                 message_id=user_message.id, images=item.images,
             ))
         else:
-            self._broadcast(StreamEvent(
-                type=StreamEventType.USER, data=delivered, images=item.images,
-            ))
+            if not getattr(self._adapter, "emits_user_event", False):
+                self._broadcast(StreamEvent(
+                    type=StreamEventType.USER, data=delivered, images=item.images,
+                ))
 
         agent_buf: list[str] = []
         saw_native_messages = False

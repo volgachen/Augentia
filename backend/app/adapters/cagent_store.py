@@ -116,6 +116,9 @@ class AugentiaStore:
         # row CAgent's pre_run_turn writes (the runner bakes the sender into a
         # "[from-session:X]" prefix; we lift it back into the column).
         self.pending_from_session: str | None = None
+        # Injected by the adapter before each turn: called once with the turn's
+        # first saved user row so the live USER event can carry its real id.
+        self.on_turn_user_saved = None
 
     # ------- sessions -------
 
@@ -204,6 +207,9 @@ class AugentiaStore:
             from_session_id=from_session,
             metadata=metadata,
         )
+        callback, self.on_turn_user_saved = self.on_turn_user_saved, None
+        if callback is not None:
+            await callback(row)
         return self._user_record(row)
 
     async def _save_assistant(self, session_id: str, message: dict) -> dict:

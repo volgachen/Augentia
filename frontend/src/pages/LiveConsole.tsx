@@ -137,7 +137,7 @@ function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
       const payload = parseAssistantData(event.data);
       const content = payload.content ?? "";
       if (content) {
-        items.push({ type: "assistant_message", data: content });
+        items.push({ type: "assistant_message", data: content, message_id: event.message_id });
       }
       for (const [index, toolCall] of (payload.tool_calls ?? []).entries()) {
         const name = toolCall.function?.name ?? "unknown";
@@ -310,6 +310,7 @@ function EventLine({
   editing = false,
   editValue = "",
   generating = false,
+  deriving = false,
   onStartEdit = () => {},
   onEditChange = () => {},
   onCancelEdit = () => {},
@@ -320,6 +321,7 @@ function EventLine({
   editing?: boolean;
   editValue?: string;
   generating?: boolean;
+  deriving?: boolean;
   onStartEdit?: () => void;
   onEditChange?: (value: string) => void;
   onCancelEdit?: () => void;
@@ -376,7 +378,7 @@ function EventLine({
           <button
             type="button"
             onClick={onDiverge}
-            disabled={generating || !event.message_id}
+            disabled={deriving || !event.message_id}
             className="px-3 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-40 text-xs text-white"
           >
             Diverge from here
@@ -385,18 +387,54 @@ function EventLine({
       </div>
     );
   }
+  const canDiverge =
+    (event.type === "user" || event.type === "assistant_message") && !!event.message_id;
   return (
-    <div
-      className={`text-left font-mono text-sm whitespace-pre-wrap break-all ${style} ${
-        event.type === "user" && event.message_id ? "cursor-text hover:bg-indigo-950/30 rounded px-1 -mx-1" : ""
-      }`}
-      onDoubleClick={event.type === "user" && event.message_id ? onStartEdit : undefined}
-      title={event.type === "user" && event.message_id ? "Double-click to edit and resend from here" : undefined}
-    >
-      {prefix}
-      {event.type === "tool_result" ? toOneLine(body) : body}
-      {hasImages && <ImageThumbs images={event.images} />}
+    <div className="group relative flex items-start gap-1">
+      <div
+        className={`flex-1 min-w-0 text-left font-mono text-sm whitespace-pre-wrap break-all ${style} ${
+          event.type === "user" && event.message_id ? "cursor-text hover:bg-indigo-950/30 rounded px-1 -mx-1" : ""
+        }`}
+        onDoubleClick={event.type === "user" && event.message_id && !generating ? onStartEdit : undefined}
+        title={
+          event.type === "user" && event.message_id && !generating
+            ? "Double-click to edit and resend from here"
+            : undefined
+        }
+      >
+        {prefix}
+        {event.type === "tool_result" ? toOneLine(body) : body}
+        {hasImages && <ImageThumbs images={event.images} />}
+      </div>
+      {canDiverge && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDiverge();
+          }}
+          disabled={deriving}
+          className="shrink-0 mt-0.5 p-0.5 rounded text-gray-600 opacity-40 group-hover:opacity-100 hover:text-indigo-300 hover:bg-gray-800 disabled:opacity-20 disabled:cursor-wait"
+          title="Diverge: open a new session with the history before this message (this message is not included)"
+          aria-label="Diverge from this message"
+        >
+          <DivergeIcon />
+        </button>
+      )}
     </div>
+  );
+}
+
+function DivergeIcon() {
+  // Git-branch style glyph.
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="6" cy="5" r="2" />
+      <circle cx="6" cy="19" r="2" />
+      <circle cx="18" cy="7" r="2" />
+      <path d="M6 7v10" />
+      <path d="M18 9c0 5-12 3-12 8" />
+    </svg>
   );
 }
 
@@ -409,6 +447,7 @@ function ConsoleItemLine({
   editingMessageId,
   editingContent,
   generating,
+  deriving,
   showToolCalls,
   showToolResults,
   onStartEdit,
@@ -421,6 +460,7 @@ function ConsoleItemLine({
   editingMessageId: string | null;
   editingContent: string;
   generating: boolean;
+  deriving: boolean;
   showToolCalls: boolean;
   showToolResults: boolean;
   onStartEdit: (event: StreamEvent) => void;
@@ -441,6 +481,7 @@ function ConsoleItemLine({
       editing={!!item.message_id && editingMessageId === item.message_id}
       editValue={editingContent}
       generating={generating}
+      deriving={deriving}
       onStartEdit={() => onStartEdit(item)}
       onEditChange={onEditChange}
       onCancelEdit={onCancelEdit}
@@ -473,6 +514,14 @@ export default function LiveConsole() {
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [showToolResults, setShowToolResults] = useState(true);
   const [deriving, setDeriving] = useState(false);
+  // Follow-the-tail while the agent streams; persisted so the choice survives reloads.
+  const [autoScroll, setAutoScroll] = useState(
+    () => localStorage.getItem("liveConsole.autoScroll") !== "false",
+  );
+  const handleAutoScrollChange = (on: boolean) => {
+    setAutoScroll(on);
+    localStorage.setItem("liveConsole.autoScroll", String(on));
+  };
 
   const entry = sessionId ? sessions[sessionId] : undefined;
 
@@ -511,8 +560,9 @@ export default function LiveConsole() {
   }, [sessionId, openSession]);
 
   useEffect(() => {
+    if (!autoScroll) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entry?.events.length, entry?.session.status]);
+  }, [entry?.events.length, entry?.session.status, autoScroll]);
 
   useEffect(() => {
     itemRefs.current = itemRefs.current.slice(0, entry?.events.length ?? 0);
@@ -633,8 +683,10 @@ export default function LiveConsole() {
     setEditingContent("");
   };
 
+  // Allowed while RUNNING: the branch copies only already-persisted history
+  // before messageId and leaves the running source session untouched.
   const handleDiverge = async (messageId: string) => {
-    if (!sessionId || generating || deriving) return;
+    if (!sessionId || deriving) return;
     setDeriving(true);
     try {
       const newSessionId = await divergeFromMessage(sessionId, messageId);
@@ -676,6 +728,7 @@ export default function LiveConsole() {
             {session.working_dir ?? "—"}
           </p>
         </div>
+        <div className="flex flex-col items-end gap-1">
         <div className="flex items-center gap-2">
           {generating ? (
             <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-900/60 text-indigo-200">
@@ -702,6 +755,17 @@ export default function LiveConsole() {
           >
             {session.status}
           </span>
+        </div>
+        {session.status === "RUNNING" && (
+          <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={autoScroll}
+              onChange={(e) => handleAutoScrollChange(e.target.checked)}
+            />
+            自动滚动到底部
+          </label>
+        )}
         </div>
       </div>
 
@@ -740,6 +804,7 @@ export default function LiveConsole() {
                 editingMessageId={editingMessageId}
                 editingContent={editingContent}
                 generating={generating}
+                deriving={deriving}
                 showToolCalls={showToolCalls}
                 showToolResults={showToolResults}
                 onStartEdit={(event) => {

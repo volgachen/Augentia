@@ -141,6 +141,8 @@ class CAgentAdapter(BaseAgentAdapter):
     # The adapter (via AugentiaStore) is the single writer of conversation
     # rows; the runner must not double-persist from the event stream.
     persists_own_messages = True
+    # ...and broadcasts the turn's USER event itself, carrying the saved row id.
+    emits_user_event = True
 
     def __init__(
         self,
@@ -273,6 +275,15 @@ class CAgentAdapter(BaseAgentAdapter):
         self._store.pending_from_session = self._pending_from_session
         self._pending_from_session = None
         self._events = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
+        # The runner leaves the USER broadcast to us (emits_user_event): CAgent
+        # saves the user row inside run_turn, and only then is its id known.
+        self._user_announced = False
+
+        async def _announce_user(row) -> None:
+            self._user_announced = True
+            await self._emit(StreamEventType.USER, content, images=images, message_id=row.id)
+
+        self._store.on_turn_user_saved = _announce_user
         turn_task = asyncio.create_task(self._run_turn_task(content, images))
         self._turn_task = turn_task
         try:
@@ -363,6 +374,11 @@ class CAgentAdapter(BaseAgentAdapter):
             raise
         except Exception as exc:
             logger.exception("cagent turn failed session=%s", self.session_id)
+            if not self._user_announced:
+                # Failed before the user row was saved: still show the input.
+                self._user_announced = True
+                self._store.on_turn_user_saved = None
+                await self._emit(StreamEventType.USER, content, images=images)
             # ERROR must be followed by DONE or the stream consumer never
             # finishes and the session sticks in RUNNING.
             await self._emit(StreamEventType.ERROR, f"CAgent turn failed: {exc}")
@@ -502,7 +518,12 @@ class CAgentAdapter(BaseAgentAdapter):
         }
         if message.get("tool_calls"):
             wire["tool_calls"] = _wire_tool_calls(message["tool_calls"])
-        await self._emit(StreamEventType.ASSISTANT_MESSAGE, json.dumps(wire, ensure_ascii=False))
+        # CAgent persists before step_end/gating, so message["id"] is the DB
+        # row id; carrying it lets the live UI diverge from this reply.
+        await self._emit(
+            StreamEventType.ASSISTANT_MESSAGE, json.dumps(wire, ensure_ascii=False),
+            message_id=message.get("id"),
+        )
         if message.get("content"):
             await self._emit(StreamEventType.TEXT, message["content"])
 
@@ -530,9 +551,14 @@ class CAgentAdapter(BaseAgentAdapter):
                     "result": _truncate_result(message.get("content", "")),
                 }, images=(message.get("metadata") or {}).get("images") or None)
 
-    async def _emit(self, event_type: StreamEventType, data, images: list[dict] | None = None) -> None:
+    async def _emit(
+        self, event_type: StreamEventType, data, images: list[dict] | None = None,
+        message_id: str | None = None,
+    ) -> None:
         if not isinstance(data, str):
             data = json.dumps(data, ensure_ascii=False)
         # Bounded queue: the agent loop blocks until the consumer drains, which
         # keeps a long turn from outrunning the runner's event relay.
-        await self._events.put(StreamEvent(type=event_type, data=data, images=images))
+        await self._events.put(StreamEvent(
+            type=event_type, data=data, images=images, message_id=message_id,
+        ))
