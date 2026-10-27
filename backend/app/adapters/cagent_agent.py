@@ -49,13 +49,14 @@ def make_agent_class(
     compression_turn_threshold: int | None = None,
     turn_compression_tool_call_threshold: int | None = None,
     turn_compression_instruction: str | None = None,
+    compression_instruction: str | None = None,
     tool_image_limit: int | None = None,
 ) -> type[BaseAgent]:
     """Build the per-session BaseAgent subclass bound to one adapter instance."""
-    if turn_compression_instruction is not None and (
-            not isinstance(turn_compression_instruction, str)
-            or not turn_compression_instruction.strip()):
-        raise ValueError("turn_compression_instruction must be a non-empty string or None")
+    for key, value in (("turn_compression_instruction", turn_compression_instruction),
+                       ("compression_instruction", compression_instruction)):
+        if value is not None and (not isinstance(value, str) or not value.strip()):
+            raise ValueError(f"{key} must be a non-empty string or None")
 
     class SessionAgent(BaseAgent):
         NAME = name
@@ -72,6 +73,10 @@ def make_agent_class(
         # falls back to the CAgent default when not set.
         TURN_COMPRESSION_INSTRUCTION = (
             turn_compression_instruction or BaseAgent.TURN_COMPRESSION_INSTRUCTION)
+        # Optional custom instruction for whole-history compression (manual
+        # Compress button and threshold-triggered); CAgent default otherwise.
+        COMPRESSION_INSTRUCTION = (
+            compression_instruction or BaseAgent.COMPRESSION_INSTRUCTION)
         # Only the newest N tool-result images are sent to the model.
         TOOL_IMAGE_LIMIT = tool_image_limit
 

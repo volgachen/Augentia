@@ -453,6 +453,66 @@ async def test_turn_compression(db, wd) -> bool:
         await registry.remove(session.id)
 
 
+async def test_manual_compression_instruction(db, wd) -> bool:
+    section("CAgent engine: config.compression_instruction drives manual compression")
+    import app.adapters.cagent_adapter as cagent_adapter_module
+
+    custom = "CUSTOM COMPRESSION INSTRUCTION: summarize in one line."
+    systems = []
+
+    async def model(*, messages, tools):
+        system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        systems.append(system)
+        if system == custom:
+            return {"content": "short summary"}
+        return {"content": "a fairly long answer " * 60}
+
+    original_make_model = cagent_adapter_module._make_model
+    cagent_adapter_module._make_model = lambda client, name: model
+    registry = AdapterRegistry()
+    try:
+        agent = await db.create_agent(AgentTemplate(
+            name="cagent-test-manual-compression", description="manual compression test agent",
+            agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+            tool_names=TOOL_NAMES,
+            config={"engine": "cagent", "compression_instruction": custom},
+            openai_model="test-model",
+        ))
+        wd.mkdir(parents=True, exist_ok=True)
+        session = await db.create_session(agent.id, working_dir=str(wd), session_id="s-manual-comp")
+        runner = await build_runner(session, agent, db, registry)
+    finally:
+        cagent_adapter_module._make_model = original_make_model
+
+    try:
+        async def consume():
+            async with runner.subscribe() as events:
+                return await collect_until_done(events)
+        await runner.submit("tell me something long")
+        await asyncio.wait_for(consume(), 15)
+
+        result = await asyncio.wait_for(runner.compress(), 15)
+        if result.get("status") != "compressed":
+            fail(f"manual compression did not apply: {result}")
+            return False
+        if systems[-1] != custom:
+            fail(f"summarizer did not receive the configured instruction: {systems[-1]!r}")
+            return False
+        names = [json.loads(m.content).get("name") for m in await db.get_messages(session.id)
+                 if m.role == MessageRole.MARK]
+        if "compression_completed" not in names:
+            fail(f"no compression_completed mark persisted: {names}")
+            return False
+        status = (await db.get_session(session.id)).status
+        if status != SessionStatus.WAITING_USER:
+            fail(f"status after manual compression={status}")
+            return False
+        ok("manual compression: configured instruction used, mark saved, status restored")
+        return True
+    finally:
+        await registry.remove(session.id)
+
+
 async def test_model_error_path(db, wd) -> bool:
     section("CAgent adapter: model failure emits ERROR then DONE (no hang)")
     session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-error")
@@ -502,6 +562,7 @@ async def main() -> int:
             await test_cancel_during_confirm(db, wd / "cancel"),
             await test_legacy_history_repair(db, wd / "legacy"),
             await test_turn_compression(db, wd / "turn-compression"),
+            await test_manual_compression_instruction(db, wd / "manual-compression"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):

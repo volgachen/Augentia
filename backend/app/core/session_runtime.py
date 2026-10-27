@@ -42,6 +42,7 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
             config = dict(session_config)
             for key in ("max_steps", "compression_token_threshold", "compression_turn_threshold",
                         "turn_compression_tool_call_threshold", "turn_compression_instruction",
+                        "compression_instruction",
                         "vision", "image_detail", "tool_image_limit", "tool_image_mode"):
                 if key in (agent.config or {}):
                     config[key] = agent.config[key]
