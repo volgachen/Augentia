@@ -31,6 +31,13 @@ from cagent import Context
 TOOL_NAMES = ["write", "read"]
 
 
+def summary_instruction(messages) -> str:
+    """CAgent sends the compression instruction as the final user message."""
+    last = messages[-1] if messages else {}
+    return last.get("content", "") if last.get("role") == "user" and isinstance(
+        last.get("content"), str) else ""
+
+
 def scripted(*outputs):
     """Model callable returning canned outputs in order."""
     iterator = iter(outputs)
@@ -382,8 +389,7 @@ async def test_turn_compression(db, wd) -> bool:
 
     async def model(*, messages, tools):
         seen.append(messages)
-        system = messages[0]["content"] if messages else ""
-        if "Summarize part of a conversation" in system:
+        if "Summarize part of a conversation" in summary_instruction(messages):
             return {"content": "User asked to read notes.txt; it says hello."}
         if any(m["role"] == "tool" for m in messages):
             return {"content": "notes.txt says hello"}
@@ -461,9 +467,9 @@ async def test_manual_compression_instruction(db, wd) -> bool:
     systems = []
 
     async def model(*, messages, tools):
-        system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
-        systems.append(system)
-        if system == custom:
+        instruction = summary_instruction(messages)
+        systems.append(instruction)
+        if instruction == custom:
             return {"content": "short summary"}
         return {"content": "a fairly long answer " * 60}
 
@@ -496,7 +502,7 @@ async def test_manual_compression_instruction(db, wd) -> bool:
             fail(f"manual compression did not apply: {result}")
             return False
         if systems[-1] != custom:
-            fail(f"summarizer did not receive the configured instruction: {systems[-1]!r}")
+            fail(f"summarizer did not receive the configured instruction: {systems[-1][:200]!r}")
             return False
         names = [json.loads(m.content).get("name") for m in await db.get_messages(session.id)
                  if m.role == MessageRole.MARK]
@@ -521,8 +527,7 @@ async def test_compression_model(db, wd) -> bool:
 
     def make_model(client, name):
         async def model(*, messages, tools):
-            system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
-            is_summary = system.startswith("Summarize the conversation")
+            is_summary = summary_instruction(messages).startswith("Summarize the conversation")
             calls.append((name, is_summary))
             if is_summary:
                 return {"content": "short summary"}
