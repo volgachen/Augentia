@@ -50,6 +50,7 @@ def make_agent_class(
     turn_compression_tool_call_threshold: int | None = None,
     turn_compression_instruction: str | None = None,
     compression_instruction: str | None = None,
+    compression_model=None,
     tool_image_limit: int | None = None,
 ) -> type[BaseAgent]:
     """Build the per-session BaseAgent subclass bound to one adapter instance."""
@@ -77,6 +78,9 @@ def make_agent_class(
         # Compress button and threshold-triggered); CAgent default otherwise.
         COMPRESSION_INSTRUCTION = (
             compression_instruction or BaseAgent.COMPRESSION_INSTRUCTION)
+        # Summarizer for threshold-triggered compression; None -> the agent's
+        # own model. (Manual compression passes it to compress_session.)
+        COMPRESSION_MODEL = compression_model
         # Only the newest N tool-result images are sent to the model.
         TOOL_IMAGE_LIMIT = tool_image_limit
 

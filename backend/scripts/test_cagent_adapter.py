@@ -513,6 +513,77 @@ async def test_manual_compression_instruction(db, wd) -> bool:
         await registry.remove(session.id)
 
 
+async def test_compression_model(db, wd) -> bool:
+    section("CAgent engine: config.compression_model selects the summarizer model")
+    import app.adapters.cagent_adapter as cagent_adapter_module
+
+    calls = []  # (model_name, is_summary)
+
+    def make_model(client, name):
+        async def model(*, messages, tools):
+            system = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+            is_summary = system.startswith("Summarize the conversation")
+            calls.append((name, is_summary))
+            if is_summary:
+                return {"content": "short summary"}
+            return {"content": "a fairly long answer " * 60}
+        return model
+
+    async def run_case(label, config, expect_summarizer):
+        original_make_model = cagent_adapter_module._make_model
+        cagent_adapter_module._make_model = make_model
+        registry = AdapterRegistry()
+        try:
+            agent = await db.create_agent(AgentTemplate(
+                name=f"cagent-test-compression-model-{label}", description="x",
+                agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+                tool_names=TOOL_NAMES, config={"engine": "cagent", **config},
+                openai_model="main-model",
+            ))
+            (wd / label).mkdir(parents=True, exist_ok=True)
+            session = await db.create_session(
+                agent.id, working_dir=str(wd / label), session_id=f"s-comp-model-{label}")
+            runner = await build_runner(session, agent, db, registry)
+        finally:
+            cagent_adapter_module._make_model = original_make_model
+        try:
+            async def turn(text):
+                async def consume():
+                    async with runner.subscribe() as events:
+                        return await collect_until_done(events)
+                await runner.submit(text)
+                await asyncio.wait_for(consume(), 15)
+
+            calls.clear()
+            await turn("first")
+            if config.get("compression_turn_threshold"):
+                # Threshold-triggered: compression ran at the end of the turn.
+                pass
+            else:
+                result = await asyncio.wait_for(runner.compress(), 15)
+                if result.get("status") != "compressed" or result.get("model") != expect_summarizer:
+                    fail(f"[{label}] manual compression result: {result}")
+                    return False
+            summarizers = {name for name, is_summary in calls if is_summary}
+            workers = {name for name, is_summary in calls if not is_summary}
+            if summarizers != {expect_summarizer} or workers != {"main-model"}:
+                fail(f"[{label}] summarizer={summarizers} turn model={workers}")
+                return False
+            return True
+        finally:
+            await registry.remove(session.id)
+
+    if not await run_case("default", {}, "main-model"):
+        return False
+    if not await run_case("manual", {"compression_model": "small-model"}, "small-model"):
+        return False
+    if not await run_case("auto", {"compression_model": "small-model",
+                                   "compression_turn_threshold": 1}, "small-model"):
+        return False
+    ok("compression_model: unset -> agent model; set -> used by manual + threshold compression")
+    return True
+
+
 async def test_model_error_path(db, wd) -> bool:
     section("CAgent adapter: model failure emits ERROR then DONE (no hang)")
     session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-error")
@@ -563,6 +634,7 @@ async def main() -> int:
             await test_legacy_history_repair(db, wd / "legacy"),
             await test_turn_compression(db, wd / "turn-compression"),
             await test_manual_compression_instruction(db, wd / "manual-compression"),
+            await test_compression_model(db, wd / "compression-model"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):

@@ -171,6 +171,8 @@ class CAgentAdapter(BaseAgentAdapter):
         self._tools: list = []
         self._client: AsyncOpenAI | None = None
         self._model = None
+        self._compression_model = None
+        self._compression_model_name: str | None = None
         self._store: AugentiaStore | None = None
         self._agent_cls = None
         self._system_prompt: str | None = None
@@ -230,6 +232,24 @@ class CAgentAdapter(BaseAgentAdapter):
         }
         self._system_prompt = system_prompt
         self._store = AugentiaStore(self._db, self.session_id)
+        model = (
+            self._model_callable
+            if self._model_callable is not None
+            else _make_model(self._client, self._model_name)
+        )
+        self._model = self._wrap_model(model)
+        # Optional summarizer model (config.compression_model, a model name on
+        # the agent's own endpoint/key). Unset -> same model as the agent.
+        compression_name = self._config.get("compression_model")
+        if compression_name is not None and (
+                not isinstance(compression_name, str) or not compression_name.strip()):
+            raise ValueError("config.compression_model must be a non-empty string or null")
+        self._compression_model_name = (compression_name or "").strip() or self._model_name
+        if compression_name and self._model_callable is None:
+            self._compression_model = self._wrap_model(
+                _make_model(self._client, self._compression_model_name))
+        else:
+            self._compression_model = self._model
         self._agent_cls = make_agent_class(
             self,
             name="Augentia Agent",
@@ -242,20 +262,18 @@ class CAgentAdapter(BaseAgentAdapter):
             turn_compression_instruction=self._config.get("turn_compression_instruction"),
             compression_instruction=self._config.get("compression_instruction"),
             tool_image_limit=self._tool_image_limit,
-        )
-        model = (
-            self._model_callable
-            if self._model_callable is not None
-            else _make_model(self._client, self._model_name)
-        )
-        self._model = (
-            _relocating_tool_images(model) if self._tool_image_mode == "user_message" else model
+            compression_model=(
+                self._compression_model if self._compression_model is not self._model else None),
         )
         self._alive = True
         logger.info(
-            "started cagent engine model=%s base_url=%s tools=%s",
-            self._model_name, base_url, [t.name for t in self._tools],
+            "started cagent engine model=%s compression_model=%s base_url=%s tools=%s",
+            self._model_name, self._compression_model_name, base_url,
+            [t.name for t in self._tools],
         )
+
+    def _wrap_model(self, model):
+        return _relocating_tool_images(model) if self._tool_image_mode == "user_message" else model
 
     async def send(self, message: str, images: list[dict] | None = None) -> None:
         self._pending = message
@@ -356,11 +374,11 @@ class CAgentAdapter(BaseAgentAdapter):
         compression. The caller (SessionRunner) guarantees no turn is running.
         Returns {"status": "compressed"|"skipped"|"failed", "reason", tokens...}.
         """
-        if self._agent_cls is None or self._store is None or self._model is None:
+        if self._agent_cls is None or self._store is None or self._compression_model is None:
             return {"status": "failed", "reason": "engine is not started"}
         try:
             ctx = await self._agent_cls.compress_session(
-                session_id=self.session_id, store=self._store, model=self._model,
+                session_id=self.session_id, store=self._store, model=self._compression_model,
                 system_prompt=self._system_prompt,
             )
         except ValueError as exc:
@@ -375,6 +393,7 @@ class CAgentAdapter(BaseAgentAdapter):
             self._context_tokens = ctx.num_tokens or self._context_tokens
             return {
                 "status": "compressed",
+                "model": self._compression_model_name,
                 "num_tokens_before": meta.get("num_tokens_before"),
                 "num_tokens_after": meta.get("num_tokens_after"),
                 "token_count_is_estimate": meta.get("token_count_is_estimate"),
