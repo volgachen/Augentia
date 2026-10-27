@@ -153,7 +153,7 @@ async def test_engine_turns() -> None:
     ref = attachments.save_attachment(make_png(4, 4, (0, 0, 255))).ref
     seen: list[list[dict]] = []
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         seen.append(messages)
         return {"content": f"reply {len(seen)}"}
 
@@ -201,7 +201,7 @@ def test_http() -> None:
 
     seen: list[list[dict]] = []
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         seen.append(messages)
         return {"content": "I see it"}
 

@@ -64,8 +64,8 @@ def _relocating_tool_images(model):
     messages); see cagent.relocate_tool_images.
     """
 
-    async def relocated(*, messages, tools):
-        return await model(messages=relocate_tool_images(messages), tools=tools)
+    async def relocated(*, messages, tools, **kwargs):
+        return await model(messages=relocate_tool_images(messages), tools=tools, **kwargs)
 
     return relocated
 
@@ -73,7 +73,7 @@ def _relocating_tool_images(model):
 def _make_model(client: AsyncOpenAI, model_name: str):
     """Wrap an AsyncOpenAI client as a CAgent model callable."""
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         wire_messages = []
         for message in messages:
             wire = {"role": message["role"], "content": message["content"]}
@@ -107,6 +107,10 @@ def _make_model(client: AsyncOpenAI, model_name: str):
                 }
                 for tool in tools
             ]
+            # Summarizer requests carry the agent's tools with tool_choice="none"
+            # (CAgent COMPRESSION_SEND_TOOLS); only meaningful alongside tools.
+            if tool_choice is not None:
+                call_kwargs["tool_choice"] = tool_choice
         response = await client.chat.completions.create(**call_kwargs)
         # Some OpenAI-compatible gateways hand back a raw string body instead
         # of a ChatCompletion; fail loudly (same guard as the legacy adapter).
@@ -261,6 +265,7 @@ class CAgentAdapter(BaseAgentAdapter):
                 "turn_compression_tool_call_threshold"),
             turn_compression_instruction=self._config.get("turn_compression_instruction"),
             compression_instruction=self._config.get("compression_instruction"),
+            compression_send_tools=self._config.get("compression_send_tools"),
             tool_image_limit=self._tool_image_limit,
             compression_model=(
                 self._compression_model if self._compression_model is not self._model else None),

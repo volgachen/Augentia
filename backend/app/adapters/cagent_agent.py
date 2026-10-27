@@ -50,6 +50,7 @@ def make_agent_class(
     turn_compression_tool_call_threshold: int | None = None,
     turn_compression_instruction: str | None = None,
     compression_instruction: str | None = None,
+    compression_send_tools: bool | None = None,
     compression_model=None,
     tool_image_limit: int | None = None,
 ) -> type[BaseAgent]:
@@ -58,6 +59,8 @@ def make_agent_class(
                        ("compression_instruction", compression_instruction)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{key} must be a non-empty string or None")
+    if compression_send_tools is not None and not isinstance(compression_send_tools, bool):
+        raise ValueError("compression_send_tools must be a boolean or None")
 
     class SessionAgent(BaseAgent):
         NAME = name
@@ -81,6 +84,15 @@ def make_agent_class(
         # Summarizer for threshold-triggered compression; None -> the agent's
         # own model. (Manual compression passes it to compress_session.)
         COMPRESSION_MODEL = compression_model
+        # Summarizer requests carry the agent's tools with tool_choice="none"
+        # (CAgent default): with tools=[] some gateways (Claude via Bedrock)
+        # still let the model call tools when the history is full of tool
+        # calls, which fails the compression. config.compression_send_tools
+        # overrides it; None keeps the CAgent default. The model callable must
+        # accept tool_choice (``_make_model`` does).
+        COMPRESSION_SEND_TOOLS = (
+            BaseAgent.COMPRESSION_SEND_TOOLS if compression_send_tools is None
+            else compression_send_tools)
         # Only the newest N tool-result images are sent to the model.
         TOOL_IMAGE_LIMIT = tool_image_limit
 

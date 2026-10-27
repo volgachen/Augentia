@@ -42,7 +42,7 @@ def scripted(*outputs):
     """Model callable returning canned outputs in order."""
     iterator = iter(outputs)
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         return next(iterator)
 
     return model
@@ -50,7 +50,7 @@ def scripted(*outputs):
 
 def call_model(step1_calls, final_text):
     """Model that calls tools once, then answers from the tool results."""
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         if any(m["role"] == "tool" for m in messages):
             return {"content": final_text, "usage": {"prompt_tokens": 120, "completion_tokens": 30}}
         return {"tool_calls": step1_calls, "content": "let me use a tool"}
@@ -354,7 +354,7 @@ async def test_legacy_history_repair(db, wd) -> bool:
     registry = AdapterRegistry()
     seen_messages = []
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         seen_messages.append(messages)
         return {"content": "history loaded fine"}
 
@@ -387,7 +387,7 @@ async def test_turn_compression(db, wd) -> bool:
 
     seen = []
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         seen.append(messages)
         if "Summarize part of a conversation" in summary_instruction(messages):
             return {"content": "User asked to read notes.txt; it says hello."}
@@ -466,7 +466,7 @@ async def test_manual_compression_instruction(db, wd) -> bool:
     custom = "CUSTOM COMPRESSION INSTRUCTION: summarize in one line."
     systems = []
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         instruction = summary_instruction(messages)
         systems.append(instruction)
         if instruction == custom:
@@ -519,6 +519,70 @@ async def test_manual_compression_instruction(db, wd) -> bool:
         await registry.remove(session.id)
 
 
+async def test_compression_sends_tools_with_tool_choice_none(db, wd) -> bool:
+    section("CAgent engine: summarizer gets the agent's tools + tool_choice='none'")
+    import app.adapters.cagent_adapter as cagent_adapter_module
+
+    seen = {}
+
+    def make_model(client, name):
+        async def model(*, messages, tools, tool_choice=None):
+            if summary_instruction(messages).startswith("Summarize the conversation"):
+                seen["summary"] = ([t["name"] for t in tools], tool_choice)
+                return {"content": "short summary"}
+            seen.setdefault("step", ([t["name"] for t in tools], tool_choice))
+            return {"content": "a fairly long answer " * 60}
+        return model
+
+    async def run_case(label, config):
+        seen.clear()
+        original_make_model = cagent_adapter_module._make_model
+        cagent_adapter_module._make_model = make_model
+        registry = AdapterRegistry()
+        try:
+            agent = await db.create_agent(AgentTemplate(
+                name=f"cagent-test-send-tools-{label}", description="x",
+                agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+                tool_names=TOOL_NAMES, config={"engine": "cagent", **config},
+                openai_model="test-model",
+            ))
+            (wd / label).mkdir(parents=True, exist_ok=True)
+            session = await db.create_session(agent.id, working_dir=str(wd / label),
+                                              session_id=f"s-send-tools-{label}")
+            runner = await build_runner(session, agent, db, registry)
+        finally:
+            cagent_adapter_module._make_model = original_make_model
+        try:
+            async def consume():
+                async with runner.subscribe() as events:
+                    return await collect_until_done(events)
+            await runner.submit("tell me something long")
+            await asyncio.wait_for(consume(), 15)
+            result = await asyncio.wait_for(runner.compress(), 15)
+            if result.get("status") != "compressed":
+                fail(f"[{label}] manual compression did not apply: {result}")
+                return None
+            return seen.get("summary"), seen.get("step")
+        finally:
+            await registry.remove(session.id)
+
+    got = await run_case("default", {})
+    if got is None:
+        return False
+    summary, step = got
+    if summary != (step[0], "none") or not summary[0]:
+        fail(f"default: summarizer got tools={summary}, step tools={step}")
+        return False
+    got = await run_case("off", {"compression_send_tools": False})
+    if got is None:
+        return False
+    if got[0] != ([], None):
+        fail(f"compression_send_tools=false: summarizer got {got[0]}")
+        return False
+    ok("summarizer: same tools as a normal step + tool_choice='none'; config can turn it off")
+    return True
+
+
 async def test_compression_model(db, wd) -> bool:
     section("CAgent engine: config.compression_model selects the summarizer model")
     import app.adapters.cagent_adapter as cagent_adapter_module
@@ -526,7 +590,7 @@ async def test_compression_model(db, wd) -> bool:
     calls = []  # (model_name, is_summary)
 
     def make_model(client, name):
-        async def model(*, messages, tools):
+        async def model(*, messages, tools, tool_choice=None):
             is_summary = summary_instruction(messages).startswith("Summarize the conversation")
             calls.append((name, is_summary))
             if is_summary:
@@ -593,7 +657,7 @@ async def test_model_error_path(db, wd) -> bool:
     section("CAgent adapter: model failure emits ERROR then DONE (no hang)")
     session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-error")
 
-    async def broken_model(*, messages, tools):
+    async def broken_model(*, messages, tools, tool_choice=None):
         raise RuntimeError("model gateway down")
 
     adapter = CAgentAdapter(
@@ -640,6 +704,7 @@ async def main() -> int:
             await test_turn_compression(db, wd / "turn-compression"),
             await test_manual_compression_instruction(db, wd / "manual-compression"),
             await test_compression_model(db, wd / "compression-model"),
+            await test_compression_sends_tools_with_tool_choice_none(db, wd / "send-tools"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):

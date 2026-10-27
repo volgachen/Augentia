@@ -71,7 +71,7 @@ def reader(*paths, final="done"):
     """Scripted model: one read call per path (one per step), then a final answer."""
     calls: list[list[dict]] = []
 
-    async def model(*, messages, tools):
+    async def model(*, messages, tools, tool_choice=None):
         calls.append(messages)
         step = len(calls)
         if step <= len(paths):
@@ -150,7 +150,7 @@ async def test_engine(h: Harness) -> None:
     check(json.loads(tool_row.content)["role"] == "tool", "tool row content stays OpenAI-native JSON")
     check(any(e.type == StreamEventType.DONE for e in events), "turn completes")
 
-    async def followup(*, messages, tools):
+    async def followup(*, messages, tools, tool_choice=None):
         calls.append(messages)
         return {"content": "still red"}
 
@@ -271,7 +271,7 @@ async def test_interleaved_engine(h: Harness) -> None:
         tool_row = next(r for r in rows if r.role == MessageRole.TOOL)
         check([i.get("at") for i in tool_row.metadata.get("images") or []] == [7, 14], "tool row persists at")
 
-        async def followup(*, messages, tools):
+        async def followup(*, messages, tools, tool_choice=None):
             calls.append(messages)
             return {"content": "again"}
 
