@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { ImageRef, StreamEvent } from "../../api/types";
 import ToolPreview from "../ToolPreview";
 import { ImageThumbs } from "../ImageAttachments";
@@ -241,21 +241,53 @@ function DivergeIcon() {
 
 function CompressionBlock({
   group,
+  depth,
   renderItem,
 }: {
   group: CompressionGroup;
+  // How many expanded compression boxes enclose this one.
+  depth: number;
   renderItem: (item: ConsoleItem, key: string | number) => React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const collapsedFromStickyRef = useRef(false);
   const isTurn = group.event.compression?.kind === "turn";
   const hiddenCount = countMessages(group.hidden);
   const summary = String(group.event.data ?? "");
   const label = isTurn ? "本轮已压缩" : "已压缩";
+
+  // Collapsing from the sticky button removes the content being read, so
+  // bring this block (now just the toggle + summary) back into view.
+  useLayoutEffect(() => {
+    if (expanded || !collapsedFromStickyRef.current) return;
+    collapsedFromStickyRef.current = false;
+    rootRef.current?.scrollIntoView({ block: "nearest" });
+  }, [expanded]);
+
   return (
-    <div className="my-2 text-left">
+    <div ref={rootRef} className="my-2 text-left">
       {expanded && hiddenCount > 0 && (
         <div className="mb-2 rounded-md border border-dashed border-slate-600 bg-slate-800/50 px-2 py-1.5">
-          <div className="mb-1 text-[11px] text-slate-400">
+          {/* Sticks to the top-left of the visible area while this box is on
+              screen; nested blocks stack below their parent's button. */}
+          <div
+            className="sticky z-20 w-fit"
+            style={{ top: `${depth * 1.75}rem` }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                collapsedFromStickyRef.current = true;
+                setExpanded(false);
+              }}
+              className="rounded border border-slate-500 bg-slate-900/95 px-2 py-0.5 text-[11px] text-slate-200 shadow hover:border-emerald-600 hover:text-emerald-300"
+              title="收起被压缩的原始消息"
+            >
+              ▴ 收起{depth > 0 ? `（第 ${depth + 1} 层）` : ""}
+            </button>
+          </div>
+          <div className="mb-1 mt-1 text-[11px] text-slate-400">
             以下 {hiddenCount} 条为被压缩的原始消息，模型已看不到它们，只看到下方摘要
           </div>
           <div className="flex flex-col gap-1 opacity-60 saturate-50">
@@ -302,6 +334,8 @@ export type ConsoleItemLineProps = {
   onCancelEdit?: () => void;
   onSubmitEdit?: () => void;
   onDiverge?: (messageId: string) => void;
+  // Internal: nesting level inside expanded compression boxes.
+  compressionDepth?: number;
 };
 
 export default function ConsoleItemLine(props: ConsoleItemLineProps) {
@@ -319,6 +353,7 @@ export default function ConsoleItemLine(props: ConsoleItemLineProps) {
     onCancelEdit,
     onSubmitEdit,
     onDiverge,
+    compressionDepth = 0,
   } = props;
   if (isToolCallView(item)) {
     return <ToolCallLine item={item} showToolCalls={showToolCalls} showToolResults={showToolResults} />;
@@ -327,7 +362,10 @@ export default function ConsoleItemLine(props: ConsoleItemLineProps) {
     return (
       <CompressionBlock
         group={item}
-        renderItem={(child, key) => <ConsoleItemLine key={key} {...props} item={child} />}
+        depth={compressionDepth}
+        renderItem={(child, key) => (
+          <ConsoleItemLine key={key} {...props} item={child} compressionDepth={compressionDepth + 1} />
+        )}
       />
     );
   }
@@ -336,6 +374,7 @@ export default function ConsoleItemLine(props: ConsoleItemLineProps) {
     return (
       <CompressionBlock
         group={{ kind: "compression_group", event: item, hidden: [] }}
+        depth={compressionDepth}
         renderItem={() => null}
       />
     );
