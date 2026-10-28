@@ -9,6 +9,8 @@ import type {
   PluginInstance,
   PluginLogLine,
   PluginRun,
+  ShareState,
+  SharedSession,
   Task,
 } from "./types";
 
@@ -51,6 +53,13 @@ export interface UploadedAttachment {
 export function attachmentUrl(ref: string): string {
   const id = ref.startsWith("att:") ? ref.slice(4) : ref;
   return `${BASE}/attachments/${encodeURIComponent(id)}`;
+}
+
+// Image URL inside a shared transcript; served without login, but only for
+// images that appear in that shared session.
+export function sharedAttachmentUrl(sessionId: string, ref: string): string {
+  const id = ref.startsWith("att:") ? ref.slice(4) : ref;
+  return `${BASE}/share/${encodeURIComponent(sessionId)}/attachments/${encodeURIComponent(id)}`;
 }
 
 async function uploadAttachment(file: Blob): Promise<UploadedAttachment> {
@@ -220,11 +229,20 @@ export const api = {
         method: "POST",
         body: JSON.stringify({}),
       }),
+    share: (id: string) => request<ShareState>(`/sessions/${id}/share`),
+    updateShare: (id: string, enabled: boolean) =>
+      request<ShareState>(`/sessions/${id}/share`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      }),
     compress: (id: string) =>
       request<CompressResult>(`/sessions/${id}/compress`, { method: "POST" }),
     tasks: (id: string) => request<Task[]>(`/sessions/${id}/tasks`),
     delete: (id: string) =>
       request<void>(`/sessions/${id}`, { method: "DELETE" }),
+  },
+  share: {
+    get: (id: string) => request<SharedSession>(`/share/${encodeURIComponent(id)}`),
   },
   fs: {
     browse: (path?: string | null) =>

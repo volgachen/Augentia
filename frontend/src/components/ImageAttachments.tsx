@@ -1,4 +1,4 @@
-import { attachmentUrl } from "../api/client";
+import { useAttachmentUrl } from "./console/attachmentUrl";
 import type { ImageRef } from "../api/types";
 import type { PendingImage } from "../hooks/useImageAttachments";
 
@@ -50,6 +50,7 @@ export function AttachmentTray({
 
 /** Images attached to a sent user message; click opens the full image. */
 export function ImageThumbs({ images }: { images?: ImageRef[] | null }) {
+  const attachmentUrl = useAttachmentUrl();
   if (!images || images.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-2 mt-1">

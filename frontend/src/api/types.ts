@@ -96,6 +96,24 @@ export interface Message {
   deleted_at: string | null;
 }
 
+export interface ShareState {
+  enabled: boolean;
+  updated_at: string | null;
+}
+
+// Public read-only view of a shared session (GET /share/{id}).
+export interface SharedSession {
+  session: {
+    id: string;
+    title: string | null;
+    agent_name: string | null;
+    status: SessionStatus;
+    created_at: string;
+    last_message_at: string | null;
+  };
+  messages: Message[];
+}
+
 export interface CompressResult {
   status: "compressed" | "skipped" | "failed";
   reason?: string;

@@ -102,7 +102,7 @@ function toolMessageToEventData(content: string): string {
 // compression summary instead, so the prefix is redundant there.
 const TURN_SUMMARY_PREFIX = "Summary of an earlier turn:\n";
 
-function messageToEvent(m: Message): StreamEvent {
+export function messageToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user":
       if (m.metadata?.cagent_name === "turn_summary") {

@@ -9,8 +9,11 @@ import SessionDashboard from "./pages/SessionDashboard.tsx";
 import LiveConsole from "./pages/LiveConsole.tsx";
 import PluginRegistry from "./pages/PluginRegistry.tsx";
 import PluginConsole from "./pages/PluginConsole.tsx";
+import SharePage from "./pages/SharePage.tsx";
 
 const router = createBrowserRouter([
+  // Public read-only view; outside AuthGuard so it works without logging in.
+  { path: "/share/:sessionId", element: <SharePage /> },
   {
     path: "/",
     element: (

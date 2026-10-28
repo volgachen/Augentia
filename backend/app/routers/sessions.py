@@ -12,6 +12,7 @@ from app.models.domain import Session, SessionStatus, MessageRole, AgentType
 from app.auth import is_websocket_authenticated
 from app.adapters.registry import AdapterRegistry, get_registry
 from app.core.session_config import ensure_session_config, write_session_config
+from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt
 from app.core.session_runtime import build_runner, get_or_rehydrate
 from app.core.workspace import (
@@ -404,6 +405,34 @@ async def test_tool_permission(
     }
 
 
+class UpdateShareRequest(BaseModel):
+    enabled: bool
+
+
+@router.get("/{session_id}/share")
+async def get_session_share(session_id: str, db: IAgentDatabase = Depends(get_db)):
+    try:
+        await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return read_share(session_id)
+
+
+@router.put("/{session_id}/share")
+async def update_session_share(
+    session_id: str,
+    body: UpdateShareRequest,
+    db: IAgentDatabase = Depends(get_db),
+):
+    """Turn the public read-only /share/{id} view of this session on or off."""
+    try:
+        await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    logger.info("session share id=%s enabled=%s", session_id, body.enabled)
+    return write_share(session_id, body.enabled)
+
+
 @router.get("/{session_id}/messages")
 async def get_messages(
     session_id: str,
@@ -414,6 +443,11 @@ async def get_messages(
         messages = await db.get_messages(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    return transcript_messages(messages, include_compression=include_compression)
+
+
+def transcript_messages(messages: list, *, include_compression: bool) -> list:
+    """The client-facing transcript (also served by the public share view)."""
     # Framework mark rows (turn_end / compression boundaries) are internal
     # bookkeeping for the CAgent engine loop, not conversation content.
     if not include_compression:

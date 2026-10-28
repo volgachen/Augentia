@@ -21,7 +21,7 @@ from app.plugins.service import (
     register_plugin_event_delivery,
     stop_running_plugin_instances,
 )
-from app.routers import agents, attachments, auth, sessions, fs, plugins, tools, tasks
+from app.routers import agents, attachments, auth, sessions, share, fs, plugins, tools, tasks
 
 
 @asynccontextmanager
@@ -63,7 +63,10 @@ app.add_middleware(
 @app.middleware("http")
 async def require_authentication(request: Request, call_next):
     public_paths = {"/health", "/api/v1/auth/login", "/api/v1/auth/me"}
-    if request.url.path.startswith("/api/v1") and request.url.path not in public_paths:
+    path = request.url.path
+    # /share serves only sessions their owner explicitly shared (read-only).
+    is_public = path in public_paths or path.startswith("/api/v1/share/")
+    if path.startswith("/api/v1") and not is_public:
         if not is_request_authenticated(request, settings):
             return JSONResponse(status_code=401, content={"detail": "authentication required"})
     return await call_next(request)
@@ -72,6 +75,7 @@ async def require_authentication(request: Request, call_next):
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(agents.router, prefix="/api/v1")
 app.include_router(sessions.router, prefix="/api/v1")
+app.include_router(share.router, prefix="/api/v1")
 app.include_router(fs.router, prefix="/api/v1")
 app.include_router(plugins.router, prefix="/api/v1")
 app.include_router(tools.router, prefix="/api/v1")
