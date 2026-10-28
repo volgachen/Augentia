@@ -98,9 +98,27 @@ function toolMessageToEventData(content: string): string {
   return JSON.stringify({ name: "tool", result: content });
 }
 
+// CAgent prefixes a turn summary's text with this; the console shows it as a
+// compression summary instead, so the prefix is redundant there.
+const TURN_SUMMARY_PREFIX = "Summary of an earlier turn:\n";
+
 function messageToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user":
+      if (m.metadata?.cagent_name === "turn_summary") {
+        const replaced = m.metadata.replaced_message_ids;
+        return {
+          type: "compression",
+          data: m.content.startsWith(TURN_SUMMARY_PREFIX)
+            ? m.content.slice(TURN_SUMMARY_PREFIX.length)
+            : m.content,
+          message_id: m.id,
+          compression: {
+            kind: "turn",
+            replaced: Array.isArray(replaced) ? replaced.map(String) : [],
+          },
+        };
+      }
       return {
         type: "user",
         data: m.content,
@@ -128,7 +146,13 @@ function messageToEvent(m: Message): StreamEvent {
       } catch {
         // malformed mark — show an empty summary
       }
-      return { type: "compression", data: summary, message_id: m.id };
+      const through = m.metadata?.compressed_through;
+      return {
+        type: "compression",
+        data: summary,
+        message_id: m.id,
+        compression: { kind: "session", through: typeof through === "string" ? through : null },
+      };
     }
     default:
       return { type: "text", data: m.content, message_id: m.id };

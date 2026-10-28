@@ -53,7 +53,77 @@ interface ToolCallView {
   resultImages?: ImageRef[];
 }
 
-type ConsoleItem = StreamEvent | ToolCallView;
+// A compression summary together with the rows it replaced. The model sees
+// only the summary, so the console folds `hidden` by default.
+interface CompressionGroup {
+  kind: "compression_group";
+  event: StreamEvent;
+  hidden: ConsoleItem[];
+}
+
+type ConsoleItem = StreamEvent | ToolCallView | CompressionGroup;
+
+type FoldNode = { event: StreamEvent; hidden?: FoldNode[] };
+
+function nodeContains(node: FoldNode, messageId: string): boolean {
+  if (node.event.message_id === messageId) return true;
+  return !!node.hidden?.some((child) => nodeContains(child, messageId));
+}
+
+// Nest every row a compression replaced under that compression's event. A
+// whole-session compression replaces everything through its boundary (earlier
+// compression groups included, so they nest); a turn compression replaces
+// exactly the listed rows. Events without compression info pass through.
+function foldCompressed(events: StreamEvent[]): FoldNode[] {
+  const out: FoldNode[] = [];
+  for (const event of events) {
+    const info = event.type === "compression" ? event.compression : undefined;
+    if (!info) {
+      out.push(event.type === "compression" ? { event, hidden: [] } : { event });
+      continue;
+    }
+    let owned: Set<number>;
+    if (info.kind === "session") {
+      const through = info.through;
+      const end = through ? out.findIndex((node) => nodeContains(node, through)) : -1;
+      owned = new Set(Array.from({ length: end + 1 }, (_, i) => i));
+    } else {
+      const replaced = new Set(info.replaced ?? []);
+      owned = new Set(
+        out.flatMap((node, i) =>
+          node.event.message_id && replaced.has(node.event.message_id) ? [i] : [],
+        ),
+      );
+    }
+    const hidden = out.filter((_, i) => owned.has(i));
+    const kept = out.filter((_, i) => !owned.has(i));
+    out.length = 0;
+    out.push(...kept, { event, hidden });
+  }
+  return out;
+}
+
+function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
+  const toItems = (nodes: FoldNode[]): ConsoleItem[] => {
+    const items: ConsoleItem[] = [];
+    let run: StreamEvent[] = [];
+    const flush = () => {
+      items.push(...buildFlatItems(run));
+      run = [];
+    };
+    for (const node of nodes) {
+      if (node.hidden) {
+        flush();
+        items.push({ kind: "compression_group", event: node.event, hidden: toItems(node.hidden) });
+      } else {
+        run.push(node.event);
+      }
+    }
+    flush();
+    return items;
+  };
+  return toItems(foldCompressed(events));
+}
 
 function parseAssistantData(raw: string): AssistantPayload {
   try {
@@ -100,7 +170,7 @@ function toOneLine(s: string, max = 200): string {
   return flat.length > max ? flat.slice(0, max) + "…" : flat;
 }
 
-function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
+function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
   const items: ConsoleItem[] = [];
   const toolCallsById = new Map<string, ToolCallView>();
   const attachResult = (
@@ -438,27 +508,57 @@ function DivergeIcon() {
   );
 }
 
-function CompressionDivider({ summary }: { summary: string }) {
+function countMessages(items: ConsoleItem[]): number {
+  return items.reduce(
+    (n, item) =>
+      n + (isCompressionGroup(item) ? 1 + countMessages(item.hidden) : 1),
+    0,
+  );
+}
+
+function CompressionBlock({
+  group,
+  renderItem,
+}: {
+  group: CompressionGroup;
+  renderItem: (item: ConsoleItem, key: string | number) => React.ReactNode;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const isTurn = group.event.compression?.kind === "turn";
+  const hiddenCount = countMessages(group.hidden);
+  const summary = String(group.event.data ?? "");
+  const label = isTurn ? "本轮已压缩" : "已压缩";
   return (
     <div className="my-2 text-left">
+      {expanded && hiddenCount > 0 && (
+        <div className="mb-2 rounded-md border border-dashed border-slate-600 bg-slate-800/50 px-2 py-1.5">
+          <div className="mb-1 text-[11px] text-slate-400">
+            以下 {hiddenCount} 条为被压缩的原始消息，模型已看不到它们，只看到下方摘要
+          </div>
+          <div className="flex flex-col gap-1 opacity-60 saturate-50">
+            {group.hidden.map((item, i) =>
+              renderItem(item, isToolCallView(item) ? item.callId : itemMessageId(item) ?? i),
+            )}
+          </div>
+        </div>
+      )}
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
         className="w-full flex items-center gap-2 text-[11px] text-emerald-400/80 hover:text-emerald-300"
-        title="The model now sees this summary instead of the messages above"
+        title={expanded ? "收起被压缩的原始消息" : "展开被压缩的原始消息"}
       >
         <span className="flex-1 border-t border-dashed border-emerald-800" />
         <span className="shrink-0">
-          {expanded ? "▾" : "▸"} 已压缩到此处：上方消息已被摘要替代
+          {expanded ? "▾" : "▸"} {label}
+          {hiddenCount > 0 ? ` ${hiddenCount} 条消息` : ""}，模型从这里开始只看到摘要
+          {hiddenCount > 0 ? (expanded ? "（点击收起）" : "（点击展开原始消息）") : ""}
         </span>
         <span className="flex-1 border-t border-dashed border-emerald-800" />
       </button>
-      {expanded && (
-        <div className="mt-1 rounded border border-emerald-900 bg-emerald-950/20 px-2 py-1.5 font-mono text-xs text-emerald-200/90 whitespace-pre-wrap break-words">
-          {summary || "(empty summary)"}
-        </div>
-      )}
+      <div className="mt-1 rounded border border-emerald-900 bg-emerald-950/20 px-2 py-1.5 font-mono text-xs text-emerald-200/90 whitespace-pre-wrap break-words">
+        {summary || "(empty summary)"}
+      </div>
     </div>
   );
 }
@@ -467,20 +567,16 @@ function isToolCallView(item: ConsoleItem): item is ToolCallView {
   return "kind" in item && item.kind === "tool_call";
 }
 
-function ConsoleItemLine({
-  item,
-  editingMessageId,
-  editingContent,
-  generating,
-  deriving,
-  showToolCalls,
-  showToolResults,
-  onStartEdit,
-  onEditChange,
-  onCancelEdit,
-  onSubmitEdit,
-  onDiverge,
-}: {
+function isCompressionGroup(item: ConsoleItem): item is CompressionGroup {
+  return "kind" in item && item.kind === "compression_group";
+}
+
+function itemMessageId(item: ConsoleItem): string | undefined {
+  if (isToolCallView(item)) return undefined;
+  return isCompressionGroup(item) ? item.event.message_id : item.message_id;
+}
+
+type ConsoleItemLineProps = {
   item: ConsoleItem;
   editingMessageId: string | null;
   editingContent: string;
@@ -493,12 +589,42 @@ function ConsoleItemLine({
   onCancelEdit: () => void;
   onSubmitEdit: () => void;
   onDiverge: (messageId: string) => void;
-}) {
+};
+
+function ConsoleItemLine(props: ConsoleItemLineProps) {
+  const {
+    item,
+    editingMessageId,
+    editingContent,
+    generating,
+    deriving,
+    showToolCalls,
+    showToolResults,
+    onStartEdit,
+    onEditChange,
+    onCancelEdit,
+    onSubmitEdit,
+    onDiverge,
+  } = props;
   if (isToolCallView(item)) {
     return <ToolCallLine item={item} showToolCalls={showToolCalls} showToolResults={showToolResults} />;
   }
+  if (isCompressionGroup(item)) {
+    return (
+      <CompressionBlock
+        group={item}
+        renderItem={(child, key) => <ConsoleItemLine key={key} {...props} item={child} />}
+      />
+    );
+  }
   if (item.type === "compression") {
-    return <CompressionDivider summary={String(item.data ?? "")} />;
+    // Live/unfolded compression event with nothing attached.
+    return (
+      <CompressionBlock
+        group={{ kind: "compression_group", event: item, hidden: [] }}
+        renderItem={() => null}
+      />
+    );
   }
   if (item.type === "tool_result" && (!showToolCalls || !showToolResults)) {
     return null;
@@ -838,7 +964,7 @@ export default function LiveConsole() {
           )}
           {consoleItems.map((item, i) => (
             <div
-              key={isToolCallView(item) ? item.callId : item.message_id ?? i}
+              key={isToolCallView(item) ? item.callId : itemMessageId(item) ?? i}
               ref={(node) => {
                 itemRefs.current[i] = node;
               }}

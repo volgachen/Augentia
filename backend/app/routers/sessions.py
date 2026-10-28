@@ -415,18 +415,46 @@ async def get_messages(
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     # Framework mark rows (turn_end / compression boundaries) are internal
-    # bookkeeping for the CAgent engine loop, not conversation content. The
-    # console opts in to compression_completed marks to draw a divider.
-    def keep(m) -> bool:
+    # bookkeeping for the CAgent engine loop, not conversation content.
+    if not include_compression:
+        return [m for m in messages if m.role != MessageRole.MARK]
+    return _with_compression_marks(messages)
+
+
+def _with_compression_marks(messages: list) -> list:
+    """Keep compression_completed marks so the console can fold compressed history.
+
+    A mark's boundary (metadata.through_message_id) names a turn_end mark the
+    client never receives, so each kept mark gets metadata.compressed_through:
+    the id of the last non-mark row at or before that boundary (None if there
+    is none) — everything up to it is what the summary replaced. Marks whose
+    boundary is not in this session (copied by diverge/clone) are dropped,
+    matching the engine, which ignores them.
+    """
+    # id -> last non-mark row id at or before that row
+    visible_through: dict[str, str | None] = {}
+    last_visible: str | None = None
+    result = []
+    for m in messages:
         if m.role != MessageRole.MARK:
-            return True
-        if not include_compression:
-            return False
+            last_visible = m.id
+            visible_through[m.id] = m.id
+            result.append(m)
+            continue
+        visible_through[m.id] = last_visible
         try:
-            return json.loads(m.content).get("name") == "compression_completed"
-        except (ValueError, AttributeError):
-            return False
-    return [m for m in messages if keep(m)]
+            payload = json.loads(m.content)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("name") != "compression_completed":
+            continue
+        through = (payload.get("metadata") or {}).get("through_message_id")
+        if through not in visible_through:
+            continue
+        result.append(m.model_copy(update={
+            "metadata": {**m.metadata, "compressed_through": visible_through[through]},
+        }))
+    return result
 
 
 @router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)

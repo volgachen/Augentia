@@ -111,6 +111,19 @@ export interface StreamEvent {
   // On "user" events: images attached to that turn; on "tool_result" events:
   // images the tool returned.
   images?: ImageRef[] | null;
+  // Client-only, on "compression" events loaded from history: which earlier
+  // rows the summary replaced (they are folded in the console by default).
+  compression?: CompressionInfo;
+}
+
+export interface CompressionInfo {
+  // "session": whole-history compression (compression_completed mark) — it
+  // replaces every row up to and including `through` (null: none visible).
+  // "turn": turn-scoped compression (a turn_summary user row) — it replaces
+  // exactly the `replaced` row ids.
+  kind: "session" | "turn";
+  through?: string | null;
+  replaced?: string[];
 }
 
 export type TaskStatus = "pending" | "in_progress" | "completed";
