@@ -459,6 +459,82 @@ async def test_turn_compression(db, wd) -> bool:
         await registry.remove(session.id)
 
 
+async def test_turn_compression_marker(db, wd) -> bool:
+    section("CAgent engine: config.turn_compression_marker sets the summarizer's start marker")
+    import app.adapters.cagent_adapter as cagent_adapter_module
+    from cagent import BaseAgent
+
+    async def run_case(label, config):
+        """Run one tool-heavy turn; return the summarizer's start-marker content."""
+        summarizer_calls = []
+
+        async def model(*, messages, tools, tool_choice=None):
+            if "Summarize part of a conversation" in summary_instruction(messages):
+                summarizer_calls.append(messages)
+                return {"content": "User asked to read notes.txt; it says hello."}
+            if any(m["role"] == "tool" for m in messages):
+                return {"content": "notes.txt says hello"}
+            return {"tool_calls": [{"id": f"read-{label}", "name": "read",
+                                    "arguments": {"path": "notes.txt"}}]}
+
+        original_make_model = cagent_adapter_module._make_model
+        cagent_adapter_module._make_model = lambda client, name: model
+        registry = AdapterRegistry()
+        case_wd = wd / label
+        try:
+            agent = await db.create_agent(AgentTemplate(
+                name=f"cagent-test-turn-marker-{label}", description="x",
+                agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+                tool_names=TOOL_NAMES,
+                config={"engine": "cagent", "turn_compression_tool_call_threshold": 1, **config},
+                openai_model="test-model",
+            ))
+            case_wd.mkdir(parents=True, exist_ok=True)
+            (case_wd / "notes.txt").write_text("hello " * 400, encoding="utf-8")
+            session = await db.create_session(agent.id, working_dir=str(case_wd),
+                                              session_id=f"s-turn-marker-{label}")
+            runner = await build_runner(session, agent, db, registry)
+        finally:
+            cagent_adapter_module._make_model = original_make_model
+
+        async def approve(event):
+            data = json.loads(event.data) if isinstance(event.data, str) else event.data
+            await runner.resolve_decision(data["call_id"], True)
+
+        try:
+            async def consume():
+                async with runner.subscribe() as events:
+                    return await collect_until_done(events, on_confirm=approve)
+            await runner.submit("read notes.txt")
+            await asyncio.wait_for(consume(), 15)
+        finally:
+            await registry.remove(session.id)
+        if len(summarizer_calls) != 1:
+            fail(f"[{label}] expected one summarizer call, got {len(summarizer_calls)}")
+            return None
+        # Summarizer history: [system, <marker>, user request, assistant, tool, ..., instruction]
+        # (the turn start mark is placed before the turn's input message).
+        sent = summarizer_calls[0]
+        request = next(i for i, m in enumerate(sent)
+                       if m["role"] == "user" and m["content"] == "read notes.txt")
+        marker = sent[request - 1]
+        if marker["role"] != "user":
+            fail(f"[{label}] message before the request is not the marker: {marker}")
+            return None
+        return marker["content"]
+
+    for label, config, expected in (
+            ("default", {}, BaseAgent.TURN_COMPRESSION_MARKER),
+            ("custom", {"turn_compression_marker": "从这里开始压缩"}, "从这里开始压缩"),
+            ("empty", {"turn_compression_marker": ""}, "")):
+        got = await run_case(label, config)
+        if got != expected:
+            fail(f"[{label}] marker content={got!r}, expected {expected!r}")
+            return False
+    ok("turn_compression_marker: unset -> CAgent default; custom and empty string honored")
+    return True
+
+
 async def test_manual_compression_instruction(db, wd) -> bool:
     section("CAgent engine: config.compression_instruction drives manual compression")
     import app.adapters.cagent_adapter as cagent_adapter_module
@@ -702,6 +778,7 @@ async def main() -> int:
             await test_cancel_during_confirm(db, wd / "cancel"),
             await test_legacy_history_repair(db, wd / "legacy"),
             await test_turn_compression(db, wd / "turn-compression"),
+            await test_turn_compression_marker(db, wd / "turn-marker"),
             await test_manual_compression_instruction(db, wd / "manual-compression"),
             await test_compression_model(db, wd / "compression-model"),
             await test_compression_sends_tools_with_tool_choice_none(db, wd / "send-tools"),

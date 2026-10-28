@@ -51,6 +51,7 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
             config = _with_agent_keys(session_config, agent, (
                 "max_steps", "compression_token_threshold", "compression_turn_threshold",
                 "turn_compression_tool_call_threshold", "turn_compression_instruction",
+                "turn_compression_marker",
                 "compression_instruction", "compression_model", "compression_send_tools",
                 "model_params", "compression_model_params",
                 "vision", "image_detail", "tool_image_limit", "tool_image_mode"))

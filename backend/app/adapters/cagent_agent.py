@@ -49,6 +49,7 @@ def make_agent_class(
     compression_turn_threshold: int | None = None,
     turn_compression_tool_call_threshold: int | None = None,
     turn_compression_instruction: str | None = None,
+    turn_compression_marker: str | None = None,
     compression_instruction: str | None = None,
     compression_send_tools: bool | None = None,
     compression_model=None,
@@ -59,6 +60,9 @@ def make_agent_class(
                        ("compression_instruction", compression_instruction)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
             raise ValueError(f"{key} must be a non-empty string or None")
+    # Unlike the instructions, the marker may be empty ("" is a valid override).
+    if turn_compression_marker is not None and not isinstance(turn_compression_marker, str):
+        raise ValueError("turn_compression_marker must be a string or None")
     if compression_send_tools is not None and not isinstance(compression_send_tools, bool):
         raise ValueError("compression_send_tools must be a boolean or None")
 
@@ -77,6 +81,12 @@ def make_agent_class(
         # falls back to the CAgent default when not set.
         TURN_COMPRESSION_INSTRUCTION = (
             turn_compression_instruction or BaseAgent.TURN_COMPRESSION_INSTRUCTION)
+        # Optional custom text for the user message that, in the summarizer
+        # request, replaces the turn start mark (where compression begins).
+        # None -> CAgent default; "" is honored as an empty marker.
+        TURN_COMPRESSION_MARKER = (
+            BaseAgent.TURN_COMPRESSION_MARKER if turn_compression_marker is None
+            else turn_compression_marker)
         # Optional custom instruction for whole-history compression (manual
         # Compress button and threshold-triggered); CAgent default otherwise.
         COMPRESSION_INSTRUCTION = (

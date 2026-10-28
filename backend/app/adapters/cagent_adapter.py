@@ -276,6 +276,7 @@ class CAgentAdapter(BaseAgentAdapter):
             turn_compression_tool_call_threshold=self._config.get(
                 "turn_compression_tool_call_threshold"),
             turn_compression_instruction=self._config.get("turn_compression_instruction"),
+            turn_compression_marker=self._config.get("turn_compression_marker"),
             compression_instruction=self._config.get("compression_instruction"),
             compression_send_tools=self._config.get("compression_send_tools"),
             tool_image_limit=self._tool_image_limit,
