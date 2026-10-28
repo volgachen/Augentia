@@ -22,6 +22,37 @@ const EMPTY: CreateAgentPayload = {
   openai_base_url: null,
 };
 
+// config.model_params is edited as JSON text; reserved keys mirror the backend
+// (app/adapters/model_params.py), which rejects them at session start.
+const RESERVED_PARAM_KEYS = [
+  "model", "messages", "tools", "tool_choice", "functions", "function_call",
+  "stream", "stream_options", "n",
+];
+
+const paramsToText = (value: unknown) =>
+  value && typeof value === "object" && Object.keys(value).length > 0
+    ? JSON.stringify(value, null, 2)
+    : "";
+
+// Returns the parsed object (undefined for empty text) or an error message.
+function parseParams(text: string): { value?: Record<string, unknown>; error?: string } {
+  if (!text.trim()) return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (e) {
+    return { error: `Invalid JSON: ${(e as Error).message}` };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { error: "Model params must be a JSON object." };
+  }
+  const reserved = Object.keys(value).filter((k) => RESERVED_PARAM_KEYS.includes(k));
+  if (reserved.length > 0) {
+    return { error: `Reserved keys are set by the engine: ${reserved.join(", ")}` };
+  }
+  return { value: value as Record<string, unknown> };
+}
+
 const inputClass =
   "w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 focus:border-indigo-500 outline-none text-sm text-gray-100";
 
@@ -31,10 +62,12 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
   const [availableTools, setAvailableTools] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [paramsText, setParamsText] = useState("");
 
   useEffect(() => {
     if (!open) return;
     setError(null);
+    setParamsText(paramsToText(agent?.config?.model_params));
     setForm(
       agent
         ? {
@@ -55,6 +88,7 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
   if (!open) return null;
 
   const isToolUse = form.agent_type === "tool_use";
+  const paramsResult = parseParams(paramsText);
 
   const patch = (p: Partial<CreateAgentPayload>) => setForm((f) => ({ ...f, ...p }));
 
@@ -66,14 +100,23 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
     });
 
   const handleSave = async () => {
+    if (paramsResult.error) {
+      setError(paramsResult.error);
+      return;
+    }
     setSaving(true);
     setError(null);
+    // Empty text removes model_params; otherwise store the parsed object.
+    const config = { ...(form.config ?? {}) };
+    if (paramsResult.value) config.model_params = paramsResult.value;
+    else delete config.model_params;
+    const payload: CreateAgentPayload = { ...form, config };
     try {
       if (isEdit && agent) {
-        const { agent_type: _t, ...rest } = form;
+        const { agent_type: _t, ...rest } = payload;
         await api.agents.update(agent.id, rest);
       } else {
-        await api.agents.create(form);
+        await api.agents.create(payload);
       }
       onSaved();
       onClose();
@@ -182,6 +225,20 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
               />
             </label>
 
+            <label className="flex flex-col gap-1 text-sm text-gray-300">
+              Model params (optional JSON)
+              <textarea
+                className={`${inputClass} min-h-[72px] font-mono`}
+                placeholder={'{"temperature": 0.7, "reasoning_effort": "high"}'}
+                value={paramsText}
+                onChange={(e) => setParamsText(e.target.value)}
+              />
+              <span className={`text-xs ${paramsResult.error ? "text-red-400" : "text-gray-500"}`}>
+                {paramsResult.error ??
+                  "Merged into every model request. Provider-specific fields go under \"extra_body\". Applies to new sessions."}
+              </span>
+            </label>
+
             <div className="flex flex-col gap-1 text-sm text-gray-300">
               <label className="flex items-center gap-2 text-sm text-gray-200">
                 <input
@@ -212,7 +269,7 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
           </button>
           <button
             onClick={handleSave}
-            disabled={saving || !form.name.trim()}
+            disabled={saving || !form.name.trim() || !!paramsResult.error}
             className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-sm text-white font-medium"
           >
             {saving ? "Saving..." : "Save"}

@@ -30,6 +30,15 @@ async def ensure_system_prompt_snapshot(
     return await db.update_session_system_prompt_snapshot(session.id, prompt)
 
 
+def _with_agent_keys(session_config: dict, agent: AgentTemplate, keys) -> dict:
+    """Session config plus the given agent-level config keys (agent wins)."""
+    config = dict(session_config)
+    for key in keys:
+        if key in (agent.config or {}):
+            config[key] = agent.config[key]
+    return config
+
+
 def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | None = None) -> "BaseAgentAdapter":
     session_config = ensure_session_config(session.id, agent.config)
     if agent.agent_type == AgentType.TOOL_USE:
@@ -39,13 +48,12 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
         # loop. Both read and write the same persisted history format.
         engine = agent_engine(agent)
         if engine == "cagent":
-            config = dict(session_config)
-            for key in ("max_steps", "compression_token_threshold", "compression_turn_threshold",
-                        "turn_compression_tool_call_threshold", "turn_compression_instruction",
-                        "compression_instruction", "compression_model", "compression_send_tools",
-                        "vision", "image_detail", "tool_image_limit", "tool_image_mode"):
-                if key in (agent.config or {}):
-                    config[key] = agent.config[key]
+            config = _with_agent_keys(session_config, agent, (
+                "max_steps", "compression_token_threshold", "compression_turn_threshold",
+                "turn_compression_tool_call_threshold", "turn_compression_instruction",
+                "compression_instruction", "compression_model", "compression_send_tools",
+                "model_params", "compression_model_params",
+                "vision", "image_detail", "tool_image_limit", "tool_image_mode"))
             return CAgentAdapter(
                 db=db,
                 tool_names=agent.tool_names,
@@ -61,7 +69,7 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
             base_url=agent.openai_base_url,
             session_id=session.id,
             working_dir=session.working_dir,
-            config=session_config,
+            config=_with_agent_keys(session_config, agent, ("model_params",)),
         )
     raise RuntimeError(f"unsupported agent_type: {agent.agent_type}")
 

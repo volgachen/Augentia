@@ -5,6 +5,7 @@ import os
 from typing import AsyncGenerator
 from openai import AsyncOpenAI
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
+from app.adapters.model_params import validate_model_params
 from app.models.domain import Message, MessageRole
 import app.adapters.tools  # noqa: F401 — triggers tool registration
 from app.adapters.tools.registry import load_tools
@@ -57,6 +58,7 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
         self._pending_confirms: dict[str, tuple[asyncio.Future[bool], str]] = {}
         self._alive = False
         self._client: AsyncOpenAI | None = None
+        self._model_params: dict = {}
         # Size of the conversation currently held in _messages, in tokens, as
         # reported by the model's usage on the last completion call of a turn
         # (prompt_tokens covers the full re-sent context; completion_tokens is
@@ -75,6 +77,7 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
         if api_key:
             kwargs["api_key"] = api_key
         self._client = AsyncOpenAI(**kwargs)
+        self._model_params = validate_model_params(self._config.get("model_params"))
         self._tools = load_tools(self._tool_names)
         for t in self._tools:
             t.session_id = self.session_id
@@ -227,7 +230,10 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
 
         while True:
             loop_iter += 1
+            # config.model_params: extra request parameters (temperature,
+            # reasoning_effort, ...); engine-owned keys are reserved.
             call_kwargs: dict = {
+                **self._model_params,
                 "model": self._model,
                 "messages": self._messages,
             }

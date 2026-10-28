@@ -33,6 +33,7 @@ from cagent import Image, ToolResult, relocate_tool_images
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.adapters.cagent_agent import make_agent_class
 from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
+from app.adapters.model_params import resolve_model_params
 from app.adapters.tools.base import (  # noqa: F401 — BaseTool for type hints
     IMAGE_OMITTED_MARKER, BaseTool, ToolOutput,
 )
@@ -70,8 +71,15 @@ def _relocating_tool_images(model):
     return relocated
 
 
-def _make_model(client: AsyncOpenAI, model_name: str):
-    """Wrap an AsyncOpenAI client as a CAgent model callable."""
+def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None):
+    """Wrap an AsyncOpenAI client as a CAgent model callable.
+
+    params (config.model_params, validated) are extra Chat Completions
+    parameters such as temperature or reasoning_effort, merged into every
+    request; the engine's own keys (model, messages, tools, tool_choice) are
+    reserved and cannot be overridden.
+    """
+    params = dict(params or {})
 
     async def model(*, messages, tools, tool_choice=None):
         wire_messages = []
@@ -94,7 +102,7 @@ def _make_model(client: AsyncOpenAI, model_name: str):
                     for call in message["tool_calls"]
                 ]
             wire_messages.append(wire)
-        call_kwargs: dict = {"model": model_name, "messages": wire_messages}
+        call_kwargs: dict = {**params, "model": model_name, "messages": wire_messages}
         if tools:
             call_kwargs["tools"] = [
                 {
@@ -236,10 +244,13 @@ class CAgentAdapter(BaseAgentAdapter):
         }
         self._system_prompt = system_prompt
         self._store = AugentiaStore(self._db, self.session_id)
+        # Extra request parameters (config.model_params / compression_model_params);
+        # validated here so a bad config fails at start, not on the first call.
+        params, compression_params = resolve_model_params(self._config)
         model = (
             self._model_callable
             if self._model_callable is not None
-            else _make_model(self._client, self._model_name)
+            else self._build_model(self._model_name, params)
         )
         self._model = self._wrap_model(model)
         # Optional summarizer model (config.compression_model, a model name on
@@ -249,9 +260,10 @@ class CAgentAdapter(BaseAgentAdapter):
                 not isinstance(compression_name, str) or not compression_name.strip()):
             raise ValueError("config.compression_model must be a non-empty string or null")
         self._compression_model_name = (compression_name or "").strip() or self._model_name
-        if compression_name and self._model_callable is None:
+        if self._model_callable is None and (
+                compression_name or compression_params is not params):
             self._compression_model = self._wrap_model(
-                _make_model(self._client, self._compression_model_name))
+                self._build_model(self._compression_model_name, compression_params))
         else:
             self._compression_model = self._model
         self._agent_cls = make_agent_class(
@@ -276,6 +288,13 @@ class CAgentAdapter(BaseAgentAdapter):
             self._model_name, self._compression_model_name, base_url,
             [t.name for t in self._tools],
         )
+
+    def _build_model(self, model_name: str, params: dict):
+        # Only pass params when set, so _make_model stand-ins taking
+        # (client, name) keep working.
+        if params:
+            return _make_model(self._client, model_name, params)
+        return _make_model(self._client, model_name)
 
     def _wrap_model(self, model):
         return _relocating_tool_images(model) if self._tool_image_mode == "user_message" else model

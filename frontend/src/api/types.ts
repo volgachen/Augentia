@@ -39,6 +39,11 @@ export interface AgentTemplate {
     // Accept image input (cagent engine only; the model must support vision).
     vision?: boolean;
     image_detail?: ImageDetail;
+    // Extra Chat Completions parameters merged into every model request
+    // (temperature, reasoning_effort, max_tokens, extra_body, ...).
+    model_params?: Record<string, unknown>;
+    // Summarizer-only replacement for model_params (CAgent engine).
+    compression_model_params?: Record<string, unknown>;
     [key: string]: unknown;
   };
   openai_model: string;

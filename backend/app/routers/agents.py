@@ -7,6 +7,7 @@ from app.models.domain import AgentTemplate, AgentType
 import app.adapters.tools  # noqa: F401 — triggers tool registration
 from app.adapters.tools.registry import list_available
 from app.adapters.tools.permissions import validate_tool_permissions_config
+from app.adapters.model_params import resolve_model_params
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -58,6 +59,9 @@ def _validate_config(config: dict) -> None:
         )
     try:
         validate_tool_permissions_config(config.get("tool_permissions"))
+        # model_params / compression_model_params: same check the engines run
+        # at session start, surfaced as a 400 when the agent is saved.
+        resolve_model_params(config)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
