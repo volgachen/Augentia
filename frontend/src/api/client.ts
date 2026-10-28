@@ -187,6 +187,11 @@ export const api = {
     list: () => request<Session[]>("/sessions"),
     systemPrompt: (id: string) =>
       request<{ system_prompt: string; source?: string }>(`/sessions/${id}/system-prompt`),
+    updateSystemPrompt: (id: string, system_prompt: string) =>
+      request<{ system_prompt: string; applied: "live_adapter" | "persisted" | "runner_restarted" }>(
+        `/sessions/${id}/system-prompt`,
+        { method: "PUT", body: JSON.stringify({ system_prompt }) },
+      ),
     config: (id: string) => request<Record<string, unknown>>(`/sessions/${id}/config`),
     updateConfig: (id: string, config: Record<string, unknown>) =>
       request<Record<string, unknown>>(`/sessions/${id}/config`, {

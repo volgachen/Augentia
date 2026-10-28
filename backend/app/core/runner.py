@@ -127,6 +127,10 @@ class SessionRunner:
     def current_system_prompt(self) -> str | None:
         return self._adapter.current_system_prompt()
 
+    async def set_system_prompt(self, system_prompt: str) -> None:
+        """Swap the live adapter's system prompt; NotImplementedError if unsupported."""
+        await self._adapter.set_system_prompt(system_prompt)
+
     def _remember_confirm(self, event: StreamEvent) -> None:
         # event.data is JSON: {"call_id", "name", "args"}. Key the cache by
         # call_id so a resolved/expired confirm can be dropped individually.

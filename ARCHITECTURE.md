@@ -130,6 +130,7 @@ class IAgentDatabase(ABC):
 | GET | `/api/v1/sessions` | List sessions |
 | GET | `/api/v1/sessions/{session_id}` | Get session status |
 | PATCH | `/api/v1/sessions/{session_id}` | Rename a session |
+| GET / PUT | `/api/v1/sessions/{session_id}/system-prompt` | Get / replace the session's effective system prompt (PUT: 409 while a turn runs) |
 | GET | `/api/v1/sessions/{session_id}/messages` | Get message history |
 | POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session |
 | GET | `/api/v1/sessions/{session_id}/tasks` | Get the session's task list |

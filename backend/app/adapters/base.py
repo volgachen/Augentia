@@ -100,6 +100,15 @@ class BaseAgentAdapter(ABC):
         """Return the live in-memory system prompt, when the adapter exposes one."""
         return None
 
+    async def set_system_prompt(self, system_prompt: str) -> None:
+        """Replace the system prompt used by subsequent model requests.
+
+        Callers guarantee no turn is running. Adapters that can't swap the
+        prompt in place raise NotImplementedError; the caller then restarts
+        the runner so the new persisted snapshot is picked up on rehydrate.
+        """
+        raise NotImplementedError
+
     @property
     @abstractmethod
     def is_alive(self) -> bool:

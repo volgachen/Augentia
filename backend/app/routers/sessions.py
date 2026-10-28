@@ -59,6 +59,12 @@ class UpdateSessionRequest(BaseModel):
     title: str
 
 
+class UpdateSystemPromptRequest(BaseModel):
+    # Full replacement for the session's effective system prompt (the agent's
+    # base prompt, additional prompts and runtime context are NOT re-applied).
+    system_prompt: str
+
+
 class UpdateSessionConfigRequest(BaseModel):
     config: dict
 
@@ -271,6 +277,56 @@ async def get_session_system_prompt(
     except KeyError:
         pass
     return {"system_prompt": prompt, "source": "recomputed"}
+
+
+@router.put("/{session_id}/system-prompt")
+async def update_session_system_prompt(
+    session_id: str,
+    body: UpdateSystemPromptRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Replace the system prompt of an existing session.
+
+    The new prompt is persisted as the session's system_prompt_snapshot and,
+    when a runner is live, swapped into its adapter so the next model request
+    uses it. History is untouched (system prompts aren't stored as messages).
+    Rejected with 409 while a turn is running or awaiting tool confirmation.
+    """
+    prompt = body.system_prompt
+    if not prompt.strip():
+        raise HTTPException(status_code=400, detail="system_prompt must not be empty")
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        runner = None
+    if (runner is not None and runner.is_busy) or session.status in (
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="session is running; update the system prompt after the turn finishes",
+        )
+    try:
+        await db.update_session_system_prompt_snapshot(session_id, prompt)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    applied = "persisted"
+    if runner is not None:
+        try:
+            await runner.set_system_prompt(prompt)
+            applied = "live_adapter"
+        except NotImplementedError:
+            # Adapter can't swap in place: drop the runner so the next message
+            # or WS connect rehydrates it from the new snapshot.
+            await registry.remove(session_id)
+            applied = "runner_restarted"
+    logger.info("system prompt updated session=%s applied=%s len=%d", session_id, applied, len(prompt))
+    return {"system_prompt": prompt, "applied": applied}
 
 
 @router.get("/{session_id}/config")

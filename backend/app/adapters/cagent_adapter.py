@@ -372,6 +372,14 @@ class CAgentAdapter(BaseAgentAdapter):
     def current_system_prompt(self) -> str | None:
         return self._system_prompt
 
+    async def set_system_prompt(self, system_prompt: str) -> None:
+        # run_turn is called without system_prompt, so CAgent resolves it from
+        # SessionAgent.SYSTEM_PROMPT on every turn; compress() passes
+        # self._system_prompt explicitly. Updating both covers all requests.
+        self._system_prompt = system_prompt
+        if self._agent_cls is not None:
+            self._agent_cls.SYSTEM_PROMPT = system_prompt or "You are a helpful assistant."
+
     async def compress(self) -> dict:
         """Manually compress this session's history in place (CAgent compress_session).
 

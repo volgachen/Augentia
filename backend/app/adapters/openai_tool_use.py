@@ -460,6 +460,19 @@ class OpenAIToolUseAdapter(BaseAgentAdapter):
             except Exception:
                 logger.exception("tool aclose failed: %s", t.name)
 
+    async def set_system_prompt(self, system_prompt: str) -> None:
+        # The system prompt lives as the leading message of the in-memory
+        # context; swap it in place (or insert/drop it) without touching history.
+        has_system = bool(self._messages) and self._messages[0].get("role") == "system"
+        if system_prompt:
+            message = {"role": "system", "content": system_prompt}
+            if has_system:
+                self._messages[0] = message
+            else:
+                self._messages.insert(0, message)
+        elif has_system:
+            self._messages.pop(0)
+
     def current_system_prompt(self) -> str | None:
         for message in self._messages:
             if message.get("role") == "system":

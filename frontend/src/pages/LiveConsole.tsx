@@ -959,7 +959,7 @@ export default function LiveConsole() {
                 onShowToolResultsChange={setShowToolResults}
               />
             )}
-            {sidebarTab === "systemPrompt" && <SystemPromptPanel session={session} />}
+            {sidebarTab === "systemPrompt" && <SystemPromptPanel key={session.id} session={session} />}
           </div>
         </aside>
       </div>
