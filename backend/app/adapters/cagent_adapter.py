@@ -413,10 +413,14 @@ class CAgentAdapter(BaseAgentAdapter):
         """
         if self._agent_cls is None or self._store is None or self._compression_model is None:
             return {"status": "failed", "reason": "engine is not started"}
+        # Only pass the options when set: CAgent before range compression has
+        # no such parameters, and plain compression must keep working there.
+        options = {k: v for k, v in (("since", since), ("instruction", instruction))
+                   if v is not None}
         try:
             ctx = await self._agent_cls.compress_session(
                 session_id=self.session_id, store=self._store, model=self._compression_model,
-                system_prompt=self._system_prompt, since=since, instruction=instruction,
+                system_prompt=self._system_prompt, **options,
             )
         except ValueError as exc:
             return {"status": "skipped", "reason": str(exc)}
