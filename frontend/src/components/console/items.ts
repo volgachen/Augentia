@@ -48,8 +48,8 @@ function nodeContains(node: FoldNode, messageId: string): boolean {
 
 // Nest every row a compression replaced under that compression's event. A
 // whole-session compression replaces everything through its boundary (earlier
-// compression groups included, so they nest); a turn compression replaces
-// exactly the listed rows. Events without compression info pass through.
+// compression groups included, so they nest); a turn or range compression
+// replaces exactly the listed rows (an earlier summary among them nests). Events without compression info pass through.
 function foldCompressed(events: StreamEvent[]): FoldNode[] {
   const out: FoldNode[] = [];
   for (const event of events) {

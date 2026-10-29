@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from app.db.interface import IAgentDatabase
@@ -70,6 +71,10 @@ _STATUS_TO_FRAMEWORK = {
 # A user row's framework ``name`` (e.g. CAgent's turn_summary) has no column of
 # its own; it rides in metadata under this key and is lifted back out on read.
 _NAME_KEY = "cagent_name"
+
+
+def _utc(stamp: datetime) -> datetime:
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
 
 def _parse_json(content: str) -> Any:
@@ -185,7 +190,8 @@ class AugentiaStore:
     async def delete_message(self, session_id: str, message_id: str) -> None:
         # IAgentDatabase only offers delete-from-message-onward (diverge), so
         # single-row soft delete is a no-op. CAgent only calls this to tidy
-        # rows a saved turn_summary already lists in replaced_message_ids;
+        # rows a saved turn_summary / range_summary already lists in
+        # replaced_message_ids;
         # those stay hidden from the model, while the client message list
         # keeps showing the original turn alongside its summary.
         logger.debug("delete_message is a no-op for session=%s message=%s", session_id, message_id)
@@ -279,7 +285,8 @@ class AugentiaStore:
             "tool_calls": [],
             "tool_call_id": None,
             "from_session_id": row.from_session_id,
-            "created_at": row.created_at.isoformat(),
+            # MySQL DATETIME columns read back naive; they hold UTC.
+            "created_at": _utc(row.created_at).isoformat(),
             "deleted_at": None,
         }
         record.update(fields)

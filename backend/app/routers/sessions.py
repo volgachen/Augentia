@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
@@ -82,6 +83,16 @@ class PostMessageRequest(BaseModel):
     # Image references from POST /attachments: "att:<sha256>" strings or
     # {"ref", "detail"} objects. Only cagent-engine agents with config.vision.
     images: list[str | dict] | None = None
+
+
+class CompressRequest(BaseModel):
+    # Compress only the turns from this time on (timezone-aware ISO 8601;
+    # a naive value is read as UTC). Earlier history stays as it is.
+    since: datetime | None = None
+    # Shorthand for since = now - hours. Mutually exclusive with since.
+    hours: float | None = None
+    # Replaces the summarizer instruction for this compression.
+    instruction: str | None = None
 
 
 class RetryMessageRequest(BaseModel):
@@ -528,6 +539,7 @@ async def diverge_from_message(
 @router.post("/{session_id}/compress")
 async def compress_session(
     session_id: str,
+    body: CompressRequest | None = None,
     db: IAgentDatabase = Depends(get_db),
     registry: AdapterRegistry = Depends(get_registry),
 ):
@@ -537,7 +549,27 @@ async def compress_session(
     handling as threshold-triggered compression. The summary covers history
     through the last completed turn; the model then sees only the summary plus
     later messages, while the original rows stay visible to clients.
+
+    Optional body: {"since": ISO time} or {"hours": 24} compresses only the
+    turns from then on into one summary (a range_summary row), keeping
+    earlier history; "instruction" replaces the summarizer instruction.
     """
+    body = body or CompressRequest()
+    if body.since is not None and body.hours is not None:
+        raise HTTPException(status_code=422, detail="give either since or hours, not both")
+    if body.hours is not None and body.hours <= 0:
+        raise HTTPException(status_code=422, detail="hours must be positive")
+    since = body.since
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    if body.hours is not None:
+        since = datetime.now(timezone.utc) - timedelta(hours=body.hours)
+    instruction = body.instruction.strip() if body.instruction else None
+    options = {}
+    if since is not None:
+        options["since"] = since
+    if instruction:
+        options["instruction"] = instruction
     try:
         session = await db.get_session(session_id)
         agent = await db.get_agent(session.agent_id)
@@ -550,7 +582,7 @@ async def compress_session(
         raise HTTPException(status_code=409, detail="session has no live adapter")
     if runner.is_busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
         raise HTTPException(status_code=409, detail="session is running; compress after the turn finishes")
-    result = await runner.compress()
+    result = await runner.compress(**options)
     logger.info("manual compression session=%s result=%s", session_id, result.get("status"))
     return result
 

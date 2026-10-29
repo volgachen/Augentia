@@ -119,8 +119,18 @@ export interface SharedSession {
   messages: Message[];
 }
 
+export interface CompressOptions {
+  // Compress only the turns from this time on (ISO 8601), or from `hours`
+  // ago; earlier history stays. Omit both for whole-history compression.
+  since?: string;
+  hours?: number;
+  // Replaces the summarizer instruction.
+  instruction?: string;
+}
+
 export interface CompressResult {
   status: "compressed" | "skipped" | "failed";
+  kind?: "session" | "range";
   reason?: string;
   num_tokens_before?: number | null;
   num_tokens_after?: number | null;
@@ -143,8 +153,9 @@ export interface CompressionInfo {
   // "session": whole-history compression (compression_completed mark) — it
   // replaces every row up to and including `through` (null: none visible).
   // "turn": turn-scoped compression (a turn_summary user row) — it replaces
-  // exactly the `replaced` row ids.
-  kind: "session" | "turn";
+  // exactly the `replaced` row ids. "range": compress_session(since=...) (a
+  // range_summary user row) — likewise replaces exactly `replaced`.
+  kind: "session" | "turn" | "range";
   through?: string | null;
   replaced?: string[];
 }

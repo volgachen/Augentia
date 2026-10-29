@@ -252,10 +252,11 @@ function CompressionBlock({
   const [expanded, setExpanded] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const collapsedFromStickyRef = useRef(false);
-  const isTurn = group.event.compression?.kind === "turn";
+  const compressionKind = group.event.compression?.kind;
   const hiddenCount = countMessages(group.hidden);
   const summary = String(group.event.data ?? "");
-  const label = isTurn ? "本轮已压缩" : "已压缩";
+  const label =
+    compressionKind === "turn" ? "本轮已压缩" : compressionKind === "range" ? "区间已压缩" : "已压缩";
 
   // Collapsing from the sticky button removes the content being read, so
   // bring this block (now just the toggle + summary) back into view.

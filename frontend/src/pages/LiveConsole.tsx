@@ -43,6 +43,10 @@ export default function LiveConsole() {
   const [compressNote, setCompressNote] = useState<
     { scope: string; ok: boolean; text: string } | null
   >(null);
+  // Optional manual-compression options: only the last N hours (range
+  // compression, earlier history kept) and a replacement instruction.
+  const [compressHours, setCompressHours] = useState("");
+  const [compressInstruction, setCompressInstruction] = useState("");
   // Follow-the-tail while the agent streams; persisted so the choice survives reloads.
   const [autoScroll, setAutoScroll] = useState(
     () => localStorage.getItem("liveConsole.autoScroll") !== "false",
@@ -232,17 +236,26 @@ export default function LiveConsole() {
 
   const handleCompress = async () => {
     if (!sessionId || generating || compressing || !isCagent) return;
+    const hours = compressHours.trim() ? Number(compressHours) : undefined;
+    if (hours !== undefined && !(Number.isFinite(hours) && hours > 0)) {
+      setCompressNote({ scope: sessionId, ok: false, text: "小时数需为正数" });
+      return;
+    }
+    const instruction = compressInstruction.trim() || undefined;
     setCompressing(true);
     setCompressNote(null);
     try {
-      const r = await compressSession(sessionId);
+      const r = await compressSession(
+        sessionId,
+        hours !== undefined || instruction ? { hours, instruction } : undefined,
+      );
       const est = r.token_count_is_estimate ? "≈" : "";
       setCompressNote({
         scope: sessionId,
         ok: r.status === "compressed",
         text:
           r.status === "compressed"
-            ? `已压缩：上下文 ${est}${r.num_tokens_before ?? "?"} → ${est}${r.num_tokens_after ?? "?"} tokens`
+            ? `${r.kind === "range" ? "已压缩区间" : "已压缩"}：上下文 ${est}${r.num_tokens_before ?? "?"} → ${est}${r.num_tokens_after ?? "?"} tokens`
             : r.status === "skipped"
               ? `无需压缩：${r.reason ?? ""}`
               : `压缩失败：${r.reason ?? ""}`,
@@ -424,12 +437,38 @@ export default function LiveConsole() {
                         ? undefined
                         : !isCagent
                           ? "Manual compression is only supported by the cagent engine"
-                          : "Summarize history through the last completed turn, in place. Earlier messages stay visible but the model sees only the summary."
+                          : "Summarize history through the last completed turn, in place (or only the last N hours, keeping earlier history). Original messages stay visible but the model sees only the summary."
                     }
                     className="w-full rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
                   >
                     {compressing ? "Compressing…" : "Compress"}
                   </button>
+                  {isCagent && (
+                    <div className="mt-2 flex flex-col gap-1.5">
+                      <label className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                        只压缩最近
+                        <input
+                          type="number"
+                          min={0}
+                          step="any"
+                          value={compressHours}
+                          onChange={(e) => setCompressHours(e.target.value)}
+                          placeholder="全部"
+                          disabled={compressing}
+                          className="w-16 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[11px] text-gray-200 placeholder:text-gray-600"
+                        />
+                        小时
+                      </label>
+                      <textarea
+                        value={compressInstruction}
+                        onChange={(e) => setCompressInstruction(e.target.value)}
+                        placeholder="自定义压缩指令（可选，整个替换默认指令）"
+                        rows={2}
+                        disabled={compressing}
+                        className="w-full resize-y rounded border border-gray-700 bg-gray-900 px-1.5 py-1 text-[11px] text-gray-200 placeholder:text-gray-600"
+                      />
+                    </div>
+                  )}
                   {agentLoaded && !isCagent && (
                     <p className="mt-1.5 text-[11px] text-gray-500">仅 cagent 引擎支持压缩</p>
                   )}

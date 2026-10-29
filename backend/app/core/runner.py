@@ -24,6 +24,8 @@ class _InboxItem:
     # Set for a manual compression job instead of a user turn: the loop runs
     # adapter.compress() and resolves this future with its result dict.
     compress_result: "asyncio.Future[dict] | None" = None
+    # Manual compression options, passed to adapter.compress(**compress_options).
+    compress_options: dict | None = None
 
 
 class SessionRunner:
@@ -99,10 +101,14 @@ class SessionRunner:
     def is_busy(self) -> bool:
         return self._turn_task is not None or not self._inbox.empty()
 
-    async def compress(self) -> dict:
-        """Queue a manual compression behind any pending turns and await it."""
+    async def compress(self, **options) -> dict:
+        """Queue a manual compression behind any pending turns and await it.
+
+        options (since, instruction) go to the adapter's compress().
+        """
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
-        await self._inbox.put(_InboxItem(content="", compress_result=future))
+        await self._inbox.put(_InboxItem(content="", compress_result=future,
+                                         compress_options=options))
         return await future
 
     async def cancel_turn(self) -> None:
@@ -180,11 +186,11 @@ class SessionRunner:
                     self._session_id, event.type,
                 )
 
-    async def _run_compress(self, future: "asyncio.Future[dict]") -> None:
+    async def _run_compress(self, future: "asyncio.Future[dict]", options: dict) -> None:
         # Runs on the loop like a turn, so it never overlaps one. CAgent's
         # compress_session flips RUNNING/IDLE itself; DB status follows it.
         try:
-            result = await self._adapter.compress()
+            result = await self._adapter.compress(**options)
         except asyncio.CancelledError:
             if not future.done():
                 future.cancel()
@@ -200,7 +206,7 @@ class SessionRunner:
         while True:
             item = await self._inbox.get()
             if item.compress_result is not None:
-                await self._run_compress(item.compress_result)
+                await self._run_compress(item.compress_result, item.compress_options or {})
                 continue
             await self._db.update_session_status(self._session_id, SessionStatus.RUNNING)
             self._turn_task = asyncio.create_task(

@@ -1,6 +1,7 @@
 import type {
   AgentTemplate,
   AgentType,
+  CompressOptions,
   CompressResult,
   Session,
   SessionCreateMode,
@@ -235,8 +236,11 @@ export const api = {
         method: "PUT",
         body: JSON.stringify({ enabled }),
       }),
-    compress: (id: string) =>
-      request<CompressResult>(`/sessions/${id}/compress`, { method: "POST" }),
+    compress: (id: string, options?: CompressOptions) =>
+      request<CompressResult>(`/sessions/${id}/compress`, {
+        method: "POST",
+        ...(options ? { body: JSON.stringify(options) } : {}),
+      }),
     tasks: (id: string) => request<Task[]>(`/sessions/${id}/tasks`),
     delete: (id: string) =>
       request<void>(`/sessions/${id}`, { method: "DELETE" }),

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { CompressResult, ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
+import type { CompressOptions, CompressResult, ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
 import { api, createSessionSocket } from "../api/client";
 import { useToastStore } from "./toasts";
 
@@ -98,23 +98,27 @@ function toolMessageToEventData(content: string): string {
   return JSON.stringify({ name: "tool", result: content });
 }
 
-// CAgent prefixes a turn summary's text with this; the console shows it as a
-// compression summary instead, so the prefix is redundant there.
-const TURN_SUMMARY_PREFIX = "Summary of an earlier turn:\n";
+// CAgent prefixes turn / range summaries with these; the console shows them
+// as compression summaries instead, so the prefix is redundant there.
+const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string }> = {
+  turn_summary: { kind: "turn", prefix: "Summary of an earlier turn:\n" },
+  range_summary: { kind: "range", prefix: "Summary of earlier messages:\n" },
+};
 
 export function messageToEvent(m: Message): StreamEvent {
   switch (m.role) {
-    case "user":
-      if (m.metadata?.cagent_name === "turn_summary") {
-        const replaced = m.metadata.replaced_message_ids;
+    case "user": {
+      const summaryKind = SUMMARY_PREFIXES[String(m.metadata?.cagent_name ?? "")];
+      if (summaryKind) {
+        const replaced = m.metadata?.replaced_message_ids;
         return {
           type: "compression",
-          data: m.content.startsWith(TURN_SUMMARY_PREFIX)
-            ? m.content.slice(TURN_SUMMARY_PREFIX.length)
+          data: m.content.startsWith(summaryKind.prefix)
+            ? m.content.slice(summaryKind.prefix.length)
             : m.content,
           message_id: m.id,
           compression: {
-            kind: "turn",
+            kind: summaryKind.kind,
             replaced: Array.isArray(replaced) ? replaced.map(String) : [],
           },
         };
@@ -125,6 +129,7 @@ export function messageToEvent(m: Message): StreamEvent {
         message_id: m.id,
         images: m.metadata?.images?.length ? m.metadata.images : undefined,
       };
+    }
     case "tool_call":
       return { type: "tool_call", data: m.content, message_id: m.id };
     case "tool":
@@ -178,7 +183,7 @@ interface Store {
   cancelGeneration: (sessionId: string) => void;
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
-  compressSession: (sessionId: string) => Promise<CompressResult>;
+  compressSession: (sessionId: string, options?: CompressOptions) => Promise<CompressResult>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
   disconnectSession: (sessionId: string) => void;
   closeSession: (sessionId: string) => Promise<void>;
@@ -599,8 +604,8 @@ export const useStore = create<Store>((set, get) => {
       return session.id;
     },
 
-    compressSession: async (sessionId) => {
-      const result = await api.sessions.compress(sessionId);
+    compressSession: async (sessionId, options) => {
+      const result = await api.sessions.compress(sessionId, options);
       if (result.status === "compressed") {
         // Reload history so the compression divider appears in place; keep
         // the live socket and any events it delivered meanwhile.

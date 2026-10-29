@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime
 
 from openai import AsyncOpenAI
 
@@ -400,32 +401,39 @@ class CAgentAdapter(BaseAgentAdapter):
         if self._agent_cls is not None:
             self._agent_cls.SYSTEM_PROMPT = system_prompt or "You are a helpful assistant."
 
-    async def compress(self) -> dict:
+    async def compress(self, *, since: datetime | None = None,
+                       instruction: str | None = None) -> dict:
         """Manually compress this session's history in place (CAgent compress_session).
 
-        Same summarizer, instruction and image handling as threshold-triggered
-        compression. The caller (SessionRunner) guarantees no turn is running.
-        Returns {"status": "compressed"|"skipped"|"failed", "reason", tokens...}.
+        Same summarizer and image handling as threshold-triggered compression.
+        since limits it to the turns from that time on (a range_summary row,
+        earlier history kept); instruction replaces the summarizer instruction.
+        The caller (SessionRunner) guarantees no turn is running.
+        Returns {"status": "compressed"|"skipped"|"failed", "kind", "reason", tokens...}.
         """
         if self._agent_cls is None or self._store is None or self._compression_model is None:
             return {"status": "failed", "reason": "engine is not started"}
         try:
             ctx = await self._agent_cls.compress_session(
                 session_id=self.session_id, store=self._store, model=self._compression_model,
-                system_prompt=self._system_prompt,
+                system_prompt=self._system_prompt, since=since, instruction=instruction,
             )
         except ValueError as exc:
             return {"status": "skipped", "reason": str(exc)}
         if ctx.compression_applied:
+            kind = getattr(ctx, "compression_kind", None) or "session"
+            role, name = (("user", "range_summary") if kind == "range"
+                          else ("mark", "compression_completed"))
             completion = next(
                 (m for m in reversed(ctx.messages)
-                 if m["role"] == "mark" and m.get("name") == "compression_completed"),
+                 if m["role"] == role and m.get("name") == name),
                 None,
             )
             meta = (completion or {}).get("metadata") or {}
             self._context_tokens = ctx.num_tokens or self._context_tokens
             return {
                 "status": "compressed",
+                "kind": kind,
                 "model": self._compression_model_name,
                 "num_tokens_before": meta.get("num_tokens_before"),
                 "num_tokens_after": meta.get("num_tokens_after"),
@@ -433,6 +441,8 @@ class CAgentAdapter(BaseAgentAdapter):
             }
         if ctx.compression_error:
             return {"status": "failed", "reason": ctx.compression_error}
+        if getattr(ctx, "compression_skip_reason", None):
+            return {"status": "skipped", "reason": ctx.compression_skip_reason}
         if ctx.stop_reason != "completed":
             has_turn = any(
                 m["role"] == "mark" and m.get("name") == "turn_end" for m in ctx.messages
