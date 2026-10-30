@@ -381,6 +381,16 @@ async def test_legacy_history_repair(db, wd) -> bool:
         await registry.remove(session.id)
 
 
+TURN_SUMMARY_TEXT = "User asked to read notes.txt; it says hello."
+
+
+def is_turn_summary(message) -> bool:
+    # Newer CAgent stores/sends the summary text as is; older pins prefix it.
+    content = message.get("content")
+    return (message.get("role") == "user" and isinstance(content, str)
+            and content.endswith(TURN_SUMMARY_TEXT))
+
+
 async def test_turn_compression(db, wd) -> bool:
     section("CAgent engine: turn_compression_tool_call_threshold summarizes a tool-heavy turn")
     import app.adapters.cagent_adapter as cagent_adapter_module
@@ -390,11 +400,10 @@ async def test_turn_compression(db, wd) -> bool:
     async def model(*, messages, tools, tool_choice=None):
         seen.append(messages)
         if "Summarize part of a conversation" in summary_instruction(messages):
-            return {"content": "User asked to read notes.txt; it says hello."}
+            return {"content": TURN_SUMMARY_TEXT}
         if any(m["role"] == "tool" for m in messages):
             return {"content": "notes.txt says hello"}
-        if any(m["content"].startswith("Summary of an earlier turn") for m in messages
-               if m["role"] == "user" and isinstance(m["content"], str)):
+        if any(is_turn_summary(m) for m in messages):
             return {"content": "follow-up answered from summary"}
         return {"tool_calls": [{"id": "read-1", "name": "read",
                                 "arguments": {"path": "notes.txt"}}]}
@@ -449,8 +458,7 @@ async def test_turn_compression(db, wd) -> bool:
         await run("and then?")
         sent = seen[0]
         if any(m["role"] == "tool" for m in sent) or not any(
-                isinstance(m["content"], str) and m["content"].startswith("Summary of an earlier turn")
-                for m in sent):
+                is_turn_summary(m) for m in sent):
             fail(f"next turn did not see the summary instead of tool history: {sent}")
             return False
         ok("turn compression: summary persisted, reload + next turn see only the summary")
@@ -590,6 +598,78 @@ async def test_manual_compression_instruction(db, wd) -> bool:
             fail(f"status after manual compression={status}")
             return False
         ok("manual compression: configured instruction used, mark saved, status restored")
+        return True
+    finally:
+        await registry.remove(session.id)
+
+
+async def test_daily_range_compression_keeps_earlier_summary(db, wd) -> bool:
+    section("CAgent engine: compress(since=, instruction=) after a whole-history summary")
+    import app.adapters.cagent_adapter as cagent_adapter_module
+    from datetime import datetime, timezone
+
+    instructions, turns = [], []
+
+    async def model(*, messages, tools, tool_choice=None):
+        instruction = summary_instruction(messages)
+        if instruction.startswith("DAY"):
+            instructions.append(instruction)
+            return {"content": instruction.replace("DAY", "diary", 1)}
+        turns.append(messages)
+        return {"content": "a fairly long answer " * 60}
+
+    original_make_model = cagent_adapter_module._make_model
+    cagent_adapter_module._make_model = lambda client, name: model
+    registry = AdapterRegistry()
+    try:
+        agent = await db.create_agent(AgentTemplate(
+            name="cagent-test-daily-range", description="daily range compression test agent",
+            agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+            tool_names=TOOL_NAMES, config={"engine": "cagent"}, openai_model="test-model",
+        ))
+        wd.mkdir(parents=True, exist_ok=True)
+        session = await db.create_session(agent.id, working_dir=str(wd), session_id="s-daily-range")
+        runner = await build_runner(session, agent, db, registry)
+    finally:
+        cagent_adapter_module._make_model = original_make_model
+
+    async def turn(text):
+        async def consume():
+            async with runner.subscribe() as events:
+                return await collect_until_done(events)
+        await runner.submit(text)
+        await asyncio.wait_for(consume(), 15)
+
+    try:
+        await turn("day 1 browsing")
+        day1 = await asyncio.wait_for(runner.compress(instruction="DAY 1"), 15)
+        await asyncio.sleep(0.01)
+        since = datetime.now(timezone.utc)
+        await turn("day 2 browsing")
+        day2 = await asyncio.wait_for(runner.compress(since=since, instruction="DAY 2"), 15)
+        if (day1.get("status"), day1.get("kind")) != ("compressed", "session"):
+            fail(f"day 1 compression: {day1}")
+            return False
+        if (day2.get("status"), day2.get("kind")) != ("compressed", "range"):
+            fail(f"day 2 compression did not stay a range: {day2}")
+            return False
+        if instructions != ["DAY 1", "DAY 2"]:
+            fail(f"summarizer instructions: {instructions}")
+            return False
+        rows = await db.get_messages(session.id)
+        ranges = [m for m in rows if m.role == MessageRole.USER
+                  and m.metadata.get("cagent_name") == "range_summary"]
+        if [m.content for m in ranges] != ["diary 2"]:
+            fail(f"range summary rows (stored without prefix): {[m.content for m in ranges]}")
+            return False
+        # The next turn sees day 1's summary, then day 2's, and not day 2's raw turn.
+        turns.clear()
+        await turn("day 3")
+        contents = [m["content"] for m in turns[0] if m["role"] == "user"]
+        if contents[:2] != ["diary 1", "diary 2"] or "day 2 browsing" in contents:
+            fail(f"next turn context: {contents}")
+            return False
+        ok("daily range compression: earlier whole summary kept, range saved as user row")
         return True
     finally:
         await registry.remove(session.id)
@@ -780,6 +860,7 @@ async def main() -> int:
             await test_turn_compression(db, wd / "turn-compression"),
             await test_turn_compression_marker(db, wd / "turn-marker"),
             await test_manual_compression_instruction(db, wd / "manual-compression"),
+            await test_daily_range_compression_keeps_earlier_summary(db, wd / "daily-range"),
             await test_compression_model(db, wd / "compression-model"),
             await test_compression_sends_tools_with_tool_choice_none(db, wd / "send-tools"),
             await test_model_error_path(db, wd / "error"),
