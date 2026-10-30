@@ -701,9 +701,10 @@ async def session_stream(
         await ws.close()
         return
 
-    await ws.send_text(json.dumps({"type": "session_state", "data": session.model_dump(mode="json")}))
-
     runner = await get_or_rehydrate(session, db, registry)
+    # Re-read after rehydrate: it may have reset a stale RUNNING/WAITING_CONFIRM.
+    session = await db.get_session(session_id)
+    await ws.send_text(json.dumps({"type": "session_state", "data": session.model_dump(mode="json")}))
     if runner is None:
         logger.warning("WS session=%s has no live runner (post-restart, stub)", session_id)
         await _stub_loop(ws, session_id, db)
