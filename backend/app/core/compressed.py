@@ -20,6 +20,9 @@ from app.models.domain import Message, MessageRole
 SUMMARY_NAMES = ("turn_summary", "range_summary")
 NAME_KEY = "cagent_name"
 COMPRESSED_BY = "compressed_by"
+# metadata.deleted_by on rows removed with the delete button ("user"), as
+# opposed to rows a rewrite discarded or a summary replaced.
+DELETED_BY = "deleted_by"
 
 
 def mark_payload(message: Message) -> dict | None:
@@ -70,7 +73,7 @@ async def compress_covered(db, session_id: str, summary: Message) -> int:
     ids = covered_ids(live, summary)
     if not ids:
         return 0
-    return await db.soft_delete_messages(session_id, ids, compressed_by=summary.id)
+    return await db.soft_delete_messages(session_id, ids, metadata={COMPRESSED_BY: summary.id})
 
 
 def plain_copy_fields(message: Message) -> tuple[MessageRole, str, dict]:

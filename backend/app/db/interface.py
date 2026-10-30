@@ -102,12 +102,13 @@ class IAgentDatabase(ABC):
 
     @abstractmethod
     async def soft_delete_messages(
-        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+        self, session_id: str, message_ids: list[str], *, metadata: dict | None = None,
     ) -> int:
         """Soft-delete exactly these live rows of the session; return how many changed.
 
-        With compressed_by, each row also gets metadata.compressed_by = that id
-        (the summary that replaced it), so the originals can be listed later.
+        metadata is merged into each row's metadata, recording why it was
+        deleted: {"compressed_by": <summary id>} for rows a summary replaced,
+        {"deleted_by": "user"} for the delete button.
         """
 
     # ------- Plugin instances/runs/logs -------

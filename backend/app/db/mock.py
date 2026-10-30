@@ -222,7 +222,7 @@ class MockMemoryDatabase(IAgentDatabase):
         return target
 
     async def soft_delete_messages(
-        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+        self, session_id: str, message_ids: list[str], *, metadata: dict | None = None,
     ) -> int:
         await self.get_session(session_id)
         wanted = set(message_ids)
@@ -231,8 +231,8 @@ class MockMemoryDatabase(IAgentDatabase):
         for message in self._messages[session_id]:
             if message.deleted_at is None and message.id in wanted:
                 message.deleted_at = now
-                if compressed_by is not None:
-                    message.metadata = {**message.metadata, "compressed_by": compressed_by}
+                if metadata:
+                    message.metadata = {**message.metadata, **metadata}
                 changed += 1
         visible = [m for m in self._messages[session_id] if m.deleted_at is None]
         self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None

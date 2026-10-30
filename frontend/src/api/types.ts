@@ -144,6 +144,9 @@ export interface StreamEvent {
   // On "user" events: images attached to that turn; on "tool_result" events:
   // images the tool returned.
   images?: ImageRef[] | null;
+  // Client-only: set on history rows the user deleted, shown only when
+  // "显示已删除消息" is on.
+  deleted?: boolean;
   // Client-only, on "compression" events loaded from history.
   compression?: CompressionInfo;
 }

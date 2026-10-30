@@ -30,7 +30,7 @@ from app.db.mock import MockMemoryDatabase
 from app.models.domain import AgentTemplate, AgentType, MessageRole, SessionStatus
 from app.core.compressed import is_summary
 from app.routers.sessions import (
-    _create_derived_session, compressed_messages, delete_message, transcript_messages,
+    _create_derived_session, compressed_messages, delete_message, get_messages, transcript_messages,
 )
 
 from _common import ok, fail, section
@@ -186,6 +186,27 @@ async def main() -> int:
             if not any(t == "user:SUMMARY" for t in wire_text(seen[0])):
                 fail(f"summary not in context: {wire_text(seen[0])}")
                 passed = False
+
+            # include_deleted shows only rows deleted with the button: not
+            # compressed ones, and not rows a rewrite discarded.
+            seen.clear()
+            await turn("to be rewritten")
+            rewritten = next(m for m in await db.get_messages(session.id)
+                             if m.role == MessageRole.USER and m.content == "to be rewritten")
+            await db.soft_delete_messages_from(session.id, rewritten.id)
+            with_deleted = await get_messages(session.id, include_compression=True,
+                                              include_deleted=True, db=db)
+            shown_deleted = {m.id for m in with_deleted if m.deleted_at is not None}
+            expected = {user_one.id, tool_assistant.id, tool_row.id}
+            if shown_deleted != expected:
+                fail(f"include_deleted rows: {shown_deleted} != {expected}")
+                passed = False
+            elif not all(m.metadata.get("deleted_by") == "user"
+                         for m in with_deleted if m.deleted_at is not None):
+                fail("button-deleted rows lack deleted_by=user")
+                passed = False
+            else:
+                ok("include_deleted lists only button-deleted rows (not rewritten or compressed)")
 
             # 5. Diverge after compression: the summary is copied as plain text.
             branch = await _create_derived_session(

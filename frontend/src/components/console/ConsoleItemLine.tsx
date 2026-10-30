@@ -447,7 +447,32 @@ export type ConsoleItemLineProps = {
   compressionDepth?: number;
 };
 
+// Rows the user deleted, shown on request: dimmed, struck through, inert.
+function DeletedWrap({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="relative opacity-40 line-through decoration-gray-500" title="已删除：模型看不到这条消息">
+      <span className="absolute right-0 top-0 rounded bg-red-950 px-1 text-[10px] text-red-300 no-underline">
+        已删除
+      </span>
+      {children}
+    </div>
+  );
+}
+
 export default function ConsoleItemLine(props: ConsoleItemLineProps) {
+  const { item } = props;
+  const deleted = isCompressionGroup(item) ? !!item.event.deleted : !!item.deleted;
+  if (deleted) {
+    return (
+      <DeletedWrap>
+        <ConsoleItemLineInner {...props} readOnly />
+      </DeletedWrap>
+    );
+  }
+  return <ConsoleItemLineInner {...props} />;
+}
+
+function ConsoleItemLineInner(props: ConsoleItemLineProps) {
   const {
     item,
     showToolCalls,

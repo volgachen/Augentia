@@ -843,7 +843,7 @@ class MySqlDatabase(IAgentDatabase):
         return target
 
     async def soft_delete_messages(
-        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+        self, session_id: str, message_ids: list[str], *, metadata: dict | None = None,
     ) -> int:
         await self.get_session(session_id)
         ids = list(dict.fromkeys(message_ids))
@@ -855,7 +855,7 @@ class MySqlDatabase(IAgentDatabase):
             await conn.begin()
             try:
                 async with conn.cursor() as cur:
-                    if compressed_by is None:
+                    if not metadata:
                         changed = await cur.execute(
                             f"""UPDATE messages SET deleted_at = %s
                                WHERE session_id = %s AND deleted_at IS NULL
@@ -865,11 +865,10 @@ class MySqlDatabase(IAgentDatabase):
                     else:
                         changed = await cur.execute(
                             f"""UPDATE messages SET deleted_at = %s,
-                                   metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()),
-                                                       '$.compressed_by', %s)
+                                   metadata = JSON_MERGE_PATCH(COALESCE(metadata, JSON_OBJECT()), %s)
                                WHERE session_id = %s AND deleted_at IS NULL
                                  AND id IN ({placeholders})""",
-                            (now, compressed_by, session_id, *ids),
+                            (now, json.dumps(metadata, ensure_ascii=False), session_id, *ids),
                         )
                     await cur.execute(
                         """UPDATE sessions s SET last_message_at = (

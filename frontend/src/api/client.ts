@@ -218,8 +218,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       }),
-    messages: (id: string) =>
-      request<Message[]>(`/sessions/${id}/messages?include_compression=true`),
+    // includeDeleted adds rows the user deleted (not compressed ones).
+    messages: (id: string, includeDeleted = false) =>
+      request<Message[]>(
+        `/sessions/${id}/messages?include_compression=true${includeDeleted ? "&include_deleted=true" : ""}`,
+      ),
     retryMessage: (id: string, messageId: string, content: string) =>
       request<{ status: string }>(`/sessions/${id}/messages/${messageId}/retry`, {
         method: "POST",

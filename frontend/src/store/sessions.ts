@@ -19,6 +19,8 @@ interface SessionEntry {
   attentionUnread: boolean;
   // Tool calls awaiting a human approve/deny decision (see TOOL_CONFIRM).
   pendingConfirms: PendingConfirm[];
+  // Whether history includes rows the user deleted (shown greyed out).
+  showDeleted?: boolean;
 }
 
 // Map a persisted Message into the StreamEvent shape the console renders, so
@@ -109,6 +111,11 @@ const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string 
 const HISTORY_COMPRESSED = "history_compressed";
 
 export function messageToEvent(m: Message): StreamEvent {
+  const event = rowToEvent(m);
+  return m.deleted_at ? { ...event, deleted: true } : event;
+}
+
+function rowToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user": {
       const summaryKind = SUMMARY_PREFIXES[String(m.metadata?.cagent_name ?? "")];
@@ -187,6 +194,7 @@ interface Store {
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
   deleteMessage: (sessionId: string, messageId: string) => Promise<void>;
+  setShowDeleted: (sessionId: string, show: boolean) => Promise<void>;
   compressSession: (sessionId: string, options?: CompressOptions) => Promise<CompressResult>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
   disconnectSession: (sessionId: string) => void;
@@ -201,7 +209,7 @@ export const useStore = create<Store>((set, get) => {
   // launchSession (sessions we start here) and openSession (sessions started
   // elsewhere — e.g. spawned by a subagent — that we're now viewing).
   const reloadHistory = async (sessionId: string) => {
-    const messages = await api.sessions.messages(sessionId);
+    const messages = await api.sessions.messages(sessionId, !!get().sessions[sessionId]?.showDeleted);
     set((s) => {
       const cur = s.sessions[sessionId];
       if (!cur) return s;
@@ -482,7 +490,7 @@ export const useStore = create<Store>((set, get) => {
       const needsSession = !existing?.session;
       const [fetchedSession, messages] = await Promise.all([
         needsSession ? api.sessions.get(sessionId) : Promise.resolve(null),
-        api.sessions.messages(sessionId),
+        api.sessions.messages(sessionId, !!get().sessions[sessionId]?.showDeleted),
       ]);
       const history = messages.map(messageToEvent);
 
@@ -599,7 +607,7 @@ export const useStore = create<Store>((set, get) => {
       await api.sessions.retryMessage(sessionId, messageId, content);
       const [session, messages] = await Promise.all([
         api.sessions.get(sessionId),
-        api.sessions.messages(sessionId),
+        api.sessions.messages(sessionId, !!get().sessions[sessionId]?.showDeleted),
       ]);
       const socket = attachSocket(sessionId);
       const history = messages.map(messageToEvent);
@@ -628,6 +636,15 @@ export const useStore = create<Store>((set, get) => {
       return session.id;
     },
 
+    setShowDeleted: async (sessionId, show) => {
+      set((s) => {
+        const cur = s.sessions[sessionId];
+        if (!cur) return s;
+        return { sessions: { ...s.sessions, [sessionId]: { ...cur, showDeleted: show } } };
+      });
+      await reloadHistory(sessionId);
+    },
+
     deleteMessage: async (sessionId, messageId) => {
       // The backend rebuilds the live runner, which closes this socket; drop
       // it first and reconnect after reloading the trimmed history.
@@ -637,7 +654,7 @@ export const useStore = create<Store>((set, get) => {
       } finally {
         const [session, messages] = await Promise.all([
           api.sessions.get(sessionId),
-          api.sessions.messages(sessionId),
+          api.sessions.messages(sessionId, !!get().sessions[sessionId]?.showDeleted),
         ]);
         const socket = attachSocket(sessionId);
         set((s) => {
@@ -663,7 +680,7 @@ export const useStore = create<Store>((set, get) => {
       if (result.status === "compressed") {
         // Reload history so the compression divider appears in place; keep
         // the live socket and any events it delivered meanwhile.
-        const messages = await api.sessions.messages(sessionId);
+        const messages = await api.sessions.messages(sessionId, !!get().sessions[sessionId]?.showDeleted);
         set((s) => {
           const cur = s.sessions[sessionId];
           if (!cur) return s;

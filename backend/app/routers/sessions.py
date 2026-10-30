@@ -16,7 +16,7 @@ from app.core.session_config import ensure_session_config, write_session_config
 from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt
 from app.core.session_runtime import build_runner, get_or_rehydrate
-from app.core.compressed import COMPRESSED_BY, is_completed_mark, is_summary
+from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
 from app.core.workspace import (
     copy_workspace,
     create_git_worktree,
@@ -449,12 +449,22 @@ async def update_session_share(
 async def get_messages(
     session_id: str,
     include_compression: bool = False,
+    include_deleted: bool = False,
     db: IAgentDatabase = Depends(get_db),
 ):
+    """The transcript; include_deleted adds rows removed with the delete button.
+
+    Only those (metadata.deleted_by == "user"): rows a rewrite discarded stay
+    out, and rows a summary replaced (metadata.compressed_by) are reached by
+    expanding their summary.
+    """
     try:
-        messages = await db.get_messages(session_id)
+        messages = await db.get_messages(session_id, include_deleted=include_deleted)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    if include_deleted:
+        messages = [m for m in messages
+                    if m.deleted_at is None or (m.metadata or {}).get(DELETED_BY) == "user"]
     return transcript_messages(messages, include_compression=include_compression)
 
 
@@ -566,7 +576,7 @@ async def delete_message(
     if index is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
     ids = _deletion_group(messages, index)
-    deleted = await db.soft_delete_messages(session_id, ids)
+    deleted = await db.soft_delete_messages(session_id, ids, metadata={DELETED_BY: "user"})
     logger.info("delete message session=%s message=%s rows=%d", session_id, message_id, deleted)
     if runner is not None:
         await registry.remove(session_id)

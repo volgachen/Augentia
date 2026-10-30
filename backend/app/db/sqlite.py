@@ -539,7 +539,7 @@ class SqliteDatabase(IAgentDatabase):
         return target
 
     async def soft_delete_messages(
-        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+        self, session_id: str, message_ids: list[str], *, metadata: dict | None = None,
     ) -> int:
         await self.get_session(session_id)
         if not message_ids:
@@ -554,12 +554,10 @@ class SqliteDatabase(IAgentDatabase):
                 ).fetchone()
                 if row is None:
                     continue
-                metadata = _json(row["metadata"], {}) or {}
-                if compressed_by is not None:
-                    metadata["compressed_by"] = compressed_by
+                merged = {**(_json(row["metadata"], {}) or {}), **(metadata or {})}
                 self._conn.execute(
                     "UPDATE messages SET deleted_at = ?, metadata = ? WHERE session_id = ? AND id = ?",
-                    (now, _metadata_json(metadata), session_id, message_id),
+                    (now, _metadata_json(merged), session_id, message_id),
                 )
                 changed += 1
             latest = self._conn.execute(

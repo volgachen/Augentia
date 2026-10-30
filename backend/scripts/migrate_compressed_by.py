@@ -26,7 +26,7 @@ import sys
 
 import _common  # noqa: F401 — sets sys.path, loads .env, logging
 
-from app.core.compressed import covered_ids, is_summary
+from app.core.compressed import COMPRESSED_BY, covered_ids, is_summary
 from app.db.deps import close_db, get_db, init_db
 
 
@@ -46,7 +46,7 @@ async def migrate(db, session_ids: list[str], apply: bool) -> tuple[int, int]:
             summaries_total += 1
             session_rows += len(ids)
             if apply:
-                await db.soft_delete_messages(session_id, ids, compressed_by=summary.id)
+                await db.soft_delete_messages(session_id, ids, metadata={COMPRESSED_BY: summary.id})
             else:
                 # Dry run: simulate the deletion so later summaries see it.
                 gone = set(ids)

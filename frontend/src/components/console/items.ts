@@ -27,6 +27,8 @@ export interface ToolCallView {
   // Row that owns this call: the assistant message (native layout) or the
   // legacy tool_call row. Deleting it removes the call and its result.
   messageId?: string;
+  // The owning row was deleted by the user (shown only on request).
+  deleted?: boolean;
   result?: unknown;
   // Images the tool returned (e.g. read on an image file).
   resultImages?: ImageRef[];
@@ -143,7 +145,10 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
       const payload = parseAssistantData(event.data);
       const content = payload.content ?? "";
       if (content) {
-        items.push({ type: "assistant_message", data: content, message_id: event.message_id });
+        items.push({
+          type: "assistant_message", data: content, message_id: event.message_id,
+          deleted: event.deleted,
+        });
       }
       for (const [index, toolCall] of (payload.tool_calls ?? []).entries()) {
         const name = toolCall.function?.name ?? "unknown";
@@ -154,6 +159,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
           name,
           args: parseToolArguments(toolCall.function?.arguments),
           messageId: event.message_id,
+          deleted: event.deleted,
         };
         items.push(item);
         toolCallsById.set(callId, item);
@@ -181,6 +187,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
           name,
           args: obj?.args ?? {},
           messageId: event.type === "tool_call" ? event.message_id : undefined,
+          deleted: event.deleted,
         };
         items.push(item);
         toolCallsById.set(callId, item);

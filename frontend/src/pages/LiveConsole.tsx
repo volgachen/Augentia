@@ -26,6 +26,7 @@ export default function LiveConsole() {
   const retryMessage = useStore((s) => s.retryMessage);
   const divergeFromMessage = useStore((s) => s.divergeFromMessage);
   const deleteMessage = useStore((s) => s.deleteMessage);
+  const setShowDeleted = useStore((s) => s.setShowDeleted);
   const compressSession = useStore((s) => s.compressSession);
   const resolveConfirm = useStore((s) => s.resolveConfirm);
   const openSession = useStore((s) => s.openSession);
@@ -338,6 +339,17 @@ export default function LiveConsole() {
             {session.status}
           </span>
         </div>
+        <label
+          className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none"
+          title="显示被你删除的消息（不含被压缩掉的消息，那些在摘要里展开）"
+        >
+          <input
+            type="checkbox"
+            checked={!!entry.showDeleted}
+            onChange={(e) => sessionId && void setShowDeleted(sessionId, e.target.checked)}
+          />
+          显示已删除消息
+        </label>
         {session.status === "RUNNING" && (
           <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
             <input
