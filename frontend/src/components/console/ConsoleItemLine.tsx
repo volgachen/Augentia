@@ -220,19 +220,11 @@ function EventLine({
         {hasImages && <ImageThumbs images={event.images} />}
       </div>
       {canDiverge && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onDiverge();
-          }}
+        <DivergeButton
+          onDiverge={onDiverge}
           disabled={deriving}
-          className="shrink-0 mt-0.5 p-0.5 rounded text-gray-600 opacity-40 group-hover:opacity-100 hover:text-indigo-300 hover:bg-gray-800 disabled:opacity-20 disabled:cursor-wait"
           title="Diverge: open a new session with the history before this message (this message is not included)"
-          aria-label="Diverge from this message"
-        >
-          <DivergeIcon />
-        </button>
+        />
       )}
       {onDelete && (
         <DeleteButton
@@ -283,6 +275,32 @@ const DELETE_TITLE: Record<string, string> = {
   compression: "删除这条摘要（被它替换的原始消息会重新对模型可见）",
 };
 
+function DivergeButton({
+  onDiverge,
+  disabled,
+  title,
+}: {
+  onDiverge: () => void;
+  disabled: boolean;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onDiverge();
+      }}
+      disabled={disabled}
+      className="shrink-0 mt-0.5 p-0.5 rounded text-gray-600 opacity-40 group-hover:opacity-100 hover:text-indigo-300 hover:bg-gray-800 disabled:opacity-20 disabled:cursor-wait"
+      title={title}
+      aria-label="Diverge from this message"
+    >
+      <DivergeIcon />
+    </button>
+  );
+}
+
 function DivergeIcon() {
   // Git-branch style glyph.
   return (
@@ -308,10 +326,15 @@ function CompressionBlock({
   renderItem,
   onDelete,
   deleteDisabled = false,
+  onDiverge,
+  deriving = false,
 }: {
   group: CompressionGroup;
   onDelete?: () => void;
   deleteDisabled?: boolean;
+  // Branch from this summary: the new session keeps history through it.
+  onDiverge?: () => void;
+  deriving?: boolean;
   // How many expanded compression boxes enclose this one.
   depth: number;
   renderItem: (item: ConsoleItem, key: string | number) => React.ReactNode;
@@ -417,6 +440,13 @@ function CompressionBlock({
         <div className="flex-1 min-w-0 rounded border border-emerald-900 bg-emerald-950/20 px-2 py-1.5 font-mono text-xs text-emerald-200/90 whitespace-pre-wrap break-words">
           {summary || "(empty summary)"}
         </div>
+        {onDiverge && (
+          <DivergeButton
+            onDiverge={onDiverge}
+            disabled={deriving}
+            title="Diverge: open a new session with the history up to and including this summary (it becomes a plain message there)"
+          />
+        )}
         {onDelete && (
           <DeleteButton onDelete={onDelete} disabled={deleteDisabled} title={DELETE_TITLE.compression} />
         )}
@@ -510,6 +540,12 @@ function ConsoleItemLineInner(props: ConsoleItemLineProps) {
         depth={compressionDepth}
         onDelete={deleteHandler(item.event.message_id)}
         deleteDisabled={generating}
+        onDiverge={
+          !readOnly && onDiverge && item.event.message_id
+            ? () => onDiverge(item.event.message_id!)
+            : undefined
+        }
+        deriving={deriving}
         // Originals are already out of the model's view: show them read-only.
         renderItem={(child, key) => (
           <ConsoleItemLine

@@ -523,15 +523,25 @@ async def diverge_from_message(
     if target is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
     # The branch keeps only the history *before* the target, so the target
-    # message itself (user input or agent reply) is not carried over. Allowed
-    # while the source is RUNNING: it only reads already-persisted rows.
-    if target.role not in (MessageRole.USER, MessageRole.AGENT):
-        raise HTTPException(status_code=400, detail="only user or agent messages can be used as a divergence point")
+    # message itself (user input or agent reply) is not carried over.
+    # A summary is the exception: the branch keeps history *through* it (it is
+    # copied as a plain user message, see plain_copy_fields), plus the marks
+    # right after it (its turn's turn_end), so the branch restarts from that
+    # summary. Allowed while the source is RUNNING: it only reads
+    # already-persisted rows.
+    if is_summary(target):
+        index = messages.index(target)
+        before_message_id = next(
+            (m.id for m in messages[index + 1:] if m.role != MessageRole.MARK), None)
+    elif target.role in (MessageRole.USER, MessageRole.AGENT):
+        before_message_id = message_id
+    else:
+        raise HTTPException(status_code=400, detail="only user or agent messages or summaries can be used as a divergence point")
     try:
         return await _create_derived_session(
             source, db, registry,
             title=body.title or f"{source.title or 'Session'} · Branch",
-            before_message_id=message_id,
+            before_message_id=before_message_id,
         )
     except HTTPException:
         raise

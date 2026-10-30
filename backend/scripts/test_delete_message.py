@@ -30,7 +30,8 @@ from app.db.mock import MockMemoryDatabase
 from app.models.domain import AgentTemplate, AgentType, MessageRole, SessionStatus
 from app.core.compressed import is_summary
 from app.routers.sessions import (
-    _create_derived_session, compressed_messages, delete_message, get_messages, transcript_messages,
+    DeriveSessionRequest, _create_derived_session, compressed_messages, delete_message,
+    diverge_from_message, get_messages, transcript_messages,
 )
 
 from _common import ok, fail, section
@@ -218,6 +219,22 @@ async def main() -> int:
                 passed = False
             else:
                 ok("diverge copies the summary as a plain user message")
+            await registry.remove(branch.id)
+
+            # Diverging *from* the summary keeps history through it, as text.
+            cagent_adapter_module._make_model = lambda client, name: model
+            try:
+                branch = await diverge_from_message(
+                    session.id, mark.id, DeriveSessionRequest(), db=db, registry=registry)
+            finally:
+                cagent_adapter_module._make_model = original
+            branch_rows = await db.get_messages(branch.id)
+            contents = [m.content for m in branch_rows if m.role != MessageRole.MARK]
+            if contents != ["SUMMARY"] or any(is_summary(m) for m in branch_rows):
+                fail(f"diverge from summary: {contents}")
+                passed = False
+            else:
+                ok("diverge from a summary keeps history through it as a plain message")
             await registry.remove(branch.id)
 
             # 6. Deleting the summary removes the whole compressed span.
