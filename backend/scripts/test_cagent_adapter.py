@@ -381,16 +381,6 @@ async def test_legacy_history_repair(db, wd) -> bool:
         await registry.remove(session.id)
 
 
-TURN_SUMMARY_TEXT = "User asked to read notes.txt; it says hello."
-
-
-def is_turn_summary(message) -> bool:
-    # Newer CAgent stores/sends the summary text as is; older pins prefix it.
-    content = message.get("content")
-    return (message.get("role") == "user" and isinstance(content, str)
-            and content.endswith(TURN_SUMMARY_TEXT))
-
-
 async def test_turn_compression(db, wd) -> bool:
     section("CAgent engine: turn_compression_tool_call_threshold summarizes a tool-heavy turn")
     import app.adapters.cagent_adapter as cagent_adapter_module
@@ -400,10 +390,10 @@ async def test_turn_compression(db, wd) -> bool:
     async def model(*, messages, tools, tool_choice=None):
         seen.append(messages)
         if "Summarize part of a conversation" in summary_instruction(messages):
-            return {"content": TURN_SUMMARY_TEXT}
+            return {"content": "User asked to read notes.txt; it says hello."}
         if any(m["role"] == "tool" for m in messages):
             return {"content": "notes.txt says hello"}
-        if any(is_turn_summary(m) for m in messages):
+        if any(m["content"] == "and then?" for m in messages if m["role"] == "user"):
             return {"content": "follow-up answered from summary"}
         return {"tool_calls": [{"id": "read-1", "name": "read",
                                 "arguments": {"path": "notes.txt"}}]}
@@ -454,11 +444,14 @@ async def test_turn_compression(db, wd) -> bool:
             fail(f"turn_end does not record compression: {mark}")
             return False
 
+        # The model view carries no metadata: find the summary by the stored
+        # row (picked above by name + metadata), then look for its content.
+        summary = summaries[0]
         seen.clear()
         await run("and then?")
         sent = seen[0]
         if any(m["role"] == "tool" for m in sent) or not any(
-                is_turn_summary(m) for m in sent):
+                m["role"] == "user" and m["content"] == summary["content"] for m in sent):
             fail(f"next turn did not see the summary instead of tool history: {sent}")
             return False
         ok("turn compression: summary persisted, reload + next turn see only the summary")
@@ -661,6 +654,11 @@ async def test_daily_range_compression_keeps_earlier_summary(db, wd) -> bool:
                   and m.metadata.get("cagent_name") == "range_summary"]
         if [m.content for m in ranges] != ["diary 2"]:
             fail(f"range summary rows (stored without prefix): {[m.content for m in ranges]}")
+            return False
+        day2_user = next(m for m in rows if m.role == MessageRole.USER
+                         and m.content == "day 2 browsing")
+        if day2_user.id not in ranges[0].metadata.get("replaced_message_ids", []):
+            fail(f"range summary does not list day 2's turn: {ranges[0].metadata}")
             return False
         # The next turn sees day 1's summary, then day 2's, and not day 2's raw turn.
         turns.clear()

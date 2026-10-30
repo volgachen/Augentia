@@ -98,8 +98,8 @@ function toolMessageToEventData(content: string): string {
   return JSON.stringify({ name: "tool", result: content });
 }
 
-// CAgent prefixes turn / range summaries with these; the console shows them
-// as compression summaries instead, so the prefix is redundant there.
+// Summaries are recognized by metadata.cagent_name. Older CAgent versions
+// stored them with these prefixes; strip one if present (newer rows have none).
 const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string }> = {
   turn_summary: { kind: "turn", prefix: "Summary of an earlier turn:\n" },
   range_summary: { kind: "range", prefix: "Summary of earlier messages:\n" },
