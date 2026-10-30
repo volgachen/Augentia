@@ -7,6 +7,7 @@ from typing import Any
 import aiomysql
 from aiomysql import DictCursor, Pool
 
+from app.core.compressed import plain_copy_fields
 from app.config import Settings
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import SEED_AGENT_ROWS
@@ -731,14 +732,15 @@ class MySqlDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str) -> list[Message]:
+    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> list[Message]:
         await self.get_session(session_id)
+        live = "" if include_deleted else " AND deleted_at IS NULL"
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
                 await cur.execute(
-                    """SELECT * FROM messages
-                       WHERE session_id = %s AND deleted_at IS NULL
-                       ORDER BY created_at""",
+                    f"""SELECT * FROM messages
+                       WHERE session_id = %s{live}
+                       ORDER BY created_at, id""",
                     (session_id,),
                 )
                 rows = await cur.fetchall()
@@ -775,12 +777,13 @@ class MySqlDatabase(IAgentDatabase):
                         originals = originals[:index]
                     cloned: list[Message] = []
                     for original in originals:
+                        role, content, metadata = plain_copy_fields(original)
                         message = Message(
                             session_id=target_session_id,
-                            role=original.role,
-                            content=original.content,
+                            role=role,
+                            content=content,
                             from_session_id=original.from_session_id,
-                            metadata=dict(original.metadata),
+                            metadata=metadata,
                             created_at=original.created_at,
                         )
                         await cur.execute(
@@ -838,6 +841,48 @@ class MySqlDatabase(IAgentDatabase):
                     (session_id,),
                 )
         return target
+
+    async def soft_delete_messages(
+        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+    ) -> int:
+        await self.get_session(session_id)
+        ids = list(dict.fromkeys(message_ids))
+        if not ids:
+            return 0
+        placeholders = ",".join(["%s"] * len(ids))
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor() as cur:
+                    if compressed_by is None:
+                        changed = await cur.execute(
+                            f"""UPDATE messages SET deleted_at = %s
+                               WHERE session_id = %s AND deleted_at IS NULL
+                                 AND id IN ({placeholders})""",
+                            (now, session_id, *ids),
+                        )
+                    else:
+                        changed = await cur.execute(
+                            f"""UPDATE messages SET deleted_at = %s,
+                                   metadata = JSON_SET(COALESCE(metadata, JSON_OBJECT()),
+                                                       '$.compressed_by', %s)
+                               WHERE session_id = %s AND deleted_at IS NULL
+                                 AND id IN ({placeholders})""",
+                            (now, compressed_by, session_id, *ids),
+                        )
+                    await cur.execute(
+                        """UPDATE sessions s SET last_message_at = (
+                               SELECT MAX(m.created_at) FROM messages m
+                               WHERE m.session_id = s.id AND m.deleted_at IS NULL
+                           ) WHERE s.id = %s""",
+                        (session_id,),
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return changed
 
     # ---- Plugin instances/runs/logs ----
 

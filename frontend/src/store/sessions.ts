@@ -105,12 +105,14 @@ const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string 
   range_summary: { kind: "range", prefix: "Summary of earlier messages:\n" },
 };
 
+// STATUS payload the backend sends after a turn that compressed history.
+const HISTORY_COMPRESSED = "history_compressed";
+
 export function messageToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user": {
       const summaryKind = SUMMARY_PREFIXES[String(m.metadata?.cagent_name ?? "")];
       if (summaryKind) {
-        const replaced = m.metadata?.replaced_message_ids;
         return {
           type: "compression",
           data: m.content.startsWith(summaryKind.prefix)
@@ -119,7 +121,9 @@ export function messageToEvent(m: Message): StreamEvent {
           message_id: m.id,
           compression: {
             kind: summaryKind.kind,
-            replaced: Array.isArray(replaced) ? replaced.map(String) : [],
+            replacedCount: Array.isArray(m.metadata?.replaced_message_ids)
+              ? m.metadata.replaced_message_ids.length
+              : undefined,
           },
         };
       }
@@ -144,19 +148,18 @@ export function messageToEvent(m: Message): StreamEvent {
     case "agent":
       return { type: "assistant_message", data: m.content, message_id: m.id };
     case "mark": {
-      // Only compression_completed marks are requested; data is the summary.
+      // Only compression_completed marks are served; data is the summary.
       let summary = "";
       try {
         summary = String(JSON.parse(m.content)?.content ?? "");
       } catch {
         // malformed mark — show an empty summary
       }
-      const through = m.metadata?.compressed_through;
       return {
         type: "compression",
         data: summary,
         message_id: m.id,
-        compression: { kind: "session", through: typeof through === "string" ? through : null },
+        compression: { kind: "session" },
       };
     }
     default:
@@ -183,6 +186,7 @@ interface Store {
   cancelGeneration: (sessionId: string) => void;
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
+  deleteMessage: (sessionId: string, messageId: string) => Promise<void>;
   compressSession: (sessionId: string, options?: CompressOptions) => Promise<CompressResult>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
   disconnectSession: (sessionId: string) => void;
@@ -196,11 +200,31 @@ export const useStore = create<Store>((set, get) => {
   // Open a WS for a session and wire its frames into the store. Shared by
   // launchSession (sessions we start here) and openSession (sessions started
   // elsewhere — e.g. spawned by a subagent — that we're now viewing).
+  const reloadHistory = async (sessionId: string) => {
+    const messages = await api.sessions.messages(sessionId);
+    set((s) => {
+      const cur = s.sessions[sessionId];
+      if (!cur) return s;
+      return {
+        sessions: {
+          ...s.sessions,
+          [sessionId]: { ...cur, events: messages.map(messageToEvent) },
+        },
+      };
+    });
+  };
+
   const attachSocket = (sessionId: string): WebSocket => {
     const socket = createSessionSocket(sessionId);
 
     socket.onmessage = (e) => {
       const frame = JSON.parse(e.data);
+      if (frame.type === "status" && frame.data === HISTORY_COMPRESSED) {
+        // A summary just replaced rows this client still shows; they are now
+        // soft-deleted server-side, so reload the transcript.
+        void reloadHistory(sessionId);
+        return;
+      }
       set((s) => {
         const entry = s.sessions[sessionId];
         if (!entry) return s;
@@ -602,6 +626,36 @@ export const useStore = create<Store>((set, get) => {
       const session = await api.sessions.divergeFromMessage(sessionId, messageId);
       await get().hydrateSessions();
       return session.id;
+    },
+
+    deleteMessage: async (sessionId, messageId) => {
+      // The backend rebuilds the live runner, which closes this socket; drop
+      // it first and reconnect after reloading the trimmed history.
+      get().sessions[sessionId]?.socket?.close();
+      try {
+        await api.sessions.deleteMessage(sessionId, messageId);
+      } finally {
+        const [session, messages] = await Promise.all([
+          api.sessions.get(sessionId),
+          api.sessions.messages(sessionId),
+        ]);
+        const socket = attachSocket(sessionId);
+        set((s) => {
+          const cur = s.sessions[sessionId];
+          if (!cur) return s;
+          return {
+            sessions: {
+              ...s.sessions,
+              [sessionId]: {
+                ...cur,
+                session,
+                events: messages.map(messageToEvent),
+                socket,
+              },
+            },
+          };
+        });
+      }
     },
 
     compressSession: async (sessionId, options) => {

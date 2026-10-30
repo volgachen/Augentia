@@ -42,6 +42,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.compressed import SUMMARY_NAMES, compress_covered
 from app.db.interface import IAgentDatabase
 from app.models.domain import Message, MessageRole, SessionStatus
 
@@ -165,9 +166,10 @@ class AugentiaStore:
     # ------- messages -------
 
     async def list_messages(self, session_id: str, *, include_deleted: bool = False) -> list[dict]:
-        # IAgentDatabase.get_messages only returns live rows; include_deleted
-        # cannot be honored without an interface extension. It only matters
-        # once compression marks reference soft-deleted boundaries (PR2).
+        # Rows a summary replaced are soft-deleted (metadata.compressed_by);
+        # the summary stands in for them, so the framework only ever needs
+        # live rows. A whole-history summary's turn_end boundary is a mark,
+        # and marks are never compressed, so it always resolves.
         rows = await self._db.get_messages(session_id)
         return self._to_framework_records(rows)
 
@@ -188,13 +190,20 @@ class AugentiaStore:
         return saved
 
     async def delete_message(self, session_id: str, message_id: str) -> None:
-        # IAgentDatabase only offers delete-from-message-onward (diverge), so
-        # single-row soft delete is a no-op. CAgent only calls this to tidy
-        # rows a saved turn_summary / range_summary already lists in
-        # replaced_message_ids;
-        # those stay hidden from the model, while the client message list
-        # keeps showing the original turn alongside its summary.
+        # CAgent calls this to tidy rows a saved turn/range summary lists in
+        # replaced_message_ids. They are already soft-deleted with
+        # compressed_by when the summary was saved (see _compress_covered).
         logger.debug("delete_message is a no-op for session=%s message=%s", session_id, message_id)
+
+    async def _compress_covered(self, session_id: str, row: Message) -> None:
+        """A summary was just saved: soft-delete what it replaced."""
+        try:
+            count = await compress_covered(self._db, session_id, row)
+        except Exception:
+            # The summary itself is saved; the originals simply stay visible.
+            logger.exception("could not mark compressed rows session=%s summary=%s", session_id, row.id)
+            return
+        logger.info("compressed %d row(s) under summary=%s session=%s", count, row.id, session_id)
 
     # ------- persistence helpers -------
 
@@ -213,6 +222,9 @@ class AugentiaStore:
             from_session_id=from_session,
             metadata=metadata,
         )
+        if message.get("name") in SUMMARY_NAMES:
+            await self._compress_covered(session_id, row)
+            return self._user_record(row)
         callback, self.on_turn_user_saved = self.on_turn_user_saved, None
         if callback is not None:
             await callback(row)
@@ -261,6 +273,8 @@ class AugentiaStore:
         row = await self._db.add_message(
             session_id, MessageRole.MARK, json.dumps(payload, ensure_ascii=False)
         )
+        if payload["name"] == "compression_completed":
+            await self._compress_covered(session_id, row)
         return self._record(
             row, role="mark", name=payload["name"], content=payload["content"],
             metadata=dict(payload["metadata"]),
@@ -357,10 +371,12 @@ class AugentiaStore:
 
     @staticmethod
     def _drop_orphan_compression(records: list[dict]) -> list[dict]:
-        # A diverged/cloned session copies compression marks verbatim, but their
-        # through_message_id still names a row of the *source* session. CAgent
-        # treats a missing boundary as corrupt history, so drop such marks: the
-        # branch simply runs uncompressed until it compresses again.
+        # A session diverged before compressed_by copied compression marks
+        # verbatim, but their through_message_id still names a row of the
+        # *source* session. CAgent treats a missing boundary as corrupt
+        # history, so drop such marks: that branch also copied the original
+        # rows, so it simply runs uncompressed. (Diverging now copies a summary
+        # as a plain user message instead; see plain_copy_fields.)
         ids = {r["id"] for r in records}
         kept = []
         for record in records:

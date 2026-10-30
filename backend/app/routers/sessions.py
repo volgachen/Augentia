@@ -16,6 +16,7 @@ from app.core.session_config import ensure_session_config, write_session_config
 from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt
 from app.core.session_runtime import build_runner, get_or_rehydrate
+from app.core.compressed import COMPRESSED_BY, is_completed_mark, is_summary
 from app.core.workspace import (
     copy_workspace,
     create_git_worktree,
@@ -458,48 +459,41 @@ async def get_messages(
 
 
 def transcript_messages(messages: list, *, include_compression: bool) -> list:
-    """The client-facing transcript (also served by the public share view)."""
-    # Framework mark rows (turn_end / compression boundaries) are internal
-    # bookkeeping for the CAgent engine loop, not conversation content.
-    if not include_compression:
-        return [m for m in messages if m.role != MessageRole.MARK]
-    return _with_compression_marks(messages)
+    """The client-facing transcript (also served by the public share view).
 
-
-def _with_compression_marks(messages: list) -> list:
-    """Keep compression_completed marks so the console can fold compressed history.
-
-    A mark's boundary (metadata.through_message_id) names a turn_end mark the
-    client never receives, so each kept mark gets metadata.compressed_through:
-    the id of the last non-mark row at or before that boundary (None if there
-    is none) — everything up to it is what the summary replaced. Marks whose
-    boundary is not in this session (copied by diverge/clone) are dropped,
-    matching the engine, which ignores them.
+    Framework marks (turn_end / compression_started) are internal bookkeeping
+    for the CAgent engine loop. compression_completed marks are whole-history
+    summaries and are kept when include_compression is set. Rows a summary
+    replaced are soft-deleted (metadata.compressed_by), so they never appear
+    here; clients fetch them per summary from .../compressed.
     """
-    # id -> last non-mark row id at or before that row
-    visible_through: dict[str, str | None] = {}
-    last_visible: str | None = None
-    result = []
-    for m in messages:
-        if m.role != MessageRole.MARK:
-            last_visible = m.id
-            visible_through[m.id] = m.id
-            result.append(m)
-            continue
-        visible_through[m.id] = last_visible
-        try:
-            payload = json.loads(m.content)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(payload, dict) or payload.get("name") != "compression_completed":
-            continue
-        through = (payload.get("metadata") or {}).get("through_message_id")
-        if through not in visible_through:
-            continue
-        result.append(m.model_copy(update={
-            "metadata": {**m.metadata, "compressed_through": visible_through[through]},
-        }))
-    return result
+    return [
+        m for m in messages
+        if m.role != MessageRole.MARK or (include_compression and is_completed_mark(m))
+    ]
+
+
+async def compressed_messages(db: IAgentDatabase, session_id: str, summary_id: str) -> list:
+    """Rows the summary `summary_id` replaced, in order (raises KeyError)."""
+    rows = await db.get_messages(session_id, include_deleted=True)
+    if not any(m.id == summary_id and is_summary(m) for m in rows):
+        raise KeyError(f"Summary '{summary_id}' not found")
+    return transcript_messages(
+        [m for m in rows if (m.metadata or {}).get(COMPRESSED_BY) == summary_id],
+        include_compression=True,
+    )
+
+
+@router.get("/{session_id}/messages/{summary_id}/compressed")
+async def get_compressed_messages(
+    session_id: str,
+    summary_id: str,
+    db: IAgentDatabase = Depends(get_db),
+):
+    try:
+        return await compressed_messages(db, session_id, summary_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)
@@ -534,6 +528,93 @@ async def diverge_from_message(
     except Exception as e:
         logger.exception("failed to diverge session=%s message=%s", session_id, message_id)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{session_id}/messages/{message_id}")
+async def delete_message(
+    session_id: str,
+    message_id: str,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Soft-delete one transcript entry and everything that belongs to it.
+
+    - user input: just that row.
+    - model output (agent row): the row plus the tool-result rows answering its
+      tool_calls, so the history never holds an unpaired call or result.
+    - tool result: that row (only reachable for legacy/orphan results).
+    - summary (turn/range summary row, or a compression_completed mark): the
+      summary itself (and its compression_started mark). The rows it replaced
+      were already soft-deleted (compressed_by) when it was saved, so they
+      stay gone: the whole compressed span disappears from the model's view.
+    The live runner is rebuilt so its in-memory context drops the rows too.
+    """
+    try:
+        session = await db.get_session(session_id)
+        messages = await db.get_messages(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        runner = None
+    if (runner is not None and runner.is_busy) or session.status in (
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+    ):
+        raise HTTPException(status_code=409, detail="session is running; delete after the turn finishes")
+    index = next((i for i, m in enumerate(messages) if m.id == message_id), None)
+    if index is None:
+        raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
+    ids = _deletion_group(messages, index)
+    deleted = await db.soft_delete_messages(session_id, ids)
+    logger.info("delete message session=%s message=%s rows=%d", session_id, message_id, deleted)
+    if runner is not None:
+        await registry.remove(session_id)
+        await get_or_rehydrate(session, db, registry)
+    return {"deleted_ids": ids}
+
+
+def _deletion_group(messages: list, index: int) -> list[str]:
+    target = messages[index]
+    ids = [target.id]
+    if target.role == MessageRole.AGENT:
+        try:
+            payload = json.loads(target.content)
+        except (ValueError, TypeError):
+            payload = None
+        call_ids = {
+            call.get("id")
+            for call in ((payload or {}).get("tool_calls") or [] if isinstance(payload, dict) else [])
+            if isinstance(call, dict) and call.get("id")
+        }
+        # Native tool rows directly after the assistant row answer its calls;
+        # a legacy split layout puts tool_call/tool rows there instead.
+        for row in messages[index + 1:]:
+            if row.role == MessageRole.TOOL:
+                try:
+                    tool_payload = json.loads(row.content)
+                except (ValueError, TypeError):
+                    tool_payload = None
+                call_id = tool_payload.get("tool_call_id") if isinstance(tool_payload, dict) else None
+                if call_id is None or call_id in call_ids:
+                    ids.append(row.id)
+                    continue
+            break
+    elif target.role == MessageRole.TOOL_CALL:
+        # Legacy split layout: the call's result is the next row.
+        if index + 1 < len(messages) and messages[index + 1].role == MessageRole.TOOL:
+            ids.append(messages[index + 1].id)
+    elif target.role == MessageRole.MARK:
+        try:
+            payload = json.loads(target.content)
+        except (ValueError, TypeError):
+            payload = None
+        if not (isinstance(payload, dict) and payload.get("name") == "compression_completed"):
+            raise HTTPException(status_code=400, detail="internal marks cannot be deleted")
+        started = (payload.get("metadata") or {}).get("compression_id")
+        if started:
+            ids.append(started)
+    return ids
 
 
 @router.post("/{session_id}/compress")

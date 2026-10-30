@@ -48,6 +48,8 @@ _TOOL_RESULT_MAX = 8000
 _EVENT_QUEUE_MAX = 256
 _FROM_SESSION_RE = re.compile(r"^\[from-session:([^\]]+)\]\s")
 _DEFAULT_MAX_STEPS = 50
+# STATUS payload after a turn that compressed history (clients reload it).
+HISTORY_COMPRESSED = "history_compressed"
 # Screenshots arrive every step in browser sessions; only the newest few are
 # worth re-sending each turn. config.tool_image_limit overrides (null = all).
 _DEFAULT_TOOL_IMAGE_LIMIT = 3
@@ -506,6 +508,10 @@ class CAgentAdapter(BaseAgentAdapter):
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
         })
+        if ctx.turn_compression_applied or ctx.compression_applied:
+            # The rows a summary replaced are now soft-deleted; clients holding
+            # them live should reload the transcript.
+            await self._emit(StreamEventType.STATUS, HISTORY_COMPRESSED)
         await self._emit(StreamEventType.DONE, "")
 
     # ---- image resolution (called by the generated agent class) ----

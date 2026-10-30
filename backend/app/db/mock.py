@@ -1,6 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List
+from app.core.compressed import plain_copy_fields
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import seed_agent_templates
 from app.models.domain import (
@@ -167,9 +168,9 @@ class MockMemoryDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str) -> List[Message]:
+    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> List[Message]:
         await self.get_session(session_id)
-        return [m for m in self._messages[session_id] if m.deleted_at is None]
+        return [m for m in self._messages[session_id] if include_deleted or m.deleted_at is None]
 
     async def clone_messages(
         self,
@@ -191,12 +192,13 @@ class MockMemoryDatabase(IAgentDatabase):
             source = source[:index]
         cloned = []
         for original in source:
+            role, content, metadata = plain_copy_fields(original)
             message = Message(
                 session_id=target_session_id,
-                role=original.role,
-                content=original.content,
+                role=role,
+                content=content,
                 from_session_id=original.from_session_id,
-                metadata=dict(original.metadata),
+                metadata=metadata,
             )
             message.created_at = original.created_at
             self._messages[target_session_id].append(message)
@@ -218,6 +220,23 @@ class MockMemoryDatabase(IAgentDatabase):
         visible = [m for m in messages if m.deleted_at is None]
         self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None
         return target
+
+    async def soft_delete_messages(
+        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+    ) -> int:
+        await self.get_session(session_id)
+        wanted = set(message_ids)
+        now = datetime.now(timezone.utc)
+        changed = 0
+        for message in self._messages[session_id]:
+            if message.deleted_at is None and message.id in wanted:
+                message.deleted_at = now
+                if compressed_by is not None:
+                    message.metadata = {**message.metadata, "compressed_by": compressed_by}
+                changed += 1
+        visible = [m for m in self._messages[session_id] if m.deleted_at is None]
+        self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None
+        return changed
 
     # ------- Plugin instances/runs/logs -------
 

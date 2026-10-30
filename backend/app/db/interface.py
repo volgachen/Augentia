@@ -85,7 +85,8 @@ class IAgentDatabase(ABC):
     ) -> Message: pass
 
     @abstractmethod
-    async def get_messages(self, session_id: str) -> List[Message]: pass
+    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> List[Message]:
+        """Rows ordered by (created_at, id); soft-deleted ones only with include_deleted."""
 
     @abstractmethod
     async def clone_messages(
@@ -98,6 +99,16 @@ class IAgentDatabase(ABC):
 
     @abstractmethod
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message: pass
+
+    @abstractmethod
+    async def soft_delete_messages(
+        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+    ) -> int:
+        """Soft-delete exactly these live rows of the session; return how many changed.
+
+        With compressed_by, each row also gets metadata.compressed_by = that id
+        (the summary that replaced it), so the originals can be listed later.
+        """
 
     # ------- Plugin instances/runs/logs -------
     @abstractmethod

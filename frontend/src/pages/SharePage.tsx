@@ -5,6 +5,7 @@ import type { SharedSession } from "../api/types";
 import { messageToEvent } from "../store/sessions";
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
 import { AttachmentUrlContext } from "../components/console/attachmentUrl";
+import { CompressedLoaderContext } from "../components/console/compressedLoader";
 import { buildConsoleItems, isToolCallView, itemMessageId } from "../components/console/items";
 
 /** Public, read-only transcript of a session its owner shared. No login. */
@@ -46,6 +47,11 @@ export default function SharePage() {
   }, [running, load]);
 
   const resolveUrl = useCallback((ref: string) => sharedAttachmentUrl(sessionId, ref), [sessionId]);
+  const loadCompressed = useCallback(
+    async (summaryId: string) =>
+      (await api.share.compressedMessages(sessionId, summaryId)).map(messageToEvent),
+    [sessionId],
+  );
 
   if (!shared) {
     return (
@@ -60,6 +66,7 @@ export default function SharePage() {
 
   return (
     <AttachmentUrlContext.Provider value={resolveUrl}>
+    <CompressedLoaderContext.Provider value={loadCompressed}>
       <div className="min-h-screen bg-gray-950 text-gray-100">
         <div className="mx-auto flex max-w-5xl flex-col gap-3 p-4">
           <header className="flex flex-wrap items-end justify-between gap-2 border-b border-gray-800 pb-3">
@@ -110,6 +117,7 @@ export default function SharePage() {
           </main>
         </div>
       </div>
+    </CompressedLoaderContext.Provider>
     </AttachmentUrlContext.Provider>
   );
 }

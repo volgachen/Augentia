@@ -2,7 +2,7 @@ import type { ImageRef, StreamEvent } from "../../api/types";
 
 // Pure transcript shaping shared by the live console and the read-only share
 // page: raw stream events -> render items (tool calls paired with results,
-// compressed history folded under its summary).
+// compression summaries as their own items).
 
 interface AssistantToolCall {
   id?: string;
@@ -24,81 +24,41 @@ export interface ToolCallView {
   callId: string;
   name: string;
   args: unknown;
+  // Row that owns this call: the assistant message (native layout) or the
+  // legacy tool_call row. Deleting it removes the call and its result.
+  messageId?: string;
   result?: unknown;
   // Images the tool returned (e.g. read on an image file).
   resultImages?: ImageRef[];
 }
 
-// A compression summary together with the rows it replaced. The model sees
-// only the summary, so the console folds `hidden` by default.
+// A compression summary. The rows it replaced are no longer in the
+// transcript (soft-deleted, metadata.compressed_by = its id); the console
+// fetches them when the summary is expanded.
 export interface CompressionGroup {
   kind: "compression_group";
   event: StreamEvent;
-  hidden: ConsoleItem[];
 }
 
 export type ConsoleItem = StreamEvent | ToolCallView | CompressionGroup;
 
-type FoldNode = { event: StreamEvent; hidden?: FoldNode[] };
-
-function nodeContains(node: FoldNode, messageId: string): boolean {
-  if (node.event.message_id === messageId) return true;
-  return !!node.hidden?.some((child) => nodeContains(child, messageId));
-}
-
-// Nest every row a compression replaced under that compression's event. A
-// whole-session compression replaces everything through its boundary (earlier
-// compression groups included, so they nest); a turn or range compression
-// replaces exactly the listed rows (an earlier summary among them nests). Events without compression info pass through.
-function foldCompressed(events: StreamEvent[]): FoldNode[] {
-  const out: FoldNode[] = [];
-  for (const event of events) {
-    const info = event.type === "compression" ? event.compression : undefined;
-    if (!info) {
-      out.push(event.type === "compression" ? { event, hidden: [] } : { event });
-      continue;
-    }
-    let owned: Set<number>;
-    if (info.kind === "session") {
-      const through = info.through;
-      const end = through ? out.findIndex((node) => nodeContains(node, through)) : -1;
-      owned = new Set(Array.from({ length: end + 1 }, (_, i) => i));
-    } else {
-      const replaced = new Set(info.replaced ?? []);
-      owned = new Set(
-        out.flatMap((node, i) =>
-          node.event.message_id && replaced.has(node.event.message_id) ? [i] : [],
-        ),
-      );
-    }
-    const hidden = out.filter((_, i) => owned.has(i));
-    const kept = out.filter((_, i) => !owned.has(i));
-    out.length = 0;
-    out.push(...kept, { event, hidden });
-  }
-  return out;
-}
-
 export function buildConsoleItems(events: StreamEvent[]): ConsoleItem[] {
-  const toItems = (nodes: FoldNode[]): ConsoleItem[] => {
-    const items: ConsoleItem[] = [];
-    let run: StreamEvent[] = [];
-    const flush = () => {
-      items.push(...buildFlatItems(run));
-      run = [];
-    };
-    for (const node of nodes) {
-      if (node.hidden) {
-        flush();
-        items.push({ kind: "compression_group", event: node.event, hidden: toItems(node.hidden) });
-      } else {
-        run.push(node.event);
-      }
-    }
-    flush();
-    return items;
+  const items: ConsoleItem[] = [];
+  let run: StreamEvent[] = [];
+  const flush = () => {
+    items.push(...buildFlatItems(run));
+    run = [];
   };
-  return toItems(foldCompressed(events));
+  for (const event of events) {
+    if (event.type === "compression") {
+      flush();
+      items.push({ kind: "compression_group", event });
+    } else {
+      run.push(event);
+    }
+  }
+  flush();
+  return items;
 }
 
 function parseAssistantData(raw: string): AssistantPayload {
@@ -193,6 +153,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
           callId,
           name,
           args: parseToolArguments(toolCall.function?.arguments),
+          messageId: event.message_id,
         };
         items.push(item);
         toolCallsById.set(callId, item);
@@ -219,6 +180,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
           callId,
           name,
           args: obj?.args ?? {},
+          messageId: event.type === "tool_call" ? event.message_id : undefined,
         };
         items.push(item);
         toolCallsById.set(callId, item);
@@ -269,14 +231,6 @@ export function interleaveResult(text: string, images: ImageRef[]): ResultSegmen
   }
   if (cursor < text.length) segments.push({ text: text.slice(cursor) });
   return segments;
-}
-
-export function countMessages(items: ConsoleItem[]): number {
-  return items.reduce(
-    (n, item) =>
-      n + (isCompressionGroup(item) ? 1 + countMessages(item.hidden) : 1),
-    0,
-  );
 }
 
 export function isToolCallView(item: ConsoleItem): item is ToolCallView {

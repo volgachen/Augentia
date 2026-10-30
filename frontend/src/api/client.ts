@@ -230,6 +230,12 @@ export const api = {
         method: "POST",
         body: JSON.stringify({}),
       }),
+    compressedMessages: (id: string, summaryId: string) =>
+      request<Message[]>(`/sessions/${id}/messages/${summaryId}/compressed`),
+    deleteMessage: (id: string, messageId: string) =>
+      request<{ deleted_ids: string[] }>(`/sessions/${id}/messages/${messageId}`, {
+        method: "DELETE",
+      }),
     share: (id: string) => request<ShareState>(`/sessions/${id}/share`),
     updateShare: (id: string, enabled: boolean) =>
       request<ShareState>(`/sessions/${id}/share`, {
@@ -247,6 +253,10 @@ export const api = {
   },
   share: {
     get: (id: string) => request<SharedSession>(`/share/${encodeURIComponent(id)}`),
+    compressedMessages: (id: string, summaryId: string) =>
+      request<Message[]>(
+        `/share/${encodeURIComponent(id)}/messages/${encodeURIComponent(summaryId)}/compressed`,
+      ),
   },
   fs: {
     browse: (path?: string | null) =>

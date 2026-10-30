@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { useStore } from "../store/sessions";
+import { messageToEvent, useStore } from "../store/sessions";
+import { CompressedLoaderContext } from "../components/console/compressedLoader";
 import { api } from "../api/client";
 import { agentAcceptsImages } from "../api/types";
 import type { AgentTemplate } from "../api/types";
@@ -24,6 +25,7 @@ export default function LiveConsole() {
   const cancelGeneration = useStore((s) => s.cancelGeneration);
   const retryMessage = useStore((s) => s.retryMessage);
   const divergeFromMessage = useStore((s) => s.divergeFromMessage);
+  const deleteMessage = useStore((s) => s.deleteMessage);
   const compressSession = useStore((s) => s.compressSession);
   const resolveConfirm = useStore((s) => s.resolveConfirm);
   const openSession = useStore((s) => s.openSession);
@@ -128,6 +130,14 @@ export default function LiveConsole() {
   const agentLoaded = agent?.id === agentId;
   const isCagent = agentLoaded && (agent?.config?.engine ?? "cagent") === "cagent";
   const note = compressNote && compressNote.scope === sessionId ? compressNote : null;
+
+  const loadCompressed = useCallback(
+    async (summaryId: string) =>
+      sessionId
+        ? (await api.sessions.compressedMessages(sessionId, summaryId)).map(messageToEvent)
+        : [],
+    [sessionId],
+  );
 
   if (!entry) {
     return (
@@ -234,6 +244,16 @@ export default function LiveConsole() {
     }
   };
 
+  const handleDelete = async (messageId: string) => {
+    if (!sessionId || generating || session.status === "WAITING_CONFIRM") return;
+    if (!window.confirm("删除这条消息？模型之后将看不到它。")) return;
+    try {
+      await deleteMessage(sessionId, messageId);
+    } catch (e) {
+      window.alert(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const handleCompress = async () => {
     if (!sessionId || generating || compressing || !isCagent) return;
     const hours = compressHours.trim() ? Number(compressHours) : undefined;
@@ -275,6 +295,7 @@ export default function LiveConsole() {
   };
 
   return (
+    <CompressedLoaderContext.Provider value={loadCompressed}>
     <div className="relative flex flex-col h-full p-4 gap-3">
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -380,6 +401,7 @@ export default function LiveConsole() {
                 }}
                 onSubmitEdit={handleRetrySend}
                 onDiverge={handleDiverge}
+                onDelete={handleDelete}
               />
             </div>
           ))}
@@ -588,5 +610,6 @@ export default function LiveConsole() {
         </div>
       </div>
     </div>
+    </CompressedLoaderContext.Provider>
   );
 }

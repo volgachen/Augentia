@@ -15,7 +15,7 @@ from app.core.attachments import ATTACHMENT_PREFIX, get_attachment
 from app.core.session_share import is_shared
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
-from app.routers.sessions import transcript_messages
+from app.routers.sessions import compressed_messages, transcript_messages
 
 logger = logging.getLogger("augentia.share")
 router = APIRouter(prefix="/share", tags=["share"])
@@ -50,16 +50,7 @@ async def get_shared_session(session_id: str, db: IAgentDatabase = Depends(get_d
             "created_at": session.created_at,
             "last_message_at": session.last_message_at,
         },
-        "messages": [
-            {
-                "id": m.id,
-                "role": m.role,
-                "content": m.content,
-                "metadata": m.metadata,
-                "created_at": m.created_at,
-            }
-            for m in messages
-        ],
+        "messages": [_public_message(m) for m in messages],
     }
 
 
@@ -73,6 +64,27 @@ def _referenced_attachments(messages) -> set[str]:
     return ids
 
 
+def _public_message(m) -> dict:
+    return {
+        "id": m.id,
+        "role": m.role,
+        "content": m.content,
+        "metadata": m.metadata,
+        "created_at": m.created_at,
+    }
+
+
+@router.get("/{session_id}/messages/{summary_id}/compressed")
+async def get_shared_compressed(session_id: str, summary_id: str, db: IAgentDatabase = Depends(get_db)):
+    """Originals a summary replaced, for expanding it on the share page."""
+    await _shared_messages(session_id, db)
+    try:
+        rows = await compressed_messages(db, session_id, summary_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="summary not found")
+    return [_public_message(m) for m in rows]
+
+
 @router.get("/{session_id}/attachments/{attachment_id}")
 async def get_shared_attachment(
     session_id: str,
@@ -82,7 +94,11 @@ async def get_shared_attachment(
     # Only images that appear in the shared transcript: the attachment store is
     # global and content-addressed, so serving arbitrary ids would leak images
     # from unshared sessions to anyone who knows (or guesses) a hash.
-    _, messages = await _shared_messages(session_id, db)
+    await _shared_messages(session_id, db)
+    # Compressed originals can be expanded on the share page, so their
+    # images count as part of the shared transcript too.
+    messages = await db.get_messages(session_id, include_deleted=True)
+    messages = [m for m in messages if m.deleted_at is None or (m.metadata or {}).get("compressed_by")]
     if attachment_id not in _referenced_attachments(messages):
         raise HTTPException(status_code=404, detail="attachment not found")
     try:

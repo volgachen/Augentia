@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.core.compressed import plain_copy_fields
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import SEED_AGENT_ROWS
 from app.models.domain import (
@@ -465,10 +466,11 @@ class SqliteDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str) -> list[Message]:
+    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> list[Message]:
         await self.get_session(session_id)
+        live = "" if include_deleted else " AND deleted_at IS NULL"
         rows = self._rows(
-            "SELECT * FROM messages WHERE session_id = ? AND deleted_at IS NULL ORDER BY created_at, id",
+            f"SELECT * FROM messages WHERE session_id = ?{live} ORDER BY created_at, id",
             (session_id,),
         )
         return [_message(r) for r in rows]
@@ -491,12 +493,13 @@ class SqliteDatabase(IAgentDatabase):
         cloned: list[Message] = []
         with self._conn:
             for original in source:
+                role, content, metadata = plain_copy_fields(original)
                 message = Message(
                     session_id=target_session_id,
-                    role=original.role,
-                    content=original.content,
+                    role=role,
+                    content=content,
                     from_session_id=original.from_session_id,
-                    metadata=dict(original.metadata),
+                    metadata=metadata,
                     created_at=original.created_at,
                 )
                 self._execute(
@@ -534,6 +537,38 @@ class SqliteDatabase(IAgentDatabase):
         )
         self._execute("UPDATE sessions SET last_message_at = ? WHERE id = ?", (latest["value"], session_id))
         return target
+
+    async def soft_delete_messages(
+        self, session_id: str, message_ids: list[str], *, compressed_by: str | None = None,
+    ) -> int:
+        await self.get_session(session_id)
+        if not message_ids:
+            return 0
+        now = _iso(datetime.now(timezone.utc))
+        changed = 0
+        with self._conn:
+            for message_id in dict.fromkeys(message_ids):
+                row = self._conn.execute(
+                    "SELECT metadata FROM messages WHERE session_id = ? AND id = ? AND deleted_at IS NULL",
+                    (session_id, message_id),
+                ).fetchone()
+                if row is None:
+                    continue
+                metadata = _json(row["metadata"], {}) or {}
+                if compressed_by is not None:
+                    metadata["compressed_by"] = compressed_by
+                self._conn.execute(
+                    "UPDATE messages SET deleted_at = ?, metadata = ? WHERE session_id = ? AND id = ?",
+                    (now, _metadata_json(metadata), session_id, message_id),
+                )
+                changed += 1
+            latest = self._conn.execute(
+                "SELECT MAX(created_at) AS value FROM messages WHERE session_id = ? AND deleted_at IS NULL",
+                (session_id,),
+            ).fetchone()
+            self._conn.execute(
+                "UPDATE sessions SET last_message_at = ? WHERE id = ?", (latest["value"], session_id))
+        return changed
 
     async def list_plugin_instances(self) -> list[PluginInstance]:
         return [_plugin_instance(r) for r in self._rows("SELECT * FROM plugin_instances ORDER BY created_at")]

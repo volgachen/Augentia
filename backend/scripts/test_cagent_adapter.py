@@ -428,7 +428,10 @@ async def test_turn_compression(db, wd) -> bool:
         return await asyncio.wait_for(consume(), 15)
 
     try:
-        await run("read notes.txt")
+        events = await run("read notes.txt")
+        if not any(e.type == StreamEventType.STATUS and e.data == "history_compressed" for e in events):
+            fail(f"no history_compressed status after turn compression: {[e.type for e in events]}")
+            return False
         store = AugentiaStore(db, session.id)
         records = await store.list_messages(session.id)
         summaries = [r for r in records if r["role"] == "user" and r["name"] == "turn_summary"]
@@ -438,6 +441,14 @@ async def test_turn_compression(db, wd) -> bool:
         projected = Context(session.id, messages=records).model_messages()
         if [m["role"] for m in projected] != ["user"] or "hello" not in projected[0]["content"]:
             fail(f"reloaded history not compacted: {projected}")
+            return False
+        # The replaced rows are soft-deleted under the summary; the turn's user
+        # input stays (it precedes the turn start marker).
+        everything = await db.get_messages(session.id, include_deleted=True)
+        compressed = [m for m in everything if m.metadata.get("compressed_by") == summaries[0]["id"]]
+        replaced = set(summaries[0]["metadata"]["replaced_message_ids"])
+        if {m.id for m in compressed} != replaced or any(m.deleted_at is None for m in compressed):
+            fail(f"replaced rows not soft-deleted with compressed_by: {replaced} vs {compressed}")
             return False
         mark = json.loads((await db.get_messages(session.id))[-1].content)
         if not mark["metadata"].get("turn_compression_applied"):
@@ -655,10 +666,14 @@ async def test_daily_range_compression_keeps_earlier_summary(db, wd) -> bool:
         if [m.content for m in ranges] != ["diary 2"]:
             fail(f"range summary rows (stored without prefix): {[m.content for m in ranges]}")
             return False
-        day2_user = next(m for m in rows if m.role == MessageRole.USER
-                         and m.content == "day 2 browsing")
-        if day2_user.id not in ranges[0].metadata.get("replaced_message_ids", []):
+        day2_user = next((m for m in await db.get_messages(session.id, include_deleted=True)
+                          if m.role == MessageRole.USER and m.content == "day 2 browsing"), None)
+        if day2_user is None or day2_user.id not in ranges[0].metadata.get("replaced_message_ids", []):
             fail(f"range summary does not list day 2's turn: {ranges[0].metadata}")
+            return False
+        # The replaced turn is soft-deleted under the range summary.
+        if day2_user.deleted_at is None or day2_user.metadata.get("compressed_by") != ranges[0].id:
+            fail(f"day 2's turn not compressed under the range summary: {day2_user}")
             return False
         # The next turn sees day 1's summary, then day 2's, and not day 2's raw turn.
         turns.clear()
