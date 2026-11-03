@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
 
 from openai import AsyncOpenAI
@@ -59,6 +60,11 @@ def _truncate_result(result: str) -> str:
     if len(result) <= _TOOL_RESULT_MAX:
         return result
     return result[:_TOOL_RESULT_MAX] + "\n...[truncated]"
+
+
+# Key under which _make_model returns the response details; the adapter's
+# wrapper strips it before CAgent sees the output.
+RESPONSE_KEY = "augentia_response"
 
 
 def _relocating_tool_images(model):
@@ -122,7 +128,9 @@ def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None
             # (CAgent COMPRESSION_SEND_TOOLS); only meaningful alongside tools.
             if tool_choice is not None:
                 call_kwargs["tool_choice"] = tool_choice
+        started = time.monotonic()
         response = await client.chat.completions.create(**call_kwargs)
+        latency_ms = round((time.monotonic() - started) * 1000)
         # Some OpenAI-compatible gateways hand back a raw string body instead
         # of a ChatCompletion; fail loudly (same guard as the legacy adapter).
         if not hasattr(response, "choices"):
@@ -143,10 +151,19 @@ def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None
                 "arguments": arguments,
             })
         usage = getattr(response, "usage", None)
+        usage = usage.model_dump() if usage is not None else None
         return {
             "content": message.content or "",
             "tool_calls": calls,
-            "usage": usage.model_dump() if usage is not None else None,
+            "usage": usage,
+            # Kept on the saved reply as metadata.response (see AugentiaStore).
+            RESPONSE_KEY: {
+                "id": getattr(response, "id", None),
+                "model": getattr(response, "model", None),
+                "finish_reason": getattr(response.choices[0], "finish_reason", None),
+                "usage": usage,
+                "latency_ms": latency_ms,
+            },
         }
 
     return model
@@ -266,7 +283,8 @@ class CAgentAdapter(BaseAgentAdapter):
         if self._model_callable is None and (
                 compression_name or compression_params is not params):
             self._compression_model = self._wrap_model(
-                self._build_model(self._compression_model_name, compression_params))
+                self._build_model(self._compression_model_name, compression_params),
+                record_response=False)
         else:
             self._compression_model = self._model
         self._agent_cls = make_agent_class(
@@ -300,8 +318,31 @@ class CAgentAdapter(BaseAgentAdapter):
             return _make_model(self._client, model_name, params)
         return _make_model(self._client, model_name)
 
-    def _wrap_model(self, model):
-        return _relocating_tool_images(model) if self._tool_image_mode == "user_message" else model
+    def _wrap_model(self, model, *, record_response: bool = True):
+        if self._tool_image_mode == "user_message":
+            model = _relocating_tool_images(model)
+        return self._recording_response(model) if record_response else model
+
+    def _recording_response(self, model):
+        """Hand each agent-model response's details to the store.
+
+        The store attaches them to the reply CAgent saves next. A distinct
+        summarizer is not wrapped (its usage is already on the summary row);
+        when it shares this callable, its details are consumed by the summary
+        row saved next, so they never land on a reply.
+        """
+
+        async def recording(*, messages, tools, **kwargs):
+            output = await model(messages=messages, tools=tools, **kwargs)
+            if isinstance(output, dict):
+                response = output.pop(RESPONSE_KEY, None)
+                if response is None and output.get("usage") is not None:
+                    # Model callables without details (tests): keep the usage.
+                    response = {"usage": output["usage"]}
+                self._store.pending_response = response
+            return output
+
+        return recording
 
     async def send(self, message: str, images: list[dict] | None = None) -> None:
         self._pending = message

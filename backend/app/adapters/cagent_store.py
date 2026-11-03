@@ -125,6 +125,12 @@ class AugentiaStore:
         # Injected by the adapter before each turn: called once with the turn's
         # first saved user row so the live USER event can carry its real id.
         self.on_turn_user_saved = None
+        # Set by the adapter's model wrapper after each agent-model call: that
+        # response's details (usage, model, finish_reason, id, latency_ms).
+        # CAgent saves the reply right after the call, so the next saved row
+        # takes them as metadata.response; whatever is saved first consumes
+        # them, so a summarizer's response never lands on a later reply.
+        self.pending_response: dict | None = None
 
     # ------- sessions -------
 
@@ -177,10 +183,12 @@ class AugentiaStore:
         saved: list[dict] = []
         for message in messages:
             role = message["role"]
+            # Response details belong to the reply saved right after the call.
+            response, self.pending_response = self.pending_response, None
             if role == "user":
                 saved.append(await self._save_user(session_id, message))
             elif role == "assistant":
-                saved.append(await self._save_assistant(session_id, message))
+                saved.append(await self._save_assistant(session_id, message, response))
             elif role == "tool":
                 saved.append(await self._save_tool(session_id, message))
             elif role == "mark":
@@ -230,7 +238,8 @@ class AugentiaStore:
             await callback(row)
         return self._user_record(row)
 
-    async def _save_assistant(self, session_id: str, message: dict) -> dict:
+    async def _save_assistant(self, session_id: str, message: dict,
+                              response: dict | None = None) -> dict:
         payload: dict[str, Any] = {
             "role": "assistant",
             "content": message.get("content") or "",
@@ -239,7 +248,8 @@ class AugentiaStore:
         if message.get("tool_calls"):
             payload["tool_calls"] = _wire_tool_calls(message["tool_calls"])
         row = await self._db.add_message(
-            session_id, MessageRole.AGENT, json.dumps(payload, ensure_ascii=False)
+            session_id, MessageRole.AGENT, json.dumps(payload, ensure_ascii=False),
+            metadata={"response": response} if response else None,
         )
         return self._record(
             row, role="assistant", content=payload["content"],

@@ -822,6 +822,88 @@ async def test_compression_model(db, wd) -> bool:
     return True
 
 
+async def test_response_metadata(db, wd) -> bool:
+    section("CAgent engine: each reply keeps its response details in metadata.response")
+    from types import SimpleNamespace as NS
+    import app.adapters.cagent_adapter as cagent_adapter_module
+
+    calls = []
+
+    class FakeCompletions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            n = len(calls)
+            is_summary = "Summarize part of a conversation" in summary_instruction(kwargs["messages"])
+            if is_summary:
+                message = NS(content="SUMMARY", tool_calls=None)
+            elif any(m["role"] == "tool" for m in kwargs["messages"]):
+                message = NS(content="done reading", tool_calls=None)
+            else:
+                message = NS(content="let me read", tool_calls=[NS(
+                    id="read-meta", function=NS(name="read", arguments='{"path": "notes.txt"}'))])
+            usage = NS(model_dump=lambda n=n: {"prompt_tokens": 100 * n, "completion_tokens": n,
+                                               "total_tokens": 101 * n})
+            return NS(id=f"resp-{n}", model=f"served-model-{n}", usage=usage,
+                      choices=[NS(message=message,
+                                  finish_reason="tool_calls" if message.tool_calls else "stop")])
+
+    client = NS(chat=NS(completions=FakeCompletions()))
+    registry = AdapterRegistry()
+    original_make_model = cagent_adapter_module._make_model
+    cagent_adapter_module._make_model = lambda _client, name, params=None: original_make_model(client, name, params)
+    try:
+        agent = await db.create_agent(AgentTemplate(
+            name="cagent-test-response-meta", description="response metadata test agent",
+            agent_type=AgentType.TOOL_USE, system_prompt="You are a test agent.",
+            tool_names=TOOL_NAMES,
+            # Turn compression runs the summarizer (same callable) after the
+            # replies: its details must not land on a reply.
+            config={"engine": "cagent", "turn_compression_tool_call_threshold": 1},
+            openai_model="test-model",
+        ))
+        wd.mkdir(parents=True, exist_ok=True)
+        (wd / "notes.txt").write_text("hello " * 400, encoding="utf-8")
+        session = await db.create_session(agent.id, working_dir=str(wd), session_id="s-response-meta")
+        runner = await build_runner(session, agent, db, registry)
+    finally:
+        cagent_adapter_module._make_model = original_make_model
+
+    async def approve(event):
+        data = json.loads(event.data) if isinstance(event.data, str) else event.data
+        await runner.resolve_decision(data["call_id"], True)
+
+    try:
+        async def consume():
+            async with runner.subscribe() as events:
+                return await collect_until_done(events, on_confirm=approve)
+        await runner.submit("read notes.txt")
+        await asyncio.wait_for(consume(), 15)
+        rows = await db.get_messages(session.id, include_deleted=True)
+        replies = [m for m in rows if m.role == MessageRole.AGENT]
+        got = [m.metadata.get("response") for m in replies]
+        expected = [
+            {"id": "resp-1", "model": "served-model-1", "finish_reason": "tool_calls",
+             "usage": {"prompt_tokens": 100, "completion_tokens": 1, "total_tokens": 101}},
+            {"id": "resp-2", "model": "served-model-2", "finish_reason": "stop",
+             "usage": {"prompt_tokens": 200, "completion_tokens": 2, "total_tokens": 202}},
+        ]
+        if len(calls) != 3 or len(got) != 2 or any(g is None for g in got):
+            fail(f"calls={len(calls)} replies={got}")
+            return False
+        latencies = [g.pop("latency_ms", None) for g in got]
+        if got != expected or not all(isinstance(v, int) and v >= 0 for v in latencies):
+            fail(f"reply response metadata: {got} latencies={latencies}")
+            return False
+        summary = next(m for m in rows if m.metadata.get("cagent_name") == "turn_summary")
+        if "response" in summary.metadata or summary.metadata.get("usage", {}).get("prompt_tokens") != 300:
+            fail(f"summary metadata: {summary.metadata}")
+            return False
+        ok("reply rows keep id/model/finish_reason/usage/latency; summarizer details stay off replies")
+        return True
+    finally:
+        await registry.remove(session.id)
+
+
 async def test_model_error_path(db, wd) -> bool:
     section("CAgent adapter: model failure emits ERROR then DONE (no hang)")
     session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-error")
@@ -876,6 +958,7 @@ async def main() -> int:
             await test_daily_range_compression_keeps_earlier_summary(db, wd / "daily-range"),
             await test_compression_model(db, wd / "compression-model"),
             await test_compression_sends_tools_with_tool_choice_none(db, wd / "send-tools"),
+            await test_response_metadata(db, wd / "response-meta"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):
