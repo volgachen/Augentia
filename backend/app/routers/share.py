@@ -15,7 +15,7 @@ from app.core.attachments import ATTACHMENT_PREFIX, get_attachment
 from app.core.session_share import is_shared
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
-from app.routers.sessions import compressed_messages, transcript_messages
+from app.routers.sessions import compressed_messages, live_or_user_deleted, transcript_messages
 
 logger = logging.getLogger("augentia.share")
 router = APIRouter(prefix="/share", tags=["share"])
@@ -23,20 +23,28 @@ router = APIRouter(prefix="/share", tags=["share"])
 _NOT_SHARED = "shared session not found"
 
 
-async def _shared_messages(session_id: str, db: IAgentDatabase):
+async def _shared_messages(session_id: str, db: IAgentDatabase, *, include_deleted: bool = False):
     if not is_shared(session_id):
         raise HTTPException(status_code=404, detail=_NOT_SHARED)
     try:
         session = await db.get_session(session_id)
-        messages = await db.get_messages(session_id)
+        messages = await db.get_messages(session_id, include_deleted=include_deleted)
     except KeyError:
         raise HTTPException(status_code=404, detail=_NOT_SHARED)
+    if include_deleted:
+        messages = live_or_user_deleted(messages)
     return session, transcript_messages(messages, include_compression=True)
 
 
 @router.get("/{session_id}")
-async def get_shared_session(session_id: str, db: IAgentDatabase = Depends(get_db)):
-    session, messages = await _shared_messages(session_id, db)
+async def get_shared_session(
+    session_id: str,
+    include_deleted: bool = False,
+    db: IAgentDatabase = Depends(get_db),
+):
+    """include_deleted adds rows removed with the delete button (the toggle on
+    the share page); rows a rewrite discarded are never exposed here."""
+    session, messages = await _shared_messages(session_id, db, include_deleted=include_deleted)
     try:
         agent_name = (await db.get_agent(session.agent_id)).name
     except KeyError:
@@ -95,10 +103,16 @@ async def get_shared_attachment(
     # global and content-addressed, so serving arbitrary ids would leak images
     # from unshared sessions to anyone who knows (or guesses) a hash.
     await _shared_messages(session_id, db)
-    # Compressed originals can be expanded on the share page, so their
-    # images count as part of the shared transcript too.
+    # Compressed originals and button-deleted rows can both be shown on the
+    # share page, so their images count as part of the shared transcript too.
+    # Rows a rewrite discarded cannot, so theirs do not.
     messages = await db.get_messages(session_id, include_deleted=True)
-    messages = [m for m in messages if m.deleted_at is None or (m.metadata or {}).get("compressed_by")]
+    messages = [
+        m for m in messages
+        if m.deleted_at is None
+        or (m.metadata or {}).get("compressed_by")
+        or (m.metadata or {}).get("deleted_by") == "user"
+    ]
     if attachment_id not in _referenced_attachments(messages):
         raise HTTPException(status_code=404, detail="attachment not found")
     try:

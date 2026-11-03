@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api, sharedAttachmentUrl } from "../api/client";
 import type { SharedSession } from "../api/types";
@@ -15,21 +15,27 @@ export default function SharePage() {
   const [error, setError] = useState<{ scope: string; text: string } | null>(null);
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [showToolResults, setShowToolResults] = useState(true);
+  const [showDeleted, setShowDeleted] = useState(false);
+  // Toggling while a request is in flight: only the newest response counts.
+  const latestLoad = useRef(0);
 
   const load = useCallback(() => {
+    const seq = ++latestLoad.current;
     api.share
-      .get(sessionId)
+      .get(sessionId, showDeleted)
       .then((value) => {
+        if (seq !== latestLoad.current) return;
         setData({ scope: sessionId, value });
         setError(null);
       })
-      .catch((e: Error) =>
+      .catch((e: Error) => {
+        if (seq !== latestLoad.current) return;
         setError({
           scope: sessionId,
           text: e.message.startsWith("404") ? "这个分享链接不存在，或者分享已被关闭。" : `加载失败：${e.message}`,
-        }),
-      );
-  }, [sessionId]);
+        });
+      });
+  }, [sessionId, showDeleted]);
 
   useEffect(() => {
     load();
@@ -98,6 +104,14 @@ export default function SharePage() {
                   onChange={(e) => setShowToolResults(e.target.checked)}
                 />
                 工具结果
+              </label>
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={showDeleted}
+                  onChange={(e) => setShowDeleted(e.target.checked)}
+                />
+                显示已删除消息
               </label>
               <span className="rounded-full bg-gray-800 px-2 py-0.5 text-gray-500">只读</span>
             </div>

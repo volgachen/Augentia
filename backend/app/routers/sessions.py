@@ -463,9 +463,14 @@ async def get_messages(
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     if include_deleted:
-        messages = [m for m in messages
-                    if m.deleted_at is None or (m.metadata or {}).get(DELETED_BY) == "user"]
+        messages = live_or_user_deleted(messages)
     return transcript_messages(messages, include_compression=include_compression)
+
+
+def live_or_user_deleted(messages: list) -> list:
+    """Drop soft-deleted rows, except those removed with the delete button."""
+    return [m for m in messages
+            if m.deleted_at is None or (m.metadata or {}).get(DELETED_BY) == "user"]
 
 
 def transcript_messages(messages: list, *, include_compression: bool) -> list:

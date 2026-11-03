@@ -112,7 +112,9 @@ const HISTORY_COMPRESSED = "history_compressed";
 
 export function messageToEvent(m: Message): StreamEvent {
   const event = rowToEvent(m);
-  return m.deleted_at ? { ...event, deleted: true } : event;
+  // Only the delete button counts: compressed originals also have deleted_at,
+  // but they are ordinary content shown when their summary is expanded.
+  return m.metadata?.deleted_by === "user" ? { ...event, deleted: true } : event;
 }
 
 function rowToEvent(m: Message): StreamEvent {

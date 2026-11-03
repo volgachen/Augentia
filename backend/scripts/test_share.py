@@ -45,7 +45,24 @@ with TestClient(app) as c:
     assert c.post(f"/api/v1/share/{s.id}").status_code == 405
     assert c.post(f"/api/v1/share/{s.id}/../sessions/{s.id}/messages", json={"content": "x"}).status_code in (401, 404)
 
+    # include_deleted: button-deleted rows and their images, never rewritten ones.
+    kept = save_attachment(PNG[:-2] + b"\x00\x00")
+    gone = save_attachment(PNG[:-2] + b"\x01\x01")
+    by_button = asyncio.run(db.add_message(s.id, MessageRole.USER, "by button", metadata={"images": [{"ref": kept.ref}]}))
+    by_rewrite = asyncio.run(db.add_message(s.id, MessageRole.USER, "by rewrite", metadata={"images": [{"ref": gone.ref}]}))
+    assert c.get(f"/api/v1/share/{s.id}/attachments/{kept.id}").status_code == 200
+    asyncio.run(db.soft_delete_messages(s.id, [by_button.id], metadata={"deleted_by": "user"}))
+    asyncio.run(db.soft_delete_messages_from(s.id, by_rewrite.id))
+    plain = [m["content"] for m in c.get(f"/api/v1/share/{s.id}").json()["messages"]]
+    assert plain == ["hi", "hello"], plain
+    full = c.get(f"/api/v1/share/{s.id}?include_deleted=true").json()["messages"]
+    assert [m["content"] for m in full] == ["hi", "hello", "by button"], full
+    assert full[-1]["metadata"]["deleted_by"] == "user"
+    assert c.get(f"/api/v1/share/{s.id}/attachments/{kept.id}").status_code == 200
+    assert c.get(f"/api/v1/share/{s.id}/attachments/{gone.id}").status_code == 404
+
     c.put(f"/api/v1/sessions/{s.id}/share", json={"enabled": False}, headers=AUTH)
+    assert c.get(f"/api/v1/share/{s.id}?include_deleted=true").status_code == 404
     assert c.get(f"/api/v1/share/{s.id}").status_code == 404
     assert c.get(f"/api/v1/share/{s.id}/attachments/{att.id}").status_code == 404
 

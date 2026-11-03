@@ -255,7 +255,11 @@ export const api = {
       request<void>(`/sessions/${id}`, { method: "DELETE" }),
   },
   share: {
-    get: (id: string) => request<SharedSession>(`/share/${encodeURIComponent(id)}`),
+    // includeDeleted adds rows removed with the delete button.
+    get: (id: string, includeDeleted = false) =>
+      request<SharedSession>(
+        `/share/${encodeURIComponent(id)}${includeDeleted ? "?include_deleted=true" : ""}`,
+      ),
     compressedMessages: (id: string, summaryId: string) =>
       request<Message[]>(
         `/share/${encodeURIComponent(id)}/messages/${encodeURIComponent(summaryId)}/compressed`,
