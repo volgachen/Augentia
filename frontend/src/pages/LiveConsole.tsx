@@ -339,6 +339,28 @@ export default function LiveConsole() {
             {session.status}
           </span>
         </div>
+        <div className="flex items-center gap-3">
+        <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showToolCalls}
+            onChange={(e) => handleShowToolCallsChange(e.target.checked)}
+          />
+          显示工具调用
+        </label>
+        <label
+          className={`flex items-center gap-1.5 text-xs text-gray-400 select-none ${
+            showToolCalls ? "cursor-pointer" : "cursor-not-allowed opacity-50"
+          }`}
+        >
+          <input
+            type="checkbox"
+            checked={showToolResults}
+            disabled={!showToolCalls}
+            onChange={(e) => setShowToolResults(e.target.checked)}
+          />
+          显示工具结果
+        </label>
         <label
           className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none"
           title="显示被你删除的消息（不含被压缩掉的消息，那些在摘要里展开）"
@@ -350,6 +372,7 @@ export default function LiveConsole() {
           />
           显示已删除消息
         </label>
+        </div>
         {session.status === "RUNNING" && (
           <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
             <input
@@ -522,13 +545,7 @@ export default function LiveConsole() {
               />
             )}
             {sidebarTab === "permissions" && (
-              <ToolPermissionsPanel
-                session={session}
-                showToolCalls={showToolCalls}
-                showToolResults={showToolResults}
-                onShowToolCallsChange={handleShowToolCallsChange}
-                onShowToolResultsChange={setShowToolResults}
-              />
+              <ToolPermissionsPanel session={session} />
             )}
             {sidebarTab === "systemPrompt" && <SystemPromptPanel key={session.id} session={session} />}
           </div>
