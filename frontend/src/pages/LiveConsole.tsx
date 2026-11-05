@@ -104,6 +104,21 @@ export default function LiveConsole() {
     itemRefs.current = itemRefs.current.slice(0, entry?.events.length ?? 0);
   }, [entry?.events.length]);
 
+  // End jumps to the newest message from anywhere on the page. Text fields
+  // keep End (end of line), and modified combos (Shift+End selects) pass through.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "End" || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      e.preventDefault();
+      setFocusedItemIndex(null);
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   // Image input: only offered when the session's agent accepts images
   // (cagent engine + config.vision); the backend enforces the same rule.
   // Draft images and the hint are scoped to the session they were added in.
@@ -403,7 +418,7 @@ export default function LiveConsole() {
         >
           {consoleItems.length > 1 && (
             <div className="sticky top-0 z-10 self-end rounded bg-gray-950/80 px-2 py-1 text-[11px] text-gray-500 backdrop-blur">
-              聚焦日志后，按 ↑ / ↓ 跳到上一条 / 下一条
+              聚焦日志后，按 ↑ / ↓ 跳到上一条 / 下一条；按 End 跳到最下面
             </div>
           )}
           {consoleItems.length === 0 && (
