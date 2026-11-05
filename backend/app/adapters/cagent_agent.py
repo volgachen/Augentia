@@ -17,6 +17,25 @@ from cagent import BaseAgent, Tool
 from app.adapters.tools.base import BaseTool, ToolOutput
 
 
+def _call_context(ctx) -> dict | None:
+    """The session, issuing assistant message and tool call of the running call.
+
+    CAgent sets ctx.current_tool_call before each handler; the assistant
+    message carrying that call is already stored, so its id is the row id.
+    Older CAgent versions have no current_tool_call: the context is None.
+    """
+    call = getattr(ctx, "current_tool_call", None) if ctx is not None else None
+    if not call:
+        return None
+    message_id = None
+    for message in reversed(ctx.messages):
+        if message.get("role") == "assistant" and any(
+                item.get("id") == call["id"] for item in message.get("tool_calls") or []):
+            message_id = message.get("id")
+            break
+    return {"session_id": ctx.session_id, "message_id": message_id, "tool_call_id": call["id"]}
+
+
 def _wrap_tool(base_tool: BaseTool, adapter) -> Tool:
     """Adapt a registered BaseTool to CAgent's Tool (handler receives store/ctx/agent_cls).
 
@@ -27,6 +46,7 @@ def _wrap_tool(base_tool: BaseTool, adapter) -> Tool:
 
     async def handler(*, store=None, ctx=None, agent_cls=None, **kwargs):
         # The framework's injected dependencies are not tool parameters.
+        base_tool.call_context = _call_context(ctx)
         result = await base_tool.execute(**kwargs)
         if isinstance(result, ToolOutput):
             return await adapter.tool_output_result(result)

@@ -931,6 +931,50 @@ async def test_model_error_path(db, wd) -> bool:
     return True
 
 
+async def test_tool_call_context(db, wd) -> bool:
+    section("CAgent engine: a tool sees the stored assistant message that issued its call")
+    from app.adapters.tools.read import ReadTool
+
+    seen = []
+    original_execute = ReadTool.execute
+
+    async def spy(self, **kwargs):
+        seen.append(self.call_context)
+        return await original_execute(self, **kwargs)
+
+    session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-call-context")
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "notes.txt").write_text("hello", encoding="utf-8")
+    adapter = CAgentAdapter(
+        db=db, tool_names=["read"], session_id=session.id, working_dir=str(wd),
+        config={"tool_approvals": {"read": False}},
+        model_callable=scripted(
+            {"tool_calls": [{"id": "ctx-read", "name": "read", "arguments": {"path": "notes.txt"}}]},
+            {"content": "read it"}),
+    )
+    ReadTool.execute = spy
+    try:
+        await adapter.start("You are a test agent.")
+        await adapter.send("read notes.txt")
+        async for _ in adapter.stream():
+            pass
+    finally:
+        ReadTool.execute = original_execute
+        await adapter.stop()
+    if len(seen) != 1 or not seen[0]:
+        fail(f"read saw no call context: {seen}")
+        return False
+    rows = await db.get_messages(session.id, include_deleted=True)
+    issuers = [m.id for m in rows if m.role == MessageRole.AGENT and "ctx-read" in (m.content or "")]
+    expected = {"session_id": session.id, "message_id": issuers[0] if issuers else None,
+                "tool_call_id": "ctx-read"}
+    if len(issuers) != 1 or seen[0] != expected:
+        fail(f"call context {seen[0]} != {expected}")
+        return False
+    ok("tool call context: session, issuing message id and tool call id")
+    return True
+
+
 async def main() -> int:
     db = MockMemoryDatabase()
     # The mock database validates that a session's agent exists.
@@ -959,6 +1003,7 @@ async def main() -> int:
             await test_compression_model(db, wd / "compression-model"),
             await test_compression_sends_tools_with_tool_choice_none(db, wd / "send-tools"),
             await test_response_metadata(db, wd / "response-meta"),
+            await test_tool_call_context(db, wd / "call-context"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):

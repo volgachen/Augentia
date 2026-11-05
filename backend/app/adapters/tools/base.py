@@ -104,6 +104,11 @@ class BaseTool(ABC):
     # the backend process's cwd. None means "no working dir configured" — fall
     # back to current behavior.
     working_dir: str | None = None
+    # Where the current call came from, set by the CAgent bridge right before
+    # execute(): {"session_id", "message_id", "tool_call_id"}. message_id is the
+    # stored assistant message that issued the call. None outside CAgent turns
+    # and with a CAgent that does not expose ctx.current_tool_call.
+    call_context: dict | None = None
 
     def resolve_path(self, path: str) -> str:
         """Resolve a path against the session's working_dir.
