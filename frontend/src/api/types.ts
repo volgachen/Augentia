@@ -119,6 +119,16 @@ export interface SharedSession {
   messages: Message[];
 }
 
+// Where a linked message sits on the share page (GET /share/{id}/locate/{mid}).
+export interface SharedMessageLocation {
+  message_id: string;
+  role: Message["role"];
+  // Summary ids to expand, outermost first, before the message is visible.
+  expand: string[];
+  // Removed with the delete button: visible only with "show deleted" on.
+  deleted: boolean;
+}
+
 export interface CompressOptions {
   // Compress only the turns from this time on (ISO 8601), or from `hours`
   // ago; earlier history stays. Omit both for whole-history compression.

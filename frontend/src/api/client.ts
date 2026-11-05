@@ -11,6 +11,7 @@ import type {
   PluginLogLine,
   PluginRun,
   ShareState,
+  SharedMessageLocation,
   SharedSession,
   Task,
 } from "./types";
@@ -263,6 +264,10 @@ export const api = {
     compressedMessages: (id: string, summaryId: string) =>
       request<Message[]>(
         `/share/${encodeURIComponent(id)}/messages/${encodeURIComponent(summaryId)}/compressed`,
+      ),
+    locate: (id: string, messageId: string) =>
+      request<SharedMessageLocation>(
+        `/share/${encodeURIComponent(id)}/locate/${encodeURIComponent(messageId)}`,
       ),
   },
   fs: {

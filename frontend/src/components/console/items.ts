@@ -30,6 +30,8 @@ export interface ToolCallView {
   // The owning row was deleted by the user (shown only on request).
   deleted?: boolean;
   result?: unknown;
+  // Row of the paired tool result (it renders inside this item).
+  resultMessageId?: string;
   // Images the tool returned (e.g. read on an image file).
   resultImages?: ImageRef[];
 }
@@ -116,9 +118,11 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
     name: string | undefined,
     result: unknown,
     images: ImageRef[] | undefined,
+    messageId: string | undefined,
   ): boolean => {
     const set = (item: ToolCallView) => {
       item.result = result;
+      if (messageId) item.resultMessageId = messageId;
       if (images?.length) item.resultImages = images;
     };
     if (callId && toolCallsById.has(callId)) {
@@ -202,6 +206,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
         typeof obj?.name === "string" ? obj.name : undefined,
         obj?.result ?? obj?.content ?? event.data,
         event.images ?? undefined,
+        event.message_id,
       );
       if (!attached) {
         items.push(event);
@@ -246,6 +251,15 @@ export function isToolCallView(item: ConsoleItem): item is ToolCallView {
 
 export function isCompressionGroup(item: ConsoleItem): item is CompressionGroup {
   return "kind" in item && item.kind === "compression_group";
+}
+
+/** Every stored row an item renders (a tool call also shows its result row). */
+export function itemMessageIds(item: ConsoleItem): string[] {
+  if (isToolCallView(item)) {
+    return [item.messageId, item.resultMessageId].filter((id): id is string => !!id);
+  }
+  const id = itemMessageId(item);
+  return id ? [id] : [];
 }
 
 export function itemMessageId(item: ConsoleItem): string | undefined {

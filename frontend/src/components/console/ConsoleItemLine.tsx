@@ -1,15 +1,17 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ImageRef, StreamEvent } from "../../api/types";
 import ToolPreview from "../ToolPreview";
 import { ImageThumbs } from "../ImageAttachments";
 import { getToolSummary } from "../../config/toolDisplay";
 import { useCompressedLoader } from "./compressedLoader";
+import { useMessageFocus } from "./messageFocus";
 import {
   buildConsoleItems,
   interleaveResult,
   isCompressionGroup,
   isToolCallView,
   itemMessageId,
+  itemMessageIds,
   resultToText,
   toOneLine,
 } from "./items";
@@ -339,12 +341,16 @@ function CompressionBlock({
   depth: number;
   renderItem: (item: ConsoleItem, key: string | number) => React.ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const [load, setLoad] = useState<LoadState>({ status: "idle" });
   const loadCompressed = useCompressedLoader();
+  const focus = useMessageFocus();
+  const summaryId = group.event.message_id;
+  // A linked message compressed under this summary: start open.
+  const [expanded, setExpanded] = useState(
+    () => !!summaryId && !!loadCompressed && focus.expand.has(summaryId),
+  );
+  const [load, setLoad] = useState<LoadState>({ status: "idle" });
   const rootRef = useRef<HTMLDivElement>(null);
   const collapsedFromStickyRef = useRef(false);
-  const summaryId = group.event.message_id;
   const compressionKind = group.event.compression?.kind;
   const summary = String(group.event.data ?? "");
   const label =
@@ -363,11 +369,8 @@ function CompressionBlock({
 
   // The originals are soft-deleted under this summary; fetch them the first
   // time it is expanded (or again after a failure).
-  const toggle = () => {
+  const fetchOriginals = () => {
     if (!canExpand) return;
-    const next = !expanded;
-    setExpanded(next);
-    if (!next || load.status === "loading" || load.status === "loaded") return;
     setLoad({ status: "loading" });
     loadCompressed(summaryId)
       .then((events) => setLoad({ status: "loaded", items: buildConsoleItems(events), count: events.length }))
@@ -375,6 +378,21 @@ function CompressionBlock({
         setLoad({ status: "error", text: e instanceof Error ? e.message : String(e) }),
       );
   };
+  const toggle = () => {
+    if (!canExpand) return;
+    const next = !expanded;
+    setExpanded(next);
+    if (!next || load.status === "loading" || load.status === "loaded") return;
+    fetchOriginals();
+  };
+  // Opened on mount for a linked message: load right away.
+  const openedForLink = useRef(expanded);
+  useEffect(() => {
+    if (!openedForLink.current) return;
+    openedForLink.current = false;
+    fetchOriginals();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div ref={rootRef} className="my-2 text-left">
@@ -492,14 +510,52 @@ function DeletedWrap({ children }: { children: React.ReactNode }) {
 export default function ConsoleItemLine(props: ConsoleItemLineProps) {
   const { item } = props;
   const deleted = isCompressionGroup(item) ? !!item.event.deleted : !!item.deleted;
-  if (deleted) {
-    return (
-      <DeletedWrap>
-        <ConsoleItemLineInner {...props} readOnly />
-      </DeletedWrap>
-    );
-  }
-  return <ConsoleItemLineInner {...props} />;
+  const line = deleted ? (
+    <DeletedWrap>
+      <ConsoleItemLineInner {...props} readOnly />
+    </DeletedWrap>
+  ) : (
+    <ConsoleItemLineInner {...props} />
+  );
+  return <FocusWrap item={item}>{line}</FocusWrap>;
+}
+
+// Linked message (share page ?m=): highlight it and scroll to it once. On
+// pages with linkTo, a hover button copies a link to the item.
+function FocusWrap({ item, children }: { item: ConsoleItem; children: React.ReactNode }) {
+  const focus = useMessageFocus();
+  const ref = useRef<HTMLDivElement>(null);
+  const ids = itemMessageIds(item);
+  const targeted = !!focus.targetId && ids.includes(focus.targetId);
+  useEffect(() => {
+    if (targeted && focus.claimScroll()) {
+      ref.current?.scrollIntoView({ block: "center" });
+    }
+  }, [targeted, focus]);
+  if (!targeted && !focus.linkTo) return <>{children}</>;
+  // A tool call links to its own row (the result has its own id but shares the line).
+  const linkId = ids[0];
+  return (
+    <div
+      ref={ref}
+      className={`group/focus relative ${
+        targeted ? "rounded ring-2 ring-amber-400/70 bg-amber-400/5 -mx-1 px-1" : ""
+      }`}
+    >
+      {focus.linkTo && linkId && (
+        <button
+          type="button"
+          onClick={() => focus.linkTo?.(linkId)}
+          className="absolute -left-4 top-0.5 hidden px-0.5 text-xs text-gray-600 hover:text-amber-300 group-hover/focus:block"
+          title="复制指向这条消息的链接"
+          aria-label="Link to this message"
+        >
+          #
+        </button>
+      )}
+      {children}
+    </div>
+  );
 }
 
 function ConsoleItemLineInner(props: ConsoleItemLineProps) {

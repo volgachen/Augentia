@@ -12,9 +12,11 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.core.attachments import ATTACHMENT_PREFIX, get_attachment
+from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark
 from app.core.session_share import is_shared
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
+from app.models.domain import MessageRole
 from app.routers.sessions import compressed_messages, live_or_user_deleted, transcript_messages
 
 logger = logging.getLogger("augentia.share")
@@ -91,6 +93,40 @@ async def get_shared_compressed(session_id: str, summary_id: str, db: IAgentData
     except KeyError:
         raise HTTPException(status_code=404, detail="summary not found")
     return [_public_message(m) for m in rows]
+
+
+@router.get("/{session_id}/locate/{message_id}")
+async def locate_shared_message(session_id: str, message_id: str, db: IAgentDatabase = Depends(get_db)):
+    """Where `message_id` sits on the share page, for links to one message.
+
+    expand: summary ids to expand, outermost first, so the row becomes
+    visible (a compressed original lives under its summary, which may itself
+    be compressed). role lets the page reveal tool rows it may be hiding.
+    deleted: the row, or the summary it ends up under, was
+    removed with the delete button, so it only shows with include_deleted.
+    Rows the page never shows (framework marks, rows a rewrite discarded)
+    yield the same 404 as a missing id.
+    """
+    await _shared_messages(session_id, db)
+    rows = {m.id: m for m in await db.get_messages(session_id, include_deleted=True)}
+    not_found = HTTPException(status_code=404, detail="message not found")
+    current = rows.get(message_id)
+    if current is None or (current.role == MessageRole.MARK and not is_completed_mark(current)):
+        raise not_found
+    role = current.role
+    expand: list[str] = []
+    deleted = False
+    while current.deleted_at is not None:
+        metadata = current.metadata or {}
+        if metadata.get(DELETED_BY) == "user":
+            deleted = True
+            break
+        summary_id = metadata.get(COMPRESSED_BY)
+        if not summary_id or summary_id not in rows or summary_id in expand:
+            raise not_found
+        expand.append(summary_id)
+        current = rows[summary_id]
+    return {"message_id": message_id, "role": role, "expand": expand[::-1], "deleted": deleted}
 
 
 @router.get("/{session_id}/attachments/{attachment_id}")

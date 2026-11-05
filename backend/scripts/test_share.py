@@ -61,10 +61,32 @@ with TestClient(app) as c:
     assert c.get(f"/api/v1/share/{s.id}/attachments/{kept.id}").status_code == 200
     assert c.get(f"/api/v1/share/{s.id}/attachments/{gone.id}").status_code == 404
 
+    # locate: summaries to expand (outermost first) for a linked message.
+    loc = lambda mid: c.get(f"/api/v1/share/{s.id}/locate/{mid}")
+    hi_id = next(m["id"] for m in c.get(f"/api/v1/share/{s.id}").json()["messages"] if m["content"] == "hi")
+    assert loc(hi_id).json() == {"message_id": hi_id, "role": "user", "expand": [], "deleted": False}
+    orig = asyncio.run(db.add_message(s.id, MessageRole.TOOL, "raw tool output"))
+    inner = asyncio.run(db.add_message(s.id, MessageRole.USER, "turn summary",
+                                       metadata={"cagent_name": "turn_summary", "replaced_message_ids": [orig.id]}))
+    asyncio.run(db.soft_delete_messages(s.id, [orig.id], metadata={"compressed_by": inner.id}))
+    outer = asyncio.run(db.add_message(s.id, MessageRole.MARK,
+                                       '{"name":"compression_completed","content":"all","metadata":{}}'))
+    asyncio.run(db.soft_delete_messages(s.id, [inner.id], metadata={"compressed_by": outer.id}))
+    r = loc(orig.id); assert r.status_code == 200, r.text
+    assert r.json() == {"message_id": orig.id, "role": "tool", "expand": [outer.id, inner.id], "deleted": False}, r.json()
+    assert loc(inner.id).json()["expand"] == [outer.id]
+    assert loc(outer.id).json()["expand"] == []
+    assert loc(by_button.id).json()["deleted"] is True
+    turn_end = next(m for m in asyncio.run(db.get_messages(s.id)) if m.role == MessageRole.MARK and "turn_end" in m.content)
+    assert loc(turn_end.id).status_code == 404       # framework marks are never shown
+    assert loc(by_rewrite.id).status_code == 404     # rewrite-discarded rows are never shown
+    assert loc("nope").status_code == 404
+
     c.put(f"/api/v1/sessions/{s.id}/share", json={"enabled": False}, headers=AUTH)
     assert c.get(f"/api/v1/share/{s.id}?include_deleted=true").status_code == 404
     assert c.get(f"/api/v1/share/{s.id}").status_code == 404
     assert c.get(f"/api/v1/share/{s.id}/attachments/{att.id}").status_code == 404
+    assert loc(hi_id).status_code == 404
 
     asyncio.run(db.soft_delete_session(s.id))
     from app.core.session_share import write_share; write_share(s.id, True)
