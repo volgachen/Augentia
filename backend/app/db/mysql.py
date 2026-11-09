@@ -22,6 +22,7 @@ from app.models.domain import (
     PluginStatus,
     Session,
     SessionStatus,
+    SystemPrompt,
     Task,
     TaskStatus,
 )
@@ -29,12 +30,19 @@ from app.plugins.events import PluginEvent, get_plugin_event_bus
 
 _SCHEMA_SQL = [
     """\
+CREATE TABLE IF NOT EXISTS system_prompts (
+    id          VARCHAR(36)  PRIMARY KEY,
+    content     LONGTEXT     NOT NULL,
+    previous_id VARCHAR(36)  DEFAULT NULL,
+    created_at  DATETIME(3)  NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
+    """\
 CREATE TABLE IF NOT EXISTS agents (
     id             VARCHAR(36)   PRIMARY KEY,
     name           VARCHAR(200)  NOT NULL,
     description    TEXT          NOT NULL,
     agent_type     VARCHAR(50)   NOT NULL,
-    system_prompt  TEXT          NOT NULL,
+    system_prompt_id VARCHAR(36) DEFAULT NULL,
     tool_names     JSON          NOT NULL,
     config         JSON          DEFAULT NULL,
     openai_model   VARCHAR(100)  NOT NULL DEFAULT 'gpt-4o',
@@ -50,7 +58,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     parent_session_id VARCHAR(36)   DEFAULT NULL,
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
-    system_prompt_snapshot LONGTEXT DEFAULT NULL,
+    system_prompt_id  VARCHAR(36)   DEFAULT NULL,
     status            VARCHAR(30)   NOT NULL DEFAULT 'INITIALIZING',
     created_at        DATETIME(3)   NOT NULL,
     updated_at        DATETIME(3)   NOT NULL,
@@ -183,14 +191,6 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "sessions",
-        "system_prompt_snapshot",
-        [
-            "ALTER TABLE sessions ADD COLUMN system_prompt_snapshot LONGTEXT DEFAULT NULL "
-            "AFTER additional_prompt_path"
-        ],
-    ),
-    (
-        "sessions",
         "deleted_at",
         ["ALTER TABLE sessions ADD COLUMN deleted_at DATETIME(3) DEFAULT NULL AFTER last_message_at"],
     ),
@@ -227,13 +227,30 @@ def _row_to_agent(row: dict[str, Any]) -> AgentTemplate:
         name=row["name"],
         description=row["description"],
         agent_type=AgentType(row["agent_type"]),
-        system_prompt=row["system_prompt"],
+        system_prompt=row.get("prompt_text") or "",
+        system_prompt_id=row.get("system_prompt_id"),
         tool_names=tool_names,
         config=config or {},
         openai_model=row["openai_model"],
         openai_base_url=row["openai_base_url"],
         created_at=row["created_at"],
     )
+
+
+# agents/sessions store system_prompt_id; reads join the version's text in.
+_AGENT_SELECT = (
+    "SELECT a.*, p.content AS prompt_text FROM agents a "
+    "LEFT JOIN system_prompts p ON p.id = a.system_prompt_id"
+)
+_SESSION_SELECT = (
+    "SELECT s.*, p.content AS prompt_text FROM sessions s "
+    "LEFT JOIN system_prompts p ON p.id = s.system_prompt_id"
+)
+
+
+def _row_to_system_prompt(row: dict[str, Any]) -> SystemPrompt:
+    return SystemPrompt(id=row["id"], content=row["content"],
+                        previous_id=row.get("previous_id"), created_at=row["created_at"])
 
 
 def _row_to_session(row: dict[str, Any]) -> Session:
@@ -248,7 +265,8 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         # (see CLAUDE.md / migration notes).
         additional_prompt=row.get("additional_prompt"),
         additional_prompt_path=row.get("additional_prompt_path"),
-        system_prompt_snapshot=row.get("system_prompt_snapshot"),
+        system_prompt_snapshot=row.get("prompt_text"),
+        system_prompt_id=row.get("system_prompt_id"),
         status=SessionStatus(row["status"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -375,6 +393,7 @@ class MySqlDatabase(IAgentDatabase):
         await self._init_schema()
         await self._migrate_columns()
         await self._migrate_column_types()
+        await self._migrate_system_prompts()
         await self._seed_agents()
 
     async def close(self) -> None:
@@ -429,6 +448,103 @@ class MySqlDatabase(IAgentDatabase):
                         "ALTER TABLE messages MODIFY COLUMN from_session_id VARCHAR(100) DEFAULT NULL"
                     )
 
+    async def _table_columns(self, cur, table: str) -> set[str]:
+        await cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s",
+            (self._settings.mysql_database, table),
+        )
+        return {row[0].lower() for row in await cur.fetchall()}
+
+    async def _migrate_system_prompts(self) -> None:
+        """Move inline prompt text into system_prompts (one first version per
+        agent / session), then drop the old text columns.
+
+        For databases created before system_prompts: agents.system_prompt and
+        sessions.system_prompt_snapshot become system_prompt_id. Rows move in
+        one transaction; the DROP COLUMNs (implicit commits in MySQL) run after
+        it, so a crash in between leaves the old column and the next start
+        finishes without duplicating versions (only rows still lacking
+        system_prompt_id are moved).
+        """
+        moves = (("agents", "system_prompt"), ("sessions", "system_prompt_snapshot"))
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                pending = []
+                for table, old_column in moves:
+                    columns = await self._table_columns(cur, table)
+                    if "system_prompt_id" not in columns:
+                        await cur.execute(
+                            f"ALTER TABLE {table} ADD COLUMN system_prompt_id VARCHAR(36) DEFAULT NULL")
+                    if old_column in columns:
+                        pending.append((table, old_column))
+                if not pending:
+                    return
+                await conn.begin()
+                try:
+                    for table, old_column in pending:
+                        await cur.execute(
+                            f"SELECT id, {old_column}, created_at FROM {table} "
+                            f"WHERE {old_column} IS NOT NULL AND system_prompt_id IS NULL"
+                        )
+                        for row_id, text, created_at in await cur.fetchall():
+                            prompt_id = await self._insert_prompt(cur, text, None, created_at)
+                            await cur.execute(
+                                f"UPDATE {table} SET system_prompt_id = %s WHERE id = %s",
+                                (prompt_id, row_id))
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+                for table, old_column in pending:
+                    await cur.execute(f"ALTER TABLE {table} DROP COLUMN {old_column}")
+
+    @staticmethod
+    async def _insert_prompt(cur, content: str, previous_id: str | None, created_at=None) -> str:
+        """Store one version on the caller's cursor (and transaction)."""
+        prompt_id = str(uuid.uuid4())
+        await cur.execute(
+            "INSERT INTO system_prompts (id, content, previous_id, created_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (prompt_id, content, previous_id, created_at or datetime.now(timezone.utc)),
+        )
+        return prompt_id
+
+    async def _new_version(self, table: str, row_id: str, content: str) -> None:
+        """Point an agents/sessions row at a new version of its prompt chained
+        to the current one; nothing changes when the text is the same."""
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT t.system_prompt_id, p.content FROM {table} t "
+                    f"LEFT JOIN system_prompts p ON p.id = t.system_prompt_id WHERE t.id = %s",
+                    (row_id,),
+                )
+                current = await cur.fetchone()
+                if current is None:
+                    raise KeyError(row_id)
+                current_id, current_text = current
+                if current_id and current_text == content:
+                    return
+                await conn.begin()
+                try:
+                    prompt_id = await self._insert_prompt(cur, content, current_id)
+                    await cur.execute(f"UPDATE {table} SET system_prompt_id = %s WHERE id = %s",
+                                      (prompt_id, row_id))
+                    await conn.commit()
+                except Exception:
+                    await conn.rollback()
+                    raise
+
+    async def get_system_prompt(self, prompt_id: str) -> SystemPrompt:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute("SELECT * FROM system_prompts WHERE id = %s", (prompt_id,))
+                row = await cur.fetchone()
+        if row is None:
+            raise KeyError(f"System prompt '{prompt_id}' not found")
+        return _row_to_system_prompt(row)
+
     async def _seed_agents(self) -> None:
         now = datetime.now(timezone.utc)
         async with self._pool.acquire() as conn:
@@ -436,9 +552,13 @@ class MySqlDatabase(IAgentDatabase):
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     for agent in SEED_AGENT_ROWS:
+                        await cur.execute("SELECT 1 FROM agents WHERE id = %s", (agent["id"],))
+                        if await cur.fetchone():
+                            continue
+                        prompt_id = await self._insert_prompt(cur, agent["system_prompt"], None, now)
                         await cur.execute(
                         """INSERT IGNORE INTO agents
-                           (id, name, description, agent_type, system_prompt,
+                           (id, name, description, agent_type, system_prompt_id,
                             tool_names, config, openai_model, openai_base_url, created_at)
                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (
@@ -446,7 +566,7 @@ class MySqlDatabase(IAgentDatabase):
                             agent["name"],
                             agent["description"],
                             agent["agent_type"],
-                            agent["system_prompt"],
+                            prompt_id,
                             json.dumps(agent["tool_names"]),
                             json.dumps(agent.get("config", {})),
                             agent["openai_model"],
@@ -460,16 +580,14 @@ class MySqlDatabase(IAgentDatabase):
     async def list_agents(self) -> list[AgentTemplate]:
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
-                await cur.execute("SELECT * FROM agents ORDER BY created_at")
+                await cur.execute(f"{_AGENT_SELECT} ORDER BY a.created_at")
                 rows = await cur.fetchall()
         return [_row_to_agent(r) for r in rows]
 
     async def get_agent(self, agent_id: str) -> AgentTemplate:
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
-                await cur.execute(
-                    "SELECT * FROM agents WHERE id = %s", (agent_id,)
-                )
+                await cur.execute(f"{_AGENT_SELECT} WHERE a.id = %s", (agent_id,))
                 row = await cur.fetchone()
         if row is None:
             raise KeyError(f"Agent '{agent_id}' not found")
@@ -478,9 +596,12 @@ class MySqlDatabase(IAgentDatabase):
     async def create_agent(self, template: AgentTemplate) -> AgentTemplate:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
+                await conn.begin()
+                prompt_id = await self._insert_prompt(
+                    cur, template.system_prompt, None, template.created_at)
                 await cur.execute(
                     """INSERT INTO agents
-                       (id, name, description, agent_type, system_prompt,
+                       (id, name, description, agent_type, system_prompt_id,
                         tool_names, config, openai_model, openai_base_url, created_at)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
@@ -488,7 +609,7 @@ class MySqlDatabase(IAgentDatabase):
                         template.name,
                         template.description,
                         template.agent_type.value,
-                        template.system_prompt,
+                        prompt_id,
                         json.dumps(template.tool_names),
                         json.dumps(template.config),
                         template.openai_model,
@@ -496,7 +617,8 @@ class MySqlDatabase(IAgentDatabase):
                         template.created_at,
                     ),
                 )
-        return template
+                await conn.commit()
+        return template.model_copy(update={"system_prompt_id": prompt_id})
 
     async def update_agent(
         self,
@@ -511,12 +633,13 @@ class MySqlDatabase(IAgentDatabase):
         openai_base_url: str | None = None,
     ) -> AgentTemplate:
         updates: dict[str, Any] = {}
+        await self.get_agent(agent_id)
+        if system_prompt is not None:
+            await self._new_version("agents", agent_id, system_prompt)
         if name is not None:
             updates["name"] = name
         if description is not None:
             updates["description"] = description
-        if system_prompt is not None:
-            updates["system_prompt"] = system_prompt
         if tool_names is not None:
             updates["tool_names"] = json.dumps(tool_names)
         if config is not None:
@@ -559,6 +682,7 @@ class MySqlDatabase(IAgentDatabase):
         additional_prompt: str | None = None,
         additional_prompt_path: str | None = None,
         system_prompt_snapshot: str | None = None,
+        system_prompt_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)
         session = Session(
@@ -569,7 +693,6 @@ class MySqlDatabase(IAgentDatabase):
             parent_session_id=parent_session_id,
             additional_prompt=additional_prompt,
             additional_prompt_path=additional_prompt_path,
-            system_prompt_snapshot=system_prompt_snapshot,
         )
         # Seed a friendly default so the UI never shows a blank title. Uses the
         # agent's name + creation time; a caller-supplied title (e.g. a spawning
@@ -578,11 +701,16 @@ class MySqlDatabase(IAgentDatabase):
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
+                await conn.begin()
+                prompt_id = system_prompt_id
+                if system_prompt_snapshot is not None:
+                    prompt_id = await self._insert_prompt(
+                        cur, system_prompt_snapshot, None, session.created_at)
                 await cur.execute(
                     """INSERT INTO sessions
                        (id, agent_id, title, working_dir, parent_session_id,
                         additional_prompt, additional_prompt_path,
-                        system_prompt_snapshot,
+                        system_prompt_id,
                         status, created_at, updated_at, last_message_at)
                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
@@ -593,14 +721,15 @@ class MySqlDatabase(IAgentDatabase):
                         session.parent_session_id,
                         session.additional_prompt,
                         session.additional_prompt_path,
-                        session.system_prompt_snapshot,
+                        prompt_id,
                         session.status.value,
                         session.created_at,
                         session.updated_at,
                         session.last_message_at,
                     ),
                 )
-        return session
+                await conn.commit()
+        return await self.get_session(session.id)
 
     async def update_session_title(self, session_id: str, title: str) -> Session:
         session = await self.get_session(session_id)
@@ -618,7 +747,7 @@ class MySqlDatabase(IAgentDatabase):
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
                 await cur.execute(
-                    "SELECT * FROM sessions WHERE id = %s AND deleted_at IS NULL", (session_id,)
+                    f"{_SESSION_SELECT} WHERE s.id = %s AND s.deleted_at IS NULL", (session_id,)
                 )
                 row = await cur.fetchone()
         if row is None:
@@ -630,23 +759,18 @@ class MySqlDatabase(IAgentDatabase):
         session_id: str,
         system_prompt_snapshot: str,
     ) -> Session:
-        now = datetime.now(timezone.utc)
+        await self.get_session(session_id)
+        await self._new_version("sessions", session_id, system_prompt_snapshot)
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
-                result = await cur.execute(
-                    """UPDATE sessions
-                       SET system_prompt_snapshot = %s, updated_at = %s
-                       WHERE id = %s AND deleted_at IS NULL""",
-                    (system_prompt_snapshot, now, session_id),
-                )
-        if result == 0:
-            raise KeyError(f"Session '{session_id}' not found")
+                await cur.execute("UPDATE sessions SET updated_at = %s WHERE id = %s",
+                                  (datetime.now(timezone.utc), session_id))
         return await self.get_session(session_id)
 
     async def list_sessions(self) -> list[Session]:
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
-                await cur.execute("SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY created_at")
+                await cur.execute(f"{_SESSION_SELECT} WHERE s.deleted_at IS NULL ORDER BY s.created_at")
                 rows = await cur.fetchall()
         return [_row_to_session(r) for r in rows]
 

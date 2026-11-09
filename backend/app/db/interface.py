@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, List
 from app.models.domain import (
-    AgentTemplate, Session, SessionStatus, Message, MessageRole,
+    AgentTemplate, Session, SessionStatus, Message, MessageRole, SystemPrompt,
     PluginInstance, PluginLog, PluginRun, PluginStatus, Task, TaskStatus,
 )
 
@@ -27,6 +27,8 @@ class IAgentDatabase(ABC):
         *,
         name: str | None = None,
         description: str | None = None,
+        # A changed prompt is stored as a new system_prompts version; an
+        # identical one leaves the current version in place.
         system_prompt: str | None = None,
         tool_names: list[str] | None = None,
         config: dict | None = None,
@@ -49,7 +51,10 @@ class IAgentDatabase(ABC):
         additional_prompt: str | None = None,
         additional_prompt_path: str | None = None,
         system_prompt_snapshot: str | None = None,
-    ) -> Session: pass
+        system_prompt_id: str | None = None,
+    ) -> Session:
+        """system_prompt_snapshot stores a new first version; system_prompt_id
+        instead shares an existing version (diverge). Neither: no prompt yet."""
 
     @abstractmethod
     async def get_session(self, session_id: str) -> Session: pass
@@ -59,7 +64,25 @@ class IAgentDatabase(ABC):
         self,
         session_id: str,
         system_prompt_snapshot: str,
-    ) -> Session: pass
+    ) -> Session:
+        """Make `system_prompt_snapshot` the session's prompt: a new version
+        chained to the current one (no-op if the text is unchanged)."""
+
+    @abstractmethod
+    async def get_system_prompt(self, prompt_id: str) -> SystemPrompt:
+        """One version (raises KeyError)."""
+
+    async def system_prompt_history(self, prompt_id: str) -> List[SystemPrompt]:
+        """`prompt_id` and every earlier version, newest first (previous_id chain)."""
+        history: List[SystemPrompt] = []
+        seen: set[str] = set()
+        current: str | None = prompt_id
+        while current and current not in seen:
+            seen.add(current)
+            version = await self.get_system_prompt(current)
+            history.append(version)
+            current = version.previous_id
+        return history
 
     @abstractmethod
     async def update_session_title(self, session_id: str, title: str) -> Session: pass

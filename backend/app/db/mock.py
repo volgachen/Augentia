@@ -5,7 +5,7 @@ from app.core.compressed import plain_copy_fields
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import seed_agent_templates
 from app.models.domain import (
-    AgentTemplate, Session, SessionStatus,
+    AgentTemplate, Session, SessionStatus, SystemPrompt,
     Message, MessageRole,
     PluginInstance, PluginLog, PluginRun, PluginStatus,
     Task, TaskStatus,
@@ -16,7 +16,12 @@ from app.plugins.events import PluginEvent, get_plugin_event_bus
 
 class MockMemoryDatabase(IAgentDatabase):
     def __init__(self) -> None:
-        self._agents: Dict[str, AgentTemplate] = {a.id: a for a in seed_agent_templates()}
+        # Immutable prompt versions; agents/sessions hold the current id and
+        # (for convenience) its text, kept in step by _point_at.
+        self._prompts: Dict[str, SystemPrompt] = {}
+        self._agents: Dict[str, AgentTemplate] = {}
+        for agent in seed_agent_templates():
+            self._agents[agent.id] = self._point_at(agent, agent.system_prompt, new_chain=True)
         self._sessions: Dict[str, Session] = {}
         self._messages: Dict[str, List[Message]] = {}
         self._plugin_instances: Dict[str, PluginInstance] = {}
@@ -28,6 +33,25 @@ class MockMemoryDatabase(IAgentDatabase):
         # monotonic per-list id counter; survives deletes (ids never reused)
         self._task_counters: Dict[str, int] = {}
 
+    def _point_at(self, owner, content: str, *, new_chain: bool = False):
+        """Give an agent/session a new current version (chained to its
+        current one unless new_chain); unchanged text keeps the version."""
+        current = None if new_chain else getattr(owner, "system_prompt_id", None)
+        text_attr = "system_prompt" if isinstance(owner, AgentTemplate) else "system_prompt_snapshot"
+        if current and self._prompts[current].content == content:
+            return owner
+        version = SystemPrompt(content=content, previous_id=current)
+        self._prompts[version.id] = version
+        owner.system_prompt_id = version.id
+        setattr(owner, text_attr, content)
+        return owner
+
+    async def get_system_prompt(self, prompt_id: str) -> SystemPrompt:
+        version = self._prompts.get(prompt_id)
+        if version is None:
+            raise KeyError(f"System prompt '{prompt_id}' not found")
+        return version
+
     async def list_agents(self) -> List[AgentTemplate]:
         return list(self._agents.values())
 
@@ -38,7 +62,7 @@ class MockMemoryDatabase(IAgentDatabase):
         return agent
 
     async def create_agent(self, template: AgentTemplate) -> AgentTemplate:
-        self._agents[template.id] = template
+        self._agents[template.id] = self._point_at(template, template.system_prompt, new_chain=True)
         return template
 
     async def update_agent(
@@ -59,7 +83,7 @@ class MockMemoryDatabase(IAgentDatabase):
         if description is not None:
             agent.description = description
         if system_prompt is not None:
-            agent.system_prompt = system_prompt
+            self._point_at(agent, system_prompt)
         if tool_names is not None:
             agent.tool_names = tool_names
         if config is not None:
@@ -85,6 +109,7 @@ class MockMemoryDatabase(IAgentDatabase):
         additional_prompt: str | None = None,
         additional_prompt_path: str | None = None,
         system_prompt_snapshot: str | None = None,
+        system_prompt_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)  # validate agent exists
         session = Session(
@@ -95,8 +120,13 @@ class MockMemoryDatabase(IAgentDatabase):
             parent_session_id=parent_session_id,
             additional_prompt=additional_prompt,
             additional_prompt_path=additional_prompt_path,
-            system_prompt_snapshot=system_prompt_snapshot,
         )
+        if system_prompt_snapshot is not None:
+            self._point_at(session, system_prompt_snapshot, new_chain=True)
+        elif system_prompt_id is not None:
+            shared = await self.get_system_prompt(system_prompt_id)
+            session.system_prompt_id = shared.id
+            session.system_prompt_snapshot = shared.content
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
         self._sessions[session.id] = session
@@ -115,7 +145,8 @@ class MockMemoryDatabase(IAgentDatabase):
         system_prompt_snapshot: str,
     ) -> Session:
         session = await self.get_session(session_id)
-        session.system_prompt_snapshot = system_prompt_snapshot
+        self._point_at(session, system_prompt_snapshot)
+        session.updated_at = datetime.now(timezone.utc)
         return session
 
     async def update_session_title(self, session_id: str, title: str) -> Session:

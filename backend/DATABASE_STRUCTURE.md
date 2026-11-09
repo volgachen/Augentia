@@ -6,6 +6,21 @@ The MySQL schema is auto-created idempotently (`CREATE TABLE IF NOT EXISTS`) on 
 
 Plugin definitions are not stored in the database. Installed plugin definitions are scanned dynamically from local `plugins/*/plugin.json` by `app/plugins/catalog.py`.
 
+## `system_prompts`
+Immutable system prompt versions. Agents and sessions point at their current
+version (`system_prompt_id`); editing a prompt inserts a new version whose
+`previous_id` is the one it replaces and repoints the owner, so following
+`previous_id` from the current version gives the full history (newest first).
+Versions are never updated or deleted, which lets a diverged session share its
+source's version. An edit with unchanged text adds no version.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | VARCHAR(36) | PK |
+| `content` | LONGTEXT | NOT NULL; the full prompt text |
+| `previous_id` | VARCHAR(36) | nullable; the version this one replaced (NULL: first version) |
+| `created_at` | DATETIME(3) | NOT NULL; for migrated rows, the owner's `created_at` |
+
 ## `agents`
 Agent templates (seed data + operator-created).
 
@@ -15,7 +30,7 @@ Agent templates (seed data + operator-created).
 | `name` | VARCHAR(200) | NOT NULL |
 | `description` | TEXT | NOT NULL |
 | `agent_type` | VARCHAR(50) | enum-as-string (`claude_code` \| `tool_use`) |
-| `system_prompt` | TEXT | NOT NULL |
+| `system_prompt_id` | VARCHAR(36) | current `system_prompts` version (the template prompt) |
 | `tool_names` | JSON | NOT NULL |
 | `config` | JSON | nullable |
 | `openai_model` | VARCHAR(100) | default `'gpt-4o'` |
@@ -34,6 +49,7 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `parent_session_id` | VARCHAR(36) | nullable |
 | `additional_prompt` | LONGTEXT | nullable |
 | `additional_prompt_path` | VARCHAR(1000) | nullable |
+| `system_prompt_id` | VARCHAR(36) | nullable; current `system_prompts` version of the effective prompt (agent prompt + additions + runtime context, frozen at first start). NULL until first start |
 | `status` | VARCHAR(30) | default `'INITIALIZING'` |
 | `created_at` | DATETIME(3) | NOT NULL |
 | `updated_at` | DATETIME(3) | NOT NULL |
@@ -41,6 +57,13 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `deleted_at` | DATETIME(3) | nullable; NULL means visible, non-NULL means soft-deleted |
 
 Indexes: `idx_sessions_agent (agent_id)`, `idx_sessions_parent (parent_session_id)`.
+
+The API still returns the resolved text as `agents.system_prompt` /
+`sessions.system_prompt_snapshot` alongside `system_prompt_id`. Databases
+created before `system_prompts` are migrated on startup: each agent's
+`system_prompt` and each session's `system_prompt_snapshot` becomes a first
+version, and those text columns are dropped. History before the migration was
+overwritten in place, so it starts at the migrated version.
 
 ## `messages`
 Turn history.

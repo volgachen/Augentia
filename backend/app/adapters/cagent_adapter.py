@@ -264,6 +264,9 @@ class CAgentAdapter(BaseAgentAdapter):
         }
         self._system_prompt = system_prompt
         self._store = AugentiaStore(self._db, self.session_id)
+        # Read at save time, so a prompt edited mid-session is attributed to
+        # its new version from the next reply on.
+        self._store.system_prompt_id = lambda: self.system_prompt_id
         # Extra request parameters (config.model_params / compression_model_params);
         # validated here so a bad config fails at start, not on the first call.
         params, compression_params = resolve_model_params(self._config)

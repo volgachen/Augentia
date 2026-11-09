@@ -43,6 +43,9 @@ class StreamEvent(BaseModel):
 
 class BaseAgentAdapter(ABC):
     session_id: str | None = None
+    # system_prompts version the live prompt came from, recorded on each reply
+    # (metadata.system_prompt_id). Set by build_runner and on prompt edits.
+    system_prompt_id: str | None = None
 
     def __init__(self, session_id: str | None = None) -> None:
         # session_id is fixed at construction so tools that read it (e.g. the

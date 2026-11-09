@@ -109,6 +109,18 @@ async def update_agent(
     return await db.update_agent(agent_id, **body.model_dump(exclude_unset=True))
 
 
+@router.get("/{agent_id}/system-prompt/history")
+async def get_agent_system_prompt_history(agent_id: str, db: IAgentDatabase = Depends(get_db)):
+    """Versions of this agent template's system prompt, newest first."""
+    try:
+        agent = await db.get_agent(agent_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if not agent.system_prompt_id:
+        return []
+    return await db.system_prompt_history(agent.system_prompt_id)
+
+
 @router.delete("/{agent_id}", status_code=204)
 async def delete_agent(agent_id: str, db: IAgentDatabase = Depends(get_db)):
     try:

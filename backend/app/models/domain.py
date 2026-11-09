@@ -34,12 +34,29 @@ class AgentType(str, Enum):
     TOOL_USE = "tool_use"
 
 
+class SystemPrompt(BaseModel):
+    """One immutable version of a system prompt (table system_prompts).
+
+    Agents and sessions point at their current version by id; changing a
+    prompt adds a version whose previous_id is the one it replaces, so
+    following previous_id from the current version gives the full history.
+    Versions are never updated or deleted, so a diverged session can share
+    its source's version.
+    """
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    content: str
+    previous_id: Optional[str] = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class AgentTemplate(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
     description: str
     agent_type: AgentType
+    # Resolved text of the current version; the table stores system_prompt_id.
     system_prompt: str
+    system_prompt_id: Optional[str] = None
     # tool_use agent config
     tool_names: list[str] = Field(default_factory=list)
     # Per-agent configuration bag. Currently holds `tool_approvals`, a
@@ -74,10 +91,12 @@ class Session(BaseModel):
     # re-read on rehydrate).
     additional_prompt: Optional[str] = None
     additional_prompt_path: Optional[str] = None
-    # Final system prompt snapshot used to start this session. Unlike
-    # additional_prompt_path, this is not recomputed after launch; it preserves the
-    # exact effective prompt for rehydration and debugging.
+    # Effective system prompt of this session (the current version's text).
+    # Unlike additional_prompt_path, this is not recomputed after launch; it
+    # preserves the exact effective prompt for rehydration and debugging. The
+    # table stores system_prompt_id; editing the prompt adds a version.
     system_prompt_snapshot: Optional[str] = None
+    system_prompt_id: Optional[str] = None
     status: SessionStatus = SessionStatus.INITIALIZING
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

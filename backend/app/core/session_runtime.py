@@ -88,6 +88,7 @@ async def build_runner(
         session, agent, db, additional_prompt, additional_prompt_path
     )
     adapter = build_adapter(session, agent, db)
+    adapter.system_prompt_id = session.system_prompt_id
     await adapter.start(session.system_prompt_snapshot or "")
     history = await db.get_messages(session.id)
     if history:

@@ -132,7 +132,9 @@ async def _create_derived_session(
         parent_session_id=source.id,
         additional_prompt=source.additional_prompt,
         additional_prompt_path=source.additional_prompt_path,
-        system_prompt_snapshot=source.system_prompt_snapshot,
+        # Versions are immutable, so the branch shares the source's current
+        # one; editing the branch's prompt later chains a version of its own.
+        system_prompt_id=source.system_prompt_id,
     )
     try:
         await db.clone_messages(source.id, target.id, before_message_id=before_message_id)
@@ -325,13 +327,13 @@ async def update_session_system_prompt(
             detail="session is running; update the system prompt after the turn finishes",
         )
     try:
-        await db.update_session_system_prompt_snapshot(session_id, prompt)
+        updated = await db.update_session_system_prompt_snapshot(session_id, prompt)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     applied = "persisted"
     if runner is not None:
         try:
-            await runner.set_system_prompt(prompt)
+            await runner.set_system_prompt(prompt, updated.system_prompt_id)
             applied = "live_adapter"
         except NotImplementedError:
             # Adapter can't swap in place: drop the runner so the next message
@@ -339,7 +341,26 @@ async def update_session_system_prompt(
             await registry.remove(session_id)
             applied = "runner_restarted"
     logger.info("system prompt updated session=%s applied=%s len=%d", session_id, applied, len(prompt))
-    return {"system_prompt": prompt, "applied": applied}
+    return {"system_prompt": prompt, "applied": applied, "system_prompt_id": updated.system_prompt_id}
+
+
+@router.get("/{session_id}/system-prompt/history")
+async def get_session_system_prompt_history(
+    session_id: str,
+    db: IAgentDatabase = Depends(get_db),
+):
+    """Versions of this session's system prompt, newest first.
+
+    Follows previous_id from the current version, so a diverged session also
+    lists the versions it shares with its source from before the branch.
+    """
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if not session.system_prompt_id:
+        return []
+    return await db.system_prompt_history(session.system_prompt_id)
 
 
 @router.get("/{session_id}/config")

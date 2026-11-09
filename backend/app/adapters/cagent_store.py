@@ -74,6 +74,17 @@ _STATUS_TO_FRAMEWORK = {
 _NAME_KEY = "cagent_name"
 
 
+def reply_metadata(response: dict | None, system_prompt_id: str | None) -> dict | None:
+    """metadata for a saved model reply: the response details and the
+    system_prompts version that produced it (each only when known)."""
+    metadata: dict[str, Any] = {}
+    if response:
+        metadata["response"] = response
+    if system_prompt_id:
+        metadata["system_prompt_id"] = system_prompt_id
+    return metadata or None
+
+
 def _utc(stamp: datetime) -> datetime:
     return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
 
@@ -131,6 +142,9 @@ class AugentiaStore:
         # takes them as metadata.response; whatever is saved first consumes
         # them, so a summarizer's response never lands on a later reply.
         self.pending_response: dict | None = None
+        # Returns the system_prompts version the live prompt came from (set by
+        # the adapter); recorded on each reply as metadata.system_prompt_id.
+        self.system_prompt_id = lambda: None
 
     # ------- sessions -------
 
@@ -249,7 +263,7 @@ class AugentiaStore:
             payload["tool_calls"] = _wire_tool_calls(message["tool_calls"])
         row = await self._db.add_message(
             session_id, MessageRole.AGENT, json.dumps(payload, ensure_ascii=False),
-            metadata={"response": response} if response else None,
+            metadata=reply_metadata(response, self.system_prompt_id()),
         )
         return self._record(
             row, role="assistant", content=payload["content"],

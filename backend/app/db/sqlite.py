@@ -21,6 +21,7 @@ from app.models.domain import (
     PluginStatus,
     Session,
     SessionStatus,
+    SystemPrompt,
     Task,
     TaskStatus,
 )
@@ -52,10 +53,27 @@ def _iso(value: datetime | None) -> str | None:
 
 
 
+# agents/sessions store system_prompt_id; reads join the version's text in.
+_AGENT_SELECT = (
+    "SELECT a.*, p.content AS prompt_text FROM agents a "
+    "LEFT JOIN system_prompts p ON p.id = a.system_prompt_id"
+)
+_SESSION_SELECT = (
+    "SELECT s.*, p.content AS prompt_text FROM sessions s "
+    "LEFT JOIN system_prompts p ON p.id = s.system_prompt_id"
+)
+
+
+def _system_prompt(row: sqlite3.Row) -> SystemPrompt:
+    return SystemPrompt(id=row["id"], content=row["content"], previous_id=row["previous_id"],
+                        created_at=_dt(row["created_at"]))
+
+
 def _agent(row: sqlite3.Row) -> AgentTemplate:
     return AgentTemplate(
         id=row["id"], name=row["name"], description=row["description"],
-        agent_type=AgentType(row["agent_type"]), system_prompt=row["system_prompt"],
+        agent_type=AgentType(row["agent_type"]),
+        system_prompt=row["prompt_text"] or "", system_prompt_id=row["system_prompt_id"],
         tool_names=_json(row["tool_names"], []), config=_json(row["config"], {}) or {},
         openai_model=row["openai_model"], openai_base_url=row["openai_base_url"],
         created_at=_dt(row["created_at"]),
@@ -68,7 +86,7 @@ def _session(row: sqlite3.Row) -> Session:
         working_dir=row["working_dir"], parent_session_id=row["parent_session_id"],
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
-        system_prompt_snapshot=row["system_prompt_snapshot"],
+        system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
         status=SessionStatus(row["status"]), created_at=_dt(row["created_at"]),
         updated_at=_dt(row["updated_at"]), last_message_at=_dt(row["last_message_at"]),
         deleted_at=_dt(row["deleted_at"]),
@@ -158,12 +176,18 @@ class SqliteDatabase(IAgentDatabase):
     def _init_schema(self) -> None:
         self._conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS system_prompts (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                previous_id TEXT DEFAULT NULL,
+                created_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS agents (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 description TEXT NOT NULL,
                 agent_type TEXT NOT NULL,
-                system_prompt TEXT NOT NULL,
+                system_prompt_id TEXT DEFAULT NULL,
                 tool_names TEXT NOT NULL,
                 config TEXT DEFAULT NULL,
                 openai_model TEXT NOT NULL DEFAULT 'gpt-4o',
@@ -178,7 +202,7 @@ class SqliteDatabase(IAgentDatabase):
                 parent_session_id TEXT DEFAULT NULL,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
-                system_prompt_snapshot TEXT DEFAULT NULL,
+                system_prompt_id TEXT DEFAULT NULL,
                 status TEXT NOT NULL DEFAULT 'INITIALIZING',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -286,10 +310,7 @@ class SqliteDatabase(IAgentDatabase):
         session_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")
         }
-        if "system_prompt_snapshot" not in session_columns:
-            self._conn.execute(
-                "ALTER TABLE sessions ADD COLUMN system_prompt_snapshot TEXT DEFAULT NULL"
-            )
+        self._migrate_system_prompts(session_columns)
 
         plugin_log_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(plugin_logs)")
@@ -311,45 +332,121 @@ class SqliteDatabase(IAgentDatabase):
                 "ALTER TABLE messages ADD COLUMN metadata TEXT DEFAULT NULL"
             )
 
-    def _seed_agents(self) -> None:
-        now = datetime.now(timezone.utc)
-        for agent in SEED_AGENT_ROWS:
-            self._execute(
-                """INSERT OR IGNORE INTO agents
-                   (id, name, description, agent_type, system_prompt, tool_names,
-                    config, openai_model, openai_base_url, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    agent["id"], agent["name"], agent["description"],
-                    agent["agent_type"], agent["system_prompt"],
-                    _dump(agent["tool_names"]), _dump(agent.get("config", {})),
-                    agent["openai_model"], agent["openai_base_url"], _iso(now),
-                ),
+    def _migrate_system_prompts(self, session_columns: set[str]) -> None:
+        """Move inline prompt text into system_prompts (one first version per
+        agent / session), then drop the old text columns.
+
+        For databases created before system_prompts: agents.system_prompt and
+        sessions.system_prompt_snapshot become system_prompt_id. Runs once, in
+        one transaction. Needs SQLite 3.35+ (ALTER TABLE ... DROP COLUMN).
+        """
+        agent_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(agents)")}
+        moves = [
+            (table, old_column, columns)
+            for table, old_column, columns in (
+                ("agents", "system_prompt", agent_columns),
+                ("sessions", "system_prompt_snapshot", session_columns),
             )
+            if "system_prompt_id" not in columns or old_column in columns
+        ]
+        if not moves:
+            return
+        with self._conn:
+            for table, old_column, columns in moves:
+                if "system_prompt_id" not in columns:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN system_prompt_id TEXT DEFAULT NULL")
+                if old_column not in columns:
+                    continue
+                rows = self._conn.execute(
+                    f"SELECT id, {old_column} AS text, created_at FROM {table} "
+                    f"WHERE {old_column} IS NOT NULL AND system_prompt_id IS NULL"
+                ).fetchall()
+                for row in rows:
+                    prompt_id = self._insert_prompt(row["text"], None, row["created_at"])
+                    self._conn.execute(f"UPDATE {table} SET system_prompt_id = ? WHERE id = ?",
+                                       (prompt_id, row["id"]))
+                self._conn.execute(f"ALTER TABLE {table} DROP COLUMN {old_column}")
+
+    def _insert_prompt(self, content: str, previous_id: str | None, created_at: str | None = None) -> str:
+        """Store one version (no commit: callers own the transaction)."""
+        prompt_id = str(uuid.uuid4())
+        self._conn.execute(
+            "INSERT INTO system_prompts (id, content, previous_id, created_at) VALUES (?, ?, ?, ?)",
+            (prompt_id, content, previous_id, created_at or _iso(datetime.now(timezone.utc))),
+        )
+        return prompt_id
+
+    def _new_version(self, table: str, row_id: str, content: str) -> None:
+        """Point an agents/sessions row at a new version of its prompt chained
+        to the current one; nothing changes when the text is the same."""
+        current = self._conn.execute(
+            f"SELECT t.system_prompt_id, p.content FROM {table} t "
+            f"LEFT JOIN system_prompts p ON p.id = t.system_prompt_id WHERE t.id = ?",
+            (row_id,),
+        ).fetchone()
+        if current is None:
+            raise KeyError(row_id)
+        if current["system_prompt_id"] and current["content"] == content:
+            return
+        with self._conn:
+            prompt_id = self._insert_prompt(content, current["system_prompt_id"])
+            self._conn.execute(f"UPDATE {table} SET system_prompt_id = ? WHERE id = ?", (prompt_id, row_id))
+
+    async def get_system_prompt(self, prompt_id: str) -> SystemPrompt:
+        row = self._row("SELECT * FROM system_prompts WHERE id = ?", (prompt_id,))
+        if row is None:
+            raise KeyError(f"System prompt '{prompt_id}' not found")
+        return _system_prompt(row)
+
+    def _seed_agents(self) -> None:
+        now = _iso(datetime.now(timezone.utc))
+        for agent in SEED_AGENT_ROWS:
+            if self._row("SELECT 1 FROM agents WHERE id = ?", (agent["id"],)):
+                continue
+            with self._conn:
+                prompt_id = self._insert_prompt(agent["system_prompt"], None, now)
+                self._conn.execute(
+                    """INSERT INTO agents
+                       (id, name, description, agent_type, system_prompt_id, tool_names,
+                        config, openai_model, openai_base_url, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        agent["id"], agent["name"], agent["description"],
+                        agent["agent_type"], prompt_id,
+                        _dump(agent["tool_names"]), _dump(agent.get("config", {})),
+                        agent["openai_model"], agent["openai_base_url"], now,
+                    ),
+                )
 
     async def list_agents(self) -> list[AgentTemplate]:
-        return [_agent(r) for r in self._rows("SELECT * FROM agents ORDER BY created_at")]
+        return [_agent(r) for r in self._rows(f"{_AGENT_SELECT} ORDER BY a.created_at")]
 
     async def get_agent(self, agent_id: str) -> AgentTemplate:
-        row = self._row("SELECT * FROM agents WHERE id = ?", (agent_id,))
+        row = self._row(f"{_AGENT_SELECT} WHERE a.id = ?", (agent_id,))
         if row is None:
             raise KeyError(f"Agent '{agent_id}' not found")
         return _agent(row)
 
     async def create_agent(self, template: AgentTemplate) -> AgentTemplate:
-        self._execute(
-            """INSERT INTO agents
-               (id, name, description, agent_type, system_prompt, tool_names,
-                config, openai_model, openai_base_url, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (template.id, template.name, template.description, template.agent_type.value,
-             template.system_prompt, _dump(template.tool_names), _dump(template.config),
-             template.openai_model, template.openai_base_url, _iso(template.created_at)),
-        )
-        return template
+        with self._conn:
+            prompt_id = self._insert_prompt(template.system_prompt, None, _iso(template.created_at))
+            self._conn.execute(
+                """INSERT INTO agents
+                   (id, name, description, agent_type, system_prompt_id, tool_names,
+                    config, openai_model, openai_base_url, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (template.id, template.name, template.description, template.agent_type.value,
+                 prompt_id, _dump(template.tool_names), _dump(template.config),
+                 template.openai_model, template.openai_base_url, _iso(template.created_at)),
+            )
+        return template.model_copy(update={"system_prompt_id": prompt_id})
 
     async def update_agent(self, agent_id: str, **kwargs: Any) -> AgentTemplate:
         updates = {k: v for k, v in kwargs.items() if v is not None}
+        await self.get_agent(agent_id)
+        prompt = updates.pop("system_prompt", None)
+        if prompt is not None:
+            self._new_version("agents", agent_id, prompt)
         if "tool_names" in updates:
             updates["tool_names"] = _dump(updates["tool_names"])
         if "config" in updates:
@@ -373,25 +470,29 @@ class SqliteDatabase(IAgentDatabase):
             parent_session_id=kwargs.get("parent_session_id"),
             additional_prompt=kwargs.get("additional_prompt"),
             additional_prompt_path=kwargs.get("additional_prompt_path"),
-            system_prompt_snapshot=kwargs.get("system_prompt_snapshot"),
         )
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
-        self._execute(
-            """INSERT INTO sessions
-               (id, agent_id, title, working_dir, parent_session_id, additional_prompt,
-                additional_prompt_path, system_prompt_snapshot, status, created_at,
-                updated_at, last_message_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (session.id, session.agent_id, session.title, session.working_dir,
-             session.parent_session_id, session.additional_prompt, session.additional_prompt_path,
-             session.system_prompt_snapshot, session.status.value, _iso(session.created_at),
-             _iso(session.updated_at), _iso(session.last_message_at)),
-        )
-        return session
+        with self._conn:
+            prompt_id = kwargs.get("system_prompt_id")
+            if kwargs.get("system_prompt_snapshot") is not None:
+                prompt_id = self._insert_prompt(
+                    kwargs["system_prompt_snapshot"], None, _iso(session.created_at))
+            self._conn.execute(
+                """INSERT INTO sessions
+                   (id, agent_id, title, working_dir, parent_session_id, additional_prompt,
+                    additional_prompt_path, system_prompt_id, status, created_at,
+                    updated_at, last_message_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (session.id, session.agent_id, session.title, session.working_dir,
+                 session.parent_session_id, session.additional_prompt, session.additional_prompt_path,
+                 prompt_id, session.status.value, _iso(session.created_at),
+                 _iso(session.updated_at), _iso(session.last_message_at)),
+            )
+        return await self.get_session(session.id)
 
     async def get_session(self, session_id: str) -> Session:
-        row = self._row("SELECT * FROM sessions WHERE id = ? AND deleted_at IS NULL", (session_id,))
+        row = self._row(f"{_SESSION_SELECT} WHERE s.id = ? AND s.deleted_at IS NULL", (session_id,))
         if row is None:
             raise KeyError(f"Session '{session_id}' not found")
         return _session(row)
@@ -401,13 +502,10 @@ class SqliteDatabase(IAgentDatabase):
         session_id: str,
         system_prompt_snapshot: str,
     ) -> Session:
-        now = datetime.now(timezone.utc)
-        cur = self._execute(
-            "UPDATE sessions SET system_prompt_snapshot = ?, updated_at = ? WHERE id = ?",
-            (system_prompt_snapshot, _iso(now), session_id),
-        )
-        if cur.rowcount == 0:
-            raise KeyError(f"Session '{session_id}' not found")
+        await self.get_session(session_id)
+        self._new_version("sessions", session_id, system_prompt_snapshot)
+        self._execute("UPDATE sessions SET updated_at = ? WHERE id = ?",
+                      (_iso(datetime.now(timezone.utc)), session_id))
         return await self.get_session(session_id)
 
     async def update_session_title(self, session_id: str, title: str) -> Session:
@@ -418,7 +516,7 @@ class SqliteDatabase(IAgentDatabase):
         return await self.get_session(session_id)
 
     async def list_sessions(self) -> list[Session]:
-        rows = self._rows("SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY created_at")
+        rows = self._rows(f"{_SESSION_SELECT} WHERE s.deleted_at IS NULL ORDER BY s.created_at")
         return [_session(r) for r in rows]
 
     async def update_session_status(self, session_id: str, status: SessionStatus) -> Session:

@@ -133,9 +133,19 @@ class SessionRunner:
     def current_system_prompt(self) -> str | None:
         return self._adapter.current_system_prompt()
 
-    async def set_system_prompt(self, system_prompt: str) -> None:
-        """Swap the live adapter's system prompt; NotImplementedError if unsupported."""
+    async def set_system_prompt(self, system_prompt: str, prompt_id: str | None = None) -> None:
+        """Swap the live adapter's system prompt; NotImplementedError if unsupported.
+
+        prompt_id is the stored version it came from, recorded on later replies.
+        """
         await self._adapter.set_system_prompt(system_prompt)
+        self._adapter.system_prompt_id = prompt_id
+
+    def _reply_metadata(self) -> dict | None:
+        # Replies saved here (legacy engine) record the prompt version too;
+        # the CAgent engine's store does the same for the rows it writes.
+        prompt_id = self._adapter.system_prompt_id
+        return {"system_prompt_id": prompt_id} if prompt_id else None
 
     def _remember_confirm(self, event: StreamEvent) -> None:
         # event.data is JSON: {"call_id", "name", "args"}. Key the cache by
@@ -300,7 +310,8 @@ class SessionRunner:
             elif event.type == StreamEventType.ASSISTANT_MESSAGE:
                 saw_native_messages = True
                 message = await self._db.add_message(
-                    self._session_id, MessageRole.AGENT, event.data
+                    self._session_id, MessageRole.AGENT, event.data,
+                    metadata=self._reply_metadata(),
                 )
                 event.message_id = message.id
                 agent_buf.clear()
@@ -336,7 +347,8 @@ class SessionRunner:
 
         if agent_buf and not saw_native_messages:
             await self._db.add_message(
-                self._session_id, MessageRole.AGENT, "\n".join(agent_buf)
+                self._session_id, MessageRole.AGENT, "\n".join(agent_buf),
+                metadata=self._reply_metadata(),
             )
         if errored:
             await self._db.update_session_status(self._session_id, SessionStatus.ERROR)
