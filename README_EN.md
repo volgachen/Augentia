@@ -106,8 +106,10 @@ npm run dev
 
 # For production use, build first and then serve the static files
 npm run build
-npx http-server dist -p 12599
+npx http-server dist -p 12599 --proxy "http://localhost:12599?"
 ```
+
+`--proxy` sends any path without a matching file back to `index.html`, so `/share/<id>` links and pages like `/sessions/<id>` can be opened or refreshed directly; without it those URLs return 404. If you change the port, change it in `--proxy` too.
 
 ## Roadmap
 

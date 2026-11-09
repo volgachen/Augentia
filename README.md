@@ -106,8 +106,10 @@ npm run dev
 
 # 如需要正式使用，请先编译再部署静态文件
 npm run build
-npx http-server dist -p 12599
+npx http-server dist -p 12599 --proxy "http://localhost:12599?"
 ```
+
+`--proxy` 让找不到对应文件的路径都回退到 `index.html`，`/share/<id>` 分享链接和 `/sessions/<id>` 等页面才能直接打开或刷新；不加的话这些地址会返回 404。端口改了的话，`--proxy` 里的端口也要一起改。
 
 ## 后续开发计划
 
