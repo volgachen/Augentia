@@ -76,6 +76,8 @@ def make_agent_class(
     tool_image_limit: int | None = None,
     step_reminder_at: int | None = None,
     step_reminder: str | None = None,
+    tool_limit_at: int | None = None,
+    tool_limit_message: str | None = None,
 ) -> type[BaseAgent]:
     """Build the per-session BaseAgent subclass bound to one adapter instance."""
     for key, value in (("turn_compression_instruction", turn_compression_instruction),
@@ -92,6 +94,11 @@ def make_agent_class(
         raise ValueError("step_reminder_at must be a positive integer or None")
     if step_reminder is not None and (not isinstance(step_reminder, str) or not step_reminder.strip()):
         raise ValueError("step_reminder must be a non-empty string or None")
+    if tool_limit_at is not None and (isinstance(tool_limit_at, bool) or not isinstance(tool_limit_at, int)
+                                      or tool_limit_at < 1):
+        raise ValueError("tool_limit_at must be a positive integer or None")
+    if tool_limit_message is not None and (not isinstance(tool_limit_message, str) or not tool_limit_message.strip()):
+        raise ValueError("tool_limit_message must be a non-empty string or None")
 
     class SessionAgent(BaseAgent):
         NAME = name
@@ -136,6 +143,10 @@ def make_agent_class(
         # the reminder appended (CAgent STEP_REMINDER_AT; None disables it).
         STEP_REMINDER_AT = step_reminder_at
         STEP_REMINDER = step_reminder or BaseAgent.STEP_REMINDER
+        # From this many model calls on, tool calls are not executed: each gets
+        # the limit message, so the model can only wrap up (CAgent TOOL_LIMIT_AT).
+        TOOL_LIMIT_AT = tool_limit_at
+        TOOL_LIMIT_MESSAGE = tool_limit_message or BaseAgent.TOOL_LIMIT_MESSAGE
 
         @classmethod
         def get_tools(cls, ctx):

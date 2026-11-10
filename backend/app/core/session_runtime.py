@@ -55,7 +55,7 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
                 "compression_instruction", "compression_model", "compression_send_tools",
                 "model_params", "compression_model_params",
                 "vision", "image_detail", "tool_image_limit", "tool_image_mode",
-                "step_reminder_at", "step_reminder"))
+                "step_reminder_at", "step_reminder", "tool_limit_at", "tool_limit_message"))
             return CAgentAdapter(
                 db=db,
                 tool_names=agent.tool_names,

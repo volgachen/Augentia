@@ -1016,6 +1016,37 @@ async def test_step_reminder(db, wd) -> bool:
     return True
 
 
+async def test_tool_limit(db, wd) -> bool:
+    section("CAgent engine: config.tool_limit_at stops running tools and lets the model wrap up")
+    session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-tool-limit")
+    wd.mkdir(parents=True, exist_ok=True)
+    adapter = CAgentAdapter(
+        db=db, tool_names=["write"], session_id=session.id, working_dir=str(wd),
+        # write asks for confirmation by default: a limited call must not.
+        config={"tool_limit_at": 1, "tool_limit_message": "收尾吧。"},
+        model_callable=scripted(
+            {"tool_calls": [{"id": "lim-1", "name": "write",
+                             "arguments": {"file_path": "x.txt", "content": "x"}}]},
+            {"content": "今天先到这里。"}),
+    )
+    try:
+        await adapter.start("You are a test agent.")
+        await adapter.send("write x.txt")
+        types = [event.type async for event in adapter.stream()]
+    finally:
+        await adapter.stop()
+    rows = await db.get_messages(session.id, include_deleted=True)
+    results = [json.loads(m.content)["content"] for m in rows if m.role == MessageRole.TOOL]
+    if StreamEventType.TOOL_CONFIRM in types or (wd / "x.txt").exists() or results != ["收尾吧。"]:
+        fail(f"limited call ran or asked: confirm={StreamEventType.TOOL_CONFIRM in types} results={results}")
+        return False
+    if not any(m.role == MessageRole.AGENT and "今天先到这里。" in (m.content or "") for m in rows):
+        fail("model did not get to reply after the limit")
+        return False
+    ok("tool limit: from step 1 tool calls get the message, no confirm, no side effect; the model replies")
+    return True
+
+
 async def main() -> int:
     db = MockMemoryDatabase()
     # The mock database validates that a session's agent exists.
@@ -1046,6 +1077,7 @@ async def main() -> int:
             await test_response_metadata(db, wd / "response-meta"),
             await test_tool_call_context(db, wd / "call-context"),
             await test_step_reminder(db, wd / "step-reminder"),
+            await test_tool_limit(db, wd / "tool-limit"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):
