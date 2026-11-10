@@ -304,6 +304,8 @@ class CAgentAdapter(BaseAgentAdapter):
             compression_instruction=self._config.get("compression_instruction"),
             compression_send_tools=self._config.get("compression_send_tools"),
             tool_image_limit=self._tool_image_limit,
+            step_reminder_at=self._config.get("step_reminder_at"),
+            step_reminder=self._config.get("step_reminder"),
             compression_model=(
                 self._compression_model if self._compression_model is not self._model else None),
         )

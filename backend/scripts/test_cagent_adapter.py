@@ -975,6 +975,47 @@ async def test_tool_call_context(db, wd) -> bool:
     return True
 
 
+async def test_step_reminder(db, wd) -> bool:
+    section("CAgent engine: config.step_reminder_at appends the reminder to a step's last tool result")
+    session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-step-reminder")
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "notes.txt").write_text("hello", encoding="utf-8")
+    read = {"name": "read", "arguments": {"path": "notes.txt"}}
+    adapter = CAgentAdapter(
+        db=db, tool_names=["read"], session_id=session.id, working_dir=str(wd),
+        config={"tool_approvals": {"read": False}, "step_reminder_at": 2, "step_reminder": "该休息了。"},
+        model_callable=scripted(
+            {"tool_calls": [dict(read, id="rem-1")]},
+            {"tool_calls": [dict(read, id="rem-2a"), dict(read, id="rem-2b")]},
+            {"content": "好的"}),
+    )
+    try:
+        await adapter.start("You are a test agent.")
+        await adapter.send("read twice")
+        async for _ in adapter.stream():
+            pass
+    finally:
+        await adapter.stop()
+    rows = await db.get_messages(session.id, include_deleted=True)
+    # Tool rows store the OpenAI tool message as JSON.
+    results = {payload["tool_call_id"]: payload["content"]
+               for payload in (json.loads(m.content) for m in rows if m.role == MessageRole.TOOL)}
+    if any(results[i].endswith("该休息了。") for i in ("rem-1", "rem-2a")) or             not results["rem-2b"].endswith("该休息了。"):
+        fail(f"reminder not exactly on step 2's last result: {results}")
+        return False
+    plain = CAgentAdapter(db=db, tool_names=["read"], session_id="s-step-reminder-off", working_dir=str(wd),
+                          config={}, model_callable=scripted({"content": "x"}))
+    await plain.start("You are a test agent.")
+    try:
+        if plain._agent_cls.STEP_REMINDER_AT is not None:
+            fail("step reminder should be off without config.step_reminder_at")
+            return False
+    finally:
+        await plain.stop()
+    ok("step reminder: from step 2, appended to that step's last tool result only; off by default")
+    return True
+
+
 async def main() -> int:
     db = MockMemoryDatabase()
     # The mock database validates that a session's agent exists.
@@ -1004,6 +1045,7 @@ async def main() -> int:
             await test_compression_sends_tools_with_tool_choice_none(db, wd / "send-tools"),
             await test_response_metadata(db, wd / "response-meta"),
             await test_tool_call_context(db, wd / "call-context"),
+            await test_step_reminder(db, wd / "step-reminder"),
             await test_model_error_path(db, wd / "error"),
         ]
         if all(results):

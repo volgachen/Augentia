@@ -74,6 +74,8 @@ def make_agent_class(
     compression_send_tools: bool | None = None,
     compression_model=None,
     tool_image_limit: int | None = None,
+    step_reminder_at: int | None = None,
+    step_reminder: str | None = None,
 ) -> type[BaseAgent]:
     """Build the per-session BaseAgent subclass bound to one adapter instance."""
     for key, value in (("turn_compression_instruction", turn_compression_instruction),
@@ -85,6 +87,11 @@ def make_agent_class(
         raise ValueError("turn_compression_marker must be a string or None")
     if compression_send_tools is not None and not isinstance(compression_send_tools, bool):
         raise ValueError("compression_send_tools must be a boolean or None")
+    if step_reminder_at is not None and (isinstance(step_reminder_at, bool) or not isinstance(step_reminder_at, int)
+                                         or step_reminder_at < 1):
+        raise ValueError("step_reminder_at must be a positive integer or None")
+    if step_reminder is not None and (not isinstance(step_reminder, str) or not step_reminder.strip()):
+        raise ValueError("step_reminder must be a non-empty string or None")
 
     class SessionAgent(BaseAgent):
         NAME = name
@@ -125,6 +132,10 @@ def make_agent_class(
             else compression_send_tools)
         # Only the newest N tool-result images are sent to the model.
         TOOL_IMAGE_LIMIT = tool_image_limit
+        # From this many model calls on, the last tool result of each step gets
+        # the reminder appended (CAgent STEP_REMINDER_AT; None disables it).
+        STEP_REMINDER_AT = step_reminder_at
+        STEP_REMINDER = step_reminder or BaseAgent.STEP_REMINDER
 
         @classmethod
         def get_tools(cls, ctx):
