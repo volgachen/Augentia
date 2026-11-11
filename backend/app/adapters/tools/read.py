@@ -28,7 +28,7 @@ class ReadTool(BaseTool):
         return {
             "type": "object",
             "properties": {
-                "path": {
+                "file_path": {
                     "type": "string",
                     "description": "Path of the file to read.",
                 },
@@ -44,16 +44,17 @@ class ReadTool(BaseTool):
                     "description": "Maximum number of lines to read (default: all).",
                 },
             },
-            "required": ["path"],
+            "required": ["file_path"],
         }
 
     async def execute(
         self,
-        path: str,
+        file_path: str,
         offset: int | None = None,
         limit: int | None = None,
     ) -> "str | ToolOutput":
-        path = self.resolve_path(path)
+        # file_path, like write and edit.
+        path = self.resolve_path(file_path)
         if not os.path.isfile(path):
             return f"[Error] File not found: {path}"
 

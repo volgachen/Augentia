@@ -17,10 +17,7 @@ export const TOOL_DISPLAY_CONFIG: Record<string, ToolDisplayConfig> = {
     summaryFields: [{ path: "command", label: "cmd", maxLength: 120 }],
   },
   read: {
-    summaryFields: [
-      { path: "file_path", label: "file", maxLength: 100 },
-      { path: "path", label: "path", maxLength: 100 },
-    ],
+    summaryFields: [{ path: "file_path", label: "file", maxLength: 100 }],
   },
   write: {
     summaryFields: [{ path: "file_path", label: "file", maxLength: 100 }],

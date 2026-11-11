@@ -76,7 +76,7 @@ def reader(*paths, final="done"):
         step = len(calls)
         if step <= len(paths):
             return {"tool_calls": [{"id": f"read-{step}", "name": "read",
-                                    "arguments": {"path": paths[step - 1]}}]}
+                                    "arguments": {"file_path": paths[step - 1]}}]}
         return {"content": final}
 
     return model, calls
@@ -88,19 +88,19 @@ async def test_read_tool() -> None:
     section("read tool: image files")
     (tool,) = load_tools(["read"])
     tool.working_dir = str(WORKDIR)
-    out = await tool.execute(path="red.png")
+    out = await tool.execute(file_path="red.png")
     check(isinstance(out, ToolOutput) and len(out.images) == 1
           and out.images[0].data == (WORKDIR / "red.png").read_bytes()
           and "image/png" in out.text, "png returns ToolOutput with the file bytes")
-    out = await tool.execute(path="disguised.txt")
+    out = await tool.execute(file_path="disguised.txt")
     check(isinstance(out, ToolOutput), "detection uses magic bytes, not the extension")
-    out = await tool.execute(path="fake.png")
+    out = await tool.execute(file_path="fake.png")
     check(isinstance(out, str) and "not really a png" in out, "text file named .png stays text")
-    out = await tool.execute(path="notes.txt", offset=2, limit=1)
+    out = await tool.execute(file_path="notes.txt", offset=2, limit=1)
     check(out == "2\tline two", "text files keep line-numbered output")
     os.environ["AUGENTIA_ATTACHMENT_MAX_BYTES"] = "50"
     try:
-        out = await tool.execute(path="red.png")
+        out = await tool.execute(file_path="red.png")
         check(isinstance(out, str) and "limit" in out, "oversized image refused with an error")
     finally:
         os.environ.pop("AUGENTIA_ATTACHMENT_MAX_BYTES", None)
@@ -221,7 +221,7 @@ async def test_engine(h: Harness) -> None:
 def interleaving_read(red: bytes, blue: bytes):
     """A read.execute replacement returning text and two images interleaved."""
 
-    async def execute(self, path, offset=None, limit=None):
+    async def execute(self, file_path, offset=None, limit=None):
         return ToolOutput.interleaved(["Page 1:", ToolImage(red), "Page 2:", ToolImage(blue, detail="high"), "end"])
 
     return execute
@@ -341,11 +341,11 @@ class _FakeCompletions:
         self.requests.append(kwargs["messages"])
         if len(self.requests) == 1:
             call = SimpleNamespace(id="legacy-read", type="function",
-                                   function=SimpleNamespace(name="read", arguments=json.dumps({"path": "red.png"})))
+                                   function=SimpleNamespace(name="read", arguments=json.dumps({"file_path": "red.png"})))
             msg = SimpleNamespace(content=None, tool_calls=[call])
             msg.model_dump = lambda **_: {"role": "assistant", "content": None, "tool_calls": [{
                 "id": "legacy-read", "type": "function",
-                "function": {"name": "read", "arguments": json.dumps({"path": "red.png"})}}]}
+                "function": {"name": "read", "arguments": json.dumps({"file_path": "red.png"})}}]}
         else:
             msg = SimpleNamespace(content="done", tool_calls=None)
             msg.model_dump = lambda **_: {"role": "assistant", "content": "done"}

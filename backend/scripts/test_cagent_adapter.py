@@ -396,7 +396,7 @@ async def test_turn_compression(db, wd) -> bool:
         if any(m["content"] == "and then?" for m in messages if m["role"] == "user"):
             return {"content": "follow-up answered from summary"}
         return {"tool_calls": [{"id": "read-1", "name": "read",
-                                "arguments": {"path": "notes.txt"}}]}
+                                "arguments": {"file_path": "notes.txt"}}]}
 
     original_make_model = cagent_adapter_module._make_model
     cagent_adapter_module._make_model = lambda client, name: model
@@ -487,7 +487,7 @@ async def test_turn_compression_marker(db, wd) -> bool:
             if any(m["role"] == "tool" for m in messages):
                 return {"content": "notes.txt says hello"}
             return {"tool_calls": [{"id": f"read-{label}", "name": "read",
-                                    "arguments": {"path": "notes.txt"}}]}
+                                    "arguments": {"file_path": "notes.txt"}}]}
 
         original_make_model = cagent_adapter_module._make_model
         cagent_adapter_module._make_model = lambda client, name: model
@@ -840,7 +840,7 @@ async def test_response_metadata(db, wd) -> bool:
                 message = NS(content="done reading", tool_calls=None)
             else:
                 message = NS(content="let me read", tool_calls=[NS(
-                    id="read-meta", function=NS(name="read", arguments='{"path": "notes.txt"}'))])
+                    id="read-meta", function=NS(name="read", arguments='{"file_path": "notes.txt"}'))])
             usage = NS(model_dump=lambda n=n: {"prompt_tokens": 100 * n, "completion_tokens": n,
                                                "total_tokens": 101 * n})
             return NS(id=f"resp-{n}", model=f"served-model-{n}", usage=usage,
@@ -949,7 +949,7 @@ async def test_tool_call_context(db, wd) -> bool:
         db=db, tool_names=["read"], session_id=session.id, working_dir=str(wd),
         config={"tool_approvals": {"read": False}},
         model_callable=scripted(
-            {"tool_calls": [{"id": "ctx-read", "name": "read", "arguments": {"path": "notes.txt"}}]},
+            {"tool_calls": [{"id": "ctx-read", "name": "read", "arguments": {"file_path": "notes.txt"}}]},
             {"content": "read it"}),
     )
     ReadTool.execute = spy
@@ -980,7 +980,7 @@ async def test_step_reminder(db, wd) -> bool:
     session = await db.create_session("agent-direct", working_dir=str(wd), session_id="s-step-reminder")
     wd.mkdir(parents=True, exist_ok=True)
     (wd / "notes.txt").write_text("hello", encoding="utf-8")
-    read = {"name": "read", "arguments": {"path": "notes.txt"}}
+    read = {"name": "read", "arguments": {"file_path": "notes.txt"}}
     adapter = CAgentAdapter(
         db=db, tool_names=["read"], session_id=session.id, working_dir=str(wd),
         config={"tool_approvals": {"read": False}, "step_reminder_at": 2, "step_reminder": "该休息了。"},

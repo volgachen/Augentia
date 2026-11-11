@@ -488,10 +488,7 @@ async def test_tool_permission(
     config = ensure_session_config(session_id, agent.config)
     args = dict(body.args or {})
     if body.path is not None:
-        if body.tool == "read":
-            args.setdefault("path", body.path)
-        else:
-            args.setdefault("file_path", body.path)
+        args.setdefault("file_path", body.path)
     explanation = explain_tool_permission(body.tool, args, session.working_dir, config)
     if explanation is None:
         return {

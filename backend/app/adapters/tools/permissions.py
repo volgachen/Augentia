@@ -12,7 +12,7 @@ from app.adapters.tools.registry import list_available
 PermissionAction = Literal["allow", "deny", "ask"]
 
 _FILE_PATH_ARG_BY_TOOL = {
-    "read": "path",
+    "read": "file_path",
     "write": "file_path",
     "edit": "file_path",
 }

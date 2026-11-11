@@ -53,10 +53,10 @@ def main() -> int:
             }
         }
 
-        assert_decision("allow", "read", {"path": "src/a.py"}, str(root), config)
+        assert_decision("allow", "read", {"file_path": "src/a.py"}, str(root), config)
         assert_decision("allow", "write", {"file_path": "docs/new.md"}, str(root), config)
         assert_decision("allow", "edit", {"file_path": "docs/a.md"}, str(root), config)
-        assert_decision("deny", "read", {"path": ".env"}, str(root), config)
+        assert_decision("deny", "read", {"file_path": ".env"}, str(root), config)
         assert_decision("deny", "edit", {"file_path": "docs/../.env"}, str(root), config)
         assert_decision("ask", "write", {"file_path": "notes/a.md"}, str(root), config)
 

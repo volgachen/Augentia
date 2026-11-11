@@ -64,7 +64,7 @@ async def main() -> int:
         last = messages[-1]
         if last["role"] == "user" and "use tool" in str(last.get("content")):
             return {"content": "reading", "tool_calls": [
-                {"id": f"call-{len(seen)}", "name": "read", "arguments": {"path": "a.txt"}}]}
+                {"id": f"call-{len(seen)}", "name": "read", "arguments": {"file_path": "a.txt"}}]}
         return {"content": f"answer {len(seen)}"}
 
     original = cagent_adapter_module._make_model
