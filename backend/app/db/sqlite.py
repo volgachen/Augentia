@@ -515,6 +515,16 @@ class SqliteDatabase(IAgentDatabase):
             raise KeyError(f"Session '{session_id}' not found")
         return await self.get_session(session_id)
 
+    async def update_session_working_dir(self, session_id: str, working_dir: str | None) -> Session:
+        now = datetime.now(timezone.utc)
+        cur = self._execute(
+            "UPDATE sessions SET working_dir = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (working_dir, _iso(now), session_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id)
+
     async def list_sessions(self) -> list[Session]:
         rows = self._rows(f"{_SESSION_SELECT} WHERE s.deleted_at IS NULL ORDER BY s.created_at")
         return [_session(r) for r in rows]

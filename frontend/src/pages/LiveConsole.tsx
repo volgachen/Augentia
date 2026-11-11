@@ -12,6 +12,7 @@ import ToolConfirmPanel from "../components/ToolConfirmPanel";
 import ToolPermissionsPanel from "../components/ToolPermissionsPanel";
 import SystemPromptPanel from "../components/SystemPromptPanel";
 import ShareButton from "../components/ShareButton";
+import WorkingDirEditor from "../components/WorkingDirEditor";
 import { AttachmentTray } from "../components/ImageAttachments";
 import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAttachments";
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
@@ -320,10 +321,7 @@ export default function LiveConsole() {
         </h1>
         <div className="text-left">
           <p className="text-xs text-gray-500 font-mono">{session.id}</p>
-          <p className="text-xs text-gray-500 font-mono">
-            <span className="text-gray-600">cwd: </span>
-            {session.working_dir ?? "—"}
-          </p>
+          <WorkingDirEditor session={session} />
         </div>
         <div className="flex flex-col items-end gap-1">
         <div className="flex items-center gap-2">
@@ -568,7 +566,10 @@ export default function LiveConsole() {
             {sidebarTab === "permissions" && (
               <ToolPermissionsPanel session={session} />
             )}
-            {sidebarTab === "systemPrompt" && <SystemPromptPanel key={session.id} session={session} />}
+            {sidebarTab === "systemPrompt" && (
+              // Re-key on working_dir: changing it may rewrite the prompt.
+              <SystemPromptPanel key={`${session.id}:${session.working_dir}`} session={session} />
+            )}
           </div>
         </aside>
       </div>

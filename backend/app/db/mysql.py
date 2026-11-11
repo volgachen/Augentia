@@ -743,6 +743,18 @@ class MySqlDatabase(IAgentDatabase):
                 )
         return session
 
+    async def update_session_working_dir(self, session_id: str, working_dir: str | None) -> Session:
+        session = await self.get_session(session_id)
+        session.working_dir = working_dir
+        session.updated_at = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE sessions SET working_dir = %s, updated_at = %s WHERE id = %s",
+                    (session.working_dir, session.updated_at, session_id),
+                )
+        return session
+
     async def get_session(self, session_id: str) -> Session:
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:

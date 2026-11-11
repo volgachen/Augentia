@@ -203,6 +203,11 @@ export const api = {
         `/sessions/${id}/system-prompt`,
         { method: "PUT", body: JSON.stringify({ system_prompt }) },
       ),
+    updateWorkingDir: (id: string, working_dir: string, update_prompt = true) =>
+      request<{ session: Session; prompt_updated: boolean }>(`/sessions/${id}/working-dir`, {
+        method: "PUT",
+        body: JSON.stringify({ working_dir, update_prompt }),
+      }),
     config: (id: string) => request<Record<string, unknown>>(`/sessions/${id}/config`),
     updateConfig: (id: string, config: Record<string, unknown>) =>
       request<Record<string, unknown>>(`/sessions/${id}/config`, {

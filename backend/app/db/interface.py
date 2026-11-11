@@ -88,6 +88,9 @@ class IAgentDatabase(ABC):
     async def update_session_title(self, session_id: str, title: str) -> Session: pass
 
     @abstractmethod
+    async def update_session_working_dir(self, session_id: str, working_dir: str | None) -> Session: pass
+
+    @abstractmethod
     async def list_sessions(self) -> List[Session]: pass
 
     @abstractmethod

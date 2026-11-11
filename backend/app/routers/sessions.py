@@ -14,7 +14,7 @@ from app.auth import is_websocket_authenticated
 from app.adapters.registry import AdapterRegistry, get_registry
 from app.core.session_config import ensure_session_config, write_session_config
 from app.core.session_share import read_share, write_share
-from app.core.session_prompt import effective_system_prompt
+from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
 from app.core.workspace import (
@@ -66,6 +66,13 @@ class UpdateSystemPromptRequest(BaseModel):
     # Full replacement for the session's effective system prompt (the agent's
     # base prompt, additional prompts and runtime context are NOT re-applied).
     system_prompt: str
+
+
+class UpdateWorkingDirRequest(BaseModel):
+    working_dir: str
+    # Also rewrite the "- Current working directory: ..." line of the runtime
+    # context block in the session's system prompt (saved as a new version).
+    update_prompt: bool = True
 
 
 class UpdateSessionConfigRequest(BaseModel):
@@ -342,6 +349,69 @@ async def update_session_system_prompt(
             applied = "runner_restarted"
     logger.info("system prompt updated session=%s applied=%s len=%d", session_id, applied, len(prompt))
     return {"system_prompt": prompt, "applied": applied, "system_prompt_id": updated.system_prompt_id}
+
+
+@router.put("/{session_id}/working-dir")
+async def update_session_working_dir(
+    session_id: str,
+    body: UpdateWorkingDirRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Point an existing session at another working directory.
+
+    Allowed between turns only (409 while running or awaiting a tool confirm).
+    The live runner is rebuilt so the tools pick up the new directory; this
+    also drops bash's relayed `cd` state and the node REPL subprocess. History
+    is kept. With update_prompt, the runtime-context line naming the old
+    directory in the system prompt is rewritten and saved as a new version;
+    it's left alone when that exact line isn't there (edited or disabled).
+    A copy/worktree directory the backend created for the session is not
+    cleaned up when the session moves away from it.
+    """
+    raw = body.working_dir.strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="working_dir must not be empty")
+    new_dir = Path(raw).expanduser().resolve()
+    if not new_dir.is_dir():
+        raise HTTPException(status_code=400, detail=f"working_dir does not exist: {new_dir}")
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        runner = None
+    if (runner is not None and runner.is_busy) or session.status in (
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="session is running; change the working directory after the turn finishes",
+        )
+
+    old_dir = session.working_dir
+    prompt_updated = False
+    if body.update_prompt and session.system_prompt_snapshot:
+        new_prompt = replace_runtime_working_dir(
+            session.system_prompt_snapshot, old_dir, str(new_dir))
+        if new_prompt is not None and new_prompt != session.system_prompt_snapshot:
+            await db.update_session_system_prompt_snapshot(session_id, new_prompt)
+            prompt_updated = True
+    try:
+        session = await db.update_session_working_dir(session_id, str(new_dir))
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if runner is not None:
+        await registry.remove(session_id)
+        await get_or_rehydrate(session, db, registry)
+    logger.info("working dir changed session=%s %s -> %s prompt_updated=%s",
+                session_id, old_dir, new_dir, prompt_updated)
+    return {
+        "session": (await db.get_session(session_id)).model_dump(mode="json"),
+        "prompt_updated": prompt_updated,
+    }
 
 
 @router.get("/{session_id}/system-prompt/history")

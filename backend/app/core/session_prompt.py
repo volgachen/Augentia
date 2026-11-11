@@ -16,6 +16,31 @@ def _display_path(path: str) -> str:
     return path
 
 
+def replace_runtime_working_dir(prompt: str, old_dir: str | None, new_dir: str) -> str | None:
+    """Rewrite the runtime-context working-directory line for new_dir.
+
+    Returns None (leave the prompt alone) unless the prompt has exactly one
+    "- Current working directory: ..." line after a "# Runtime context"
+    heading, and that line names old_dir. A session created without a
+    working_dir showed the backend cwd of that moment, which can't be
+    recovered, so any value is accepted then.
+    """
+    marker = "# Runtime context"
+    head, sep, tail = prompt.rpartition(marker)
+    if not sep:
+        return None
+    prefix = "- Current working directory: "
+    lines = tail.split("\n")
+    hits = [i for i, line in enumerate(lines) if line.startswith(prefix)]
+    if len(hits) != 1:
+        return None
+    current = lines[hits[0]][len(prefix):].rstrip("\r")
+    if old_dir and current != _display_path(old_dir):
+        return None
+    lines[hits[0]] = prefix + _display_path(new_dir)
+    return head + sep + "\n".join(lines)
+
+
 def runtime_context_prompt(session: Session) -> str:
     """Build session-specific runtime context appended to the system prompt."""
     os_name = platform.platform()

@@ -155,6 +155,12 @@ class MockMemoryDatabase(IAgentDatabase):
         session.updated_at = datetime.now(timezone.utc)
         return session
 
+    async def update_session_working_dir(self, session_id: str, working_dir: str | None) -> Session:
+        session = await self.get_session(session_id)
+        session.working_dir = working_dir
+        session.updated_at = datetime.now(timezone.utc)
+        return session
+
     async def list_sessions(self) -> List[Session]:
         return [s for s in self._sessions.values() if s.deleted_at is None]
 
