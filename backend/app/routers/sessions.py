@@ -24,7 +24,7 @@ from app.core.workspace import (
     worktree_root,
 )
 from app.adapters.tools.permissions import explain_tool_permission, validate_tool_permissions_config
-from app.core.attachments import AttachmentError, agent_engine, normalize_turn_images
+from app.core.attachments import AttachmentError, normalize_turn_images
 from app.adapters.cagent_agent import validate_turn_overrides
 
 logger = logging.getLogger("augentia.sessions")
@@ -90,12 +90,11 @@ class PostMessageRequest(BaseModel):
     content: str = ""
     from_session_id: str | None = None
     # Image references from POST /attachments: "att:<sha256>" strings or
-    # {"ref", "detail"} objects. Only cagent-engine agents with config.vision.
+    # {"ref", "detail"} objects. Only agents with config.vision.
     images: list[str | dict] | None = None
     # Settings for this turn only, over the session/agent config: max_steps,
     # step_reminder_at, step_reminder, tool_limit_at, tool_limit_message
     # (null for step_reminder_at / tool_limit_at turns it off this turn).
-    # cagent-engine sessions only.
     turn_overrides: dict | None = None
 
 
@@ -130,14 +129,10 @@ async def _turn_images(db: IAgentDatabase, session: Session, images) -> list[dic
     return normalize_turn_images(agent, images)
 
 
-async def _turn_overrides(db: IAgentDatabase, session: Session, overrides) -> dict:
-    """Validate a turn's overrides against the session's agent; 400 on rejection."""
+def _turn_overrides(overrides) -> dict:
+    """Validate a turn's overrides; 400 on rejection."""
     if overrides is None:
         return {}
-    agent = await db.get_agent(session.agent_id)
-    if agent.agent_type != AgentType.TOOL_USE or agent_engine(agent) != "cagent":
-        raise HTTPException(status_code=400,
-                            detail="turn_overrides is supported only for cagent-engine sessions")
     try:
         return validate_turn_overrides(overrides)
     except ValueError as e:
@@ -760,7 +755,7 @@ async def compress_session(
     db: IAgentDatabase = Depends(get_db),
     registry: AdapterRegistry = Depends(get_registry),
 ):
-    """Manually compress the session's history in place (CAgent engine only).
+    """Manually compress the session's history in place.
 
     Uses CAgent's compress_session: the same summarizer, instruction and image
     handling as threshold-triggered compression. The summary covers history
@@ -792,8 +787,8 @@ async def compress_session(
         agent = await db.get_agent(session.agent_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    if agent.agent_type != AgentType.TOOL_USE or agent_engine(agent) != "cagent":
-        raise HTTPException(status_code=409, detail="manual compression is only supported by the cagent engine")
+    if agent.agent_type != AgentType.TOOL_USE:
+        raise HTTPException(status_code=409, detail="manual compression is only supported for tool_use sessions")
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -821,7 +816,7 @@ async def post_message(
         raise HTTPException(status_code=400, detail=str(e))
     if not body.content.strip() and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
-    overrides = await _turn_overrides(db, session, body.turn_overrides)
+    overrides = _turn_overrides(body.turn_overrides)
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -868,7 +863,7 @@ async def retry_from_message(
         raise HTTPException(status_code=400, detail=str(e))
     if not content and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
-    overrides = await _turn_overrides(db, session, body.turn_overrides)
+    overrides = _turn_overrides(body.turn_overrides)
     await db.soft_delete_messages_from(session_id, message_id)
 
     # Drop any in-memory context that still contains the deleted suffix, then

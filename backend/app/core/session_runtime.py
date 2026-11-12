@@ -2,9 +2,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from app.adapters.cagent_adapter import CAgentAdapter
-from app.adapters.openai_tool_use import OpenAIToolUseAdapter
 from app.adapters.registry import AdapterRegistry
-from app.core.attachments import agent_engine
 from app.core.runner import SessionRunner
 from app.core.session_config import ensure_session_config
 from app.core.session_prompt import effective_system_prompt
@@ -42,36 +40,29 @@ def _with_agent_keys(session_config: dict, agent: AgentTemplate, keys) -> dict:
 def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | None = None) -> "BaseAgentAdapter":
     session_config = ensure_session_config(session.id, agent.config)
     if agent.agent_type == AgentType.TOOL_USE:
-        # config.engine selects the agent loop: "cagent" (the default) runs the
-        # CAgent framework loop (persist-first history, paired tool results,
-        # turn-end marks, image input); "legacy" runs the original in-adapter
-        # loop. Both read and write the same persisted history format.
-        engine = agent_engine(agent)
-        if engine == "cagent":
-            config = _with_agent_keys(session_config, agent, (
-                "max_steps", "compression_token_threshold", "compression_turn_threshold",
-                "turn_compression_tool_call_threshold", "turn_compression_instruction",
-                "turn_compression_marker",
-                "compression_instruction", "compression_model", "compression_send_tools",
-                "model_params", "compression_model_params",
-                "vision", "image_detail", "tool_image_limit", "tool_image_mode",
-                "step_reminder_at", "step_reminder", "tool_limit_at", "tool_limit_message"))
-            return CAgentAdapter(
-                db=db,
-                tool_names=agent.tool_names,
-                model=agent.openai_model,
-                base_url=agent.openai_base_url,
-                session_id=session.id,
-                working_dir=session.working_dir,
-                config=config,
-            )
-        return OpenAIToolUseAdapter(
+        # Tool-use sessions run on the CAgent framework loop. The "legacy"
+        # engine is gone; an old config.engine value is ignored (both wrote
+        # the same history format, so such sessions continue as they are).
+        engine = (agent.config or {}).get("engine")
+        if engine not in (None, "cagent"):
+            logger.warning("agent=%s config.engine=%r is no longer supported; using cagent",
+                           agent.id, engine)
+        config = _with_agent_keys(session_config, agent, (
+            "max_steps", "compression_token_threshold", "compression_turn_threshold",
+            "turn_compression_tool_call_threshold", "turn_compression_instruction",
+            "turn_compression_marker",
+            "compression_instruction", "compression_model", "compression_send_tools",
+            "model_params", "compression_model_params",
+            "vision", "image_detail", "tool_image_limit", "tool_image_mode",
+            "step_reminder_at", "step_reminder", "tool_limit_at", "tool_limit_message"))
+        return CAgentAdapter(
+            db=db,
             tool_names=agent.tool_names,
             model=agent.openai_model,
             base_url=agent.openai_base_url,
             session_id=session.id,
             working_dir=session.working_dir,
-            config=_with_agent_keys(session_config, agent, ("model_params",)),
+            config=config,
         )
     raise RuntimeError(f"unsupported agent_type: {agent.agent_type}")
 
@@ -90,10 +81,8 @@ async def build_runner(
     )
     adapter = build_adapter(session, agent, db)
     adapter.system_prompt_id = session.system_prompt_id
+    # The CAgent store reads the persisted history itself on every turn.
     await adapter.start(session.system_prompt_snapshot or "")
-    history = await db.get_messages(session.id)
-    if history:
-        await adapter.restore_history(history)
     runner = SessionRunner(session.id, adapter, db)
     await runner.start()
     registry.register(session.id, runner)

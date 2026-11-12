@@ -1,11 +1,11 @@
-"""Live WS confirm-flow test for BOTH tool-use engines (legacy + cagent).
+"""Live WS confirm-flow test for the tool-use (CAgent) engine with a real model.
 
-Against a running gateway (DB_TYPE=mock is fine). For each engine: create a
-session, send a prompt that triggers the gated write tool, approve the confirm,
-and assert the turn completes with a persisted, pairable history.
+Against a running gateway (DB_TYPE=mock is fine): create a session, send a
+prompt that triggers the gated write tool, approve the confirm, and assert the
+turn completes with a persisted, pairable history.
 
     DB_TYPE=mock python -m uvicorn app.main:app --port 12598   # in another shell
-    python scripts/test_engines_ws_flow.py
+    python scripts/test_ws_confirm_flow_live.py
 """
 import asyncio
 import json
@@ -28,15 +28,12 @@ PROMPT = (
 
 async def run_engine(c: httpx.AsyncClient, engine: str) -> bool:
     wd = Path(tempfile.mkdtemp(prefix=f"augentia-{engine}-"))
-    # Explicit engine per run: the default is cagent, so the legacy run must
-    # opt in.
     r = await c.post(f"{BASE}/agents", json={
         "name": f"ws-flow-{engine}",
         "description": f"{engine} engine WS flow test agent",
         "agent_type": "tool_use",
         "system_prompt": "You are a test agent. Use the write tool when asked.",
         "tool_names": ["write", "read"],
-        "config": {"engine": engine},
     })
     r.raise_for_status()
     agent_id = r.json()["id"]
@@ -104,11 +101,11 @@ async def run_engine(c: httpx.AsyncClient, engine: str) -> bool:
 
 async def main() -> int:
     async with httpx.AsyncClient(trust_env=False, timeout=30) as c:
-        results = [await run_engine(c, engine) for engine in ("legacy", "cagent")]
+        results = [await run_engine(c, "cagent")]
     if all(results):
-        print("ALL ENGINE WS FLOWS PASSED")
+        print("WS CONFIRM FLOW PASSED")
         return 0
-    print("SOME ENGINE WS FLOWS FAILED")
+    print("WS CONFIRM FLOW FAILED")
     return 1
 
 

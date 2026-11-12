@@ -34,15 +34,13 @@ export interface AgentTemplate {
   // map overriding each tool's backend default; other keys reserved for future use.
   config: {
     tool_approvals?: Record<string, boolean>;
-    // Agent loop implementation; the backend defaults to "cagent".
-    engine?: "cagent" | "legacy";
-    // Accept image input (cagent engine only; the model must support vision).
+    // Accept image input (the model must support vision).
     vision?: boolean;
     image_detail?: ImageDetail;
     // Extra Chat Completions parameters merged into every model request
     // (temperature, reasoning_effort, max_tokens, extra_body, ...).
     model_params?: Record<string, unknown>;
-    // Summarizer-only replacement for model_params (CAgent engine).
+    // Summarizer-only replacement for model_params.
     compression_model_params?: Record<string, unknown>;
     // Append the runtime context block (OS, cwd, session start time, shell
     // notes) to the system prompt when a session starts. Defaults to true.
@@ -68,7 +66,7 @@ export interface ImageRef {
 
 export function agentAcceptsImages(agent: AgentTemplate | null | undefined): boolean {
   if (!agent) return false;
-  return (agent.config.engine ?? "cagent") === "cagent" && agent.config.vision === true;
+  return agent.config.vision === true;
 }
 
 export type SessionCreateMode =

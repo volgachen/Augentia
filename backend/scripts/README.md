@@ -23,12 +23,12 @@ Each exits 0 on success, nonzero on failure — so they compose in CI or a shell
 | `test_tool_bash.py` | `bash` tool branches: normal, timeout, truncation, background | none |
 | `test_tool_read.py` | `read` tool branches: full, offset, limit, truncation, missing file | none |
 | `test_tool_edit.py` | `write` + `edit` branches: create/overwrite, unique/replace_all/rejections | none |
-| `test_adapter_tool_use.py` | `OpenAIToolUseAdapter` lifecycle in isolation, with tool calls | `OPENAI_*` in `.env` |
 | `test_spawn_parent.py` | `parent_session_id`: persistence, source working dir, unknown parent → 404 | none (TestClient + mock DB) |
 | `test_tool_subagent.py` | `subagent` tool: git worktree creation + non-git fallback, child spawn through the router | `git` in PATH (TestClient + temp SQLite) |
 | `test_multimodal.py` | Image input: attachment store, per-turn validation, CAgent turns with images, HTTP upload/messages/retry/diverge | none (TestClient + temp SQLite, scripted model) |
-| `test_tool_images.py` | Images in tool results via `read`: tool output, model input, events, storage, vision off, `tool_image_limit`, `tool_image_mode`, interleaved text/images, legacy fallback | none (temp SQLite, scripted model) |
-| `test_cagent_adapter.py` | CAgent engine: confirm approve/deny, runner status, cancel pairing, legacy history repair, error path | none (mock DB, scripted model) |
+| `test_tool_images.py` | Images in tool results via `read`: tool output, model input, events, storage, vision off, `tool_image_limit`, `tool_image_mode`, interleaved text/images | none (temp SQLite, scripted model) |
+| `test_cagent_adapter.py` | CAgent engine: confirm approve/deny, runner status, cancel pairing, repair of old (legacy-engine) history, error path | none (mock DB, scripted model) |
+| `test_turn_overrides.py` | `turn_overrides` on POST /messages and /retry: validation, one-turn scope, null switches off, recorded on the user row | none (TestClient + temp SQLite, scripted model) |
 
 In-process scripts (TestClient / ASGITransport) call `_common.use_isolated_state()`
 before importing the app, so they never write into the database named in `backend/.env`.
@@ -37,7 +37,7 @@ before importing the app, so they never write into the database named in `backen
 
 | Script | What it checks |
 |---|---|
-| `test_engines_ws_flow.py` | Both engines (legacy + cagent) through the WS tool-confirm flow |
+| `test_ws_confirm_flow_live.py` | The WS tool-confirm flow with a real model |
 | `test_vision_live.py` | Upload a generated PNG, send it over WS, the model must name its colour; refs persisted |
 | `test_tool_images_live.py` | A `read` agent opens a PNG; the model must name its colour (both `tool_image_mode`s); vision-off drops the image |
 

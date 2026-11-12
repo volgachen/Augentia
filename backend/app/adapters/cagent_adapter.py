@@ -1,4 +1,4 @@
-"""CAgent-backed tool-use adapter: same contract as OpenAIToolUseAdapter.
+"""CAgent-backed tool-use adapter: the engine behind every tool_use session.
 
 The agent loop runs on CAgent's ``run_turn`` (persist-first history, paired
 tool results, cooperative interruption, turn-end marks). This adapter bridges
@@ -10,12 +10,12 @@ it onto Augentia's adapter/stream contract:
   ``gate_tool_call``: permission policy, human confirmation via TOOL_CONFIRM +
   a Future resolved by ``resolve_decision``, and supplementary instructions
   queued on ``ctx.pending_messages``.
-- ``on_event`` (step_end) turns saved messages into the same event stream the
-  legacy adapter emits: ASSISTANT_MESSAGE / TEXT / TOOL_MESSAGE / TOOL_RESULT.
-  The assistant message is announced from the gate before its first tool call
-  so the confirm panel appears in the same order as before.
-- The adapter persists its own messages through AugentiaStore, so the runner
-  skips its second-write persistence path (``persists_own_messages``).
+- ``on_event`` (step_end) turns saved messages into the event stream clients
+  read: ASSISTANT_MESSAGE / TEXT / TOOL_MESSAGE / TOOL_RESULT. The assistant
+  message is announced from the gate before its first tool call so the confirm
+  panel appears before the call runs.
+- The adapter persists its own messages through AugentiaStore and broadcasts
+  each turn's USER event itself; the runner only relays events.
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None
         response = await client.chat.completions.create(**call_kwargs)
         latency_ms = round((time.monotonic() - started) * 1000)
         # Some OpenAI-compatible gateways hand back a raw string body instead
-        # of a ChatCompletion; fail loudly (same guard as the legacy adapter).
+        # of a ChatCompletion; fail loudly.
         if not hasattr(response, "choices"):
             raise RuntimeError(
                 "LLM endpoint did not return a Chat Completions response. Check "
@@ -171,10 +171,7 @@ def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None
 
 class CAgentAdapter(BaseAgentAdapter):
     # The adapter (via AugentiaStore) is the single writer of conversation
-    # rows; the runner must not double-persist from the event stream.
-    persists_own_messages = True
-    # ...and broadcasts the turn's USER event itself, carrying the saved row id.
-    emits_user_event = True
+    # rows; the runner only relays its events.
 
     def __init__(
         self,
@@ -378,7 +375,7 @@ class CAgentAdapter(BaseAgentAdapter):
         # Recorded on the turn's user row as metadata.turn_overrides.
         self._store.pending_turn_overrides = overrides
         self._events = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
-        # The runner leaves the USER broadcast to us (emits_user_event): CAgent
+        # The runner leaves the USER broadcast to us: CAgent
         # saves the user row inside run_turn, and only then is its id known.
         self._user_announced = False
 
@@ -629,7 +626,7 @@ class CAgentAdapter(BaseAgentAdapter):
         arguments = tool_call.get("arguments") or {}
 
         # Announce the assistant message before its first tool call so the
-        # confirm panel appears in the same order the legacy adapter produced.
+        # confirm panel shows the model's text above the call it asks about.
         assistant = self._find_call_assistant(ctx, call_id)
         if assistant is not None and assistant["id"] != self._announced_assistant_id:
             await self._announce_assistant(assistant)

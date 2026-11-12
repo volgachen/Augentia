@@ -37,7 +37,6 @@ backend/app/
 │   └── deps.py             # FastAPI dependency injection
 ├── adapters/
 │   ├── base.py             # BaseAgentAdapter interface + StreamEvent types
-│   ├── openai_tool_use.py  # OpenAI tool-calling loop + confirm gate (legacy engine)
 │   ├── cagent_adapter.py   # CAgent-framework engine: event queue + confirm gate
 │   ├── cagent_agent.py     # Per-session dynamic BaseAgent subclass (hooks → adapter)
 │   ├── cagent_store.py     # CAgent Store protocol over IAgentDatabase (+history repair)
@@ -132,7 +131,7 @@ class IAgentDatabase(ABC):
 | PATCH | `/api/v1/sessions/{session_id}` | Rename a session |
 | GET / PUT | `/api/v1/sessions/{session_id}/system-prompt` | Get / replace the session's effective system prompt (PUT: 409 while a turn runs) |
 | GET | `/api/v1/sessions/{session_id}/messages` | Get message history |
-| POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session. Optional `turn_overrides` (cagent engine only) sets `max_steps`, `step_reminder_at`, `step_reminder`, `tool_limit_at`, `tool_limit_message` for this turn only (`null` turns `step_reminder_at` / `tool_limit_at` off); recorded on the user row as `metadata.turn_overrides` |
+| POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session. Optional `turn_overrides` sets `max_steps`, `step_reminder_at`, `step_reminder`, `tool_limit_at`, `tool_limit_message` for this turn only (`null` turns `step_reminder_at` / `tool_limit_at` off); recorded on the user row as `metadata.turn_overrides` |
 | POST | `/api/v1/sessions/{session_id}/messages/{message_id}/retry` | Rewrite from a user message: delete it and everything after, then send the edited text; accepts `turn_overrides` too (not inherited from the edited message) |
 | GET | `/api/v1/sessions/{session_id}/tasks` | Get the session's task list |
 | DELETE | `/api/v1/sessions/{session_id}` | Terminate a session |
@@ -173,7 +172,7 @@ Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 
 
 - 图片字节存放在 `AUGENTIA_HOME/attachments/`，按 sha256 命名（相同图片自动去重）；格式按文件头判定，仅接受 png/jpeg/webp/gif，大小上限默认 10MB（`AUGENTIA_ATTACHMENT_MAX_BYTES`）。
 - 消息历史只存引用：user 行的 `metadata.images = [{"ref": "att:<sha256>", "detail"?}]`，文本 `content` 保持纯文本。每次调用模型前，CAgent 引擎通过 `resolve_image` 把引用解析为 data URL（同一轮内缓存）；历史中的图片在后续轮次仍会发送，直到压缩边界之后。
-- 只有 `config.engine` 为 `cagent` 且 `config.vision` 为 true 的 agent 接受图片；其余情况 HTTP 返回 400、WS 返回 `error` 帧，且不会开始新的一轮。可选 `config.image_detail`（`auto`/`low`/`high`）作为默认 detail。
+- 只有 `config.vision` 为 true 的 agent 接受图片；其余情况 HTTP 返回 400、WS 返回 `error` 帧，且不会开始新的一轮。可选 `config.image_detail`（`auto`/`low`/`high`）作为默认 detail。
 - 编辑重发（retry）默认保留原消息的图片；分叉（diverge）复制图片引用。第一版不支持跨会话传图。
 
 #### 工具返回图片
@@ -182,13 +181,13 @@ Session WebSocket 使用 JSON 消息通信。服务端事件通常包含 `type` 
 - 图文交错：`ToolOutput.interleaved(["第 1 页：", ToolImage(...), "第 2 页：", ToolImage(...)])`，每张图记录 `at`（在 `text` 中的字符偏移），经 CAgent 交错 `ToolResult` 交给框架，模型看到的顺序与列表一致；`metadata.images` 与 `TOOL_RESULT` 事件里的引用带 `at`，前端据此把缩略图插在结果文本对应位置。vision 关闭或存储拒收时，该图原位置留下 `[image omitted]`。`tool_image_mode=user_message` 下图片集中移到后续 user 消息，交错顺序不保留。
 - CAgent 引擎把图片字节存入附件存储，以 CAgent `ToolResult(images=[...])` 交给框架：tool 行 `metadata.images` 只存引用，`TOOL_RESULT` 事件带 `images` 字段。发给模型时图片在 tool 消息内（`[文本, image_url]`）。
 - agent 配置：`vision` 关闭时工具图片被丢弃并在文本中注明；`tool_image_limit`（默认 3，`null` 为全部）只把最近 N 张工具图片发给模型，更早的替换为文字说明（存储不删）；`tool_image_mode` 为 `inline`（默认，图片放在 tool 消息内，Chat Completions 的公开 schema 只允许文本，但很多网关接受）或 `user_message`（图片移到这批工具结果之后的一条 user 消息，适用于严格按 schema 校验的端点）。
-- legacy 引擎只保留文本并注明图片被省略。浏览器截图（node_repl 的 `emitImage`）尚未接入。
+- 浏览器截图（node_repl 的 `emitImage`）尚未接入。
 
 ### 4. Agent 适配器模式
 
 不同类型的 Agent 通过 `BaseAgentAdapter` 接入系统，并由 `SessionRunner` 统一调度。
 
-- **Tool-use Agent**：通过 OpenAI 兼容接口进行工具调用循环，解析模型返回的 `tool_calls`，并在执行需要确认的工具前通过 `tool_confirm` 事件等待人工批准。`config.engine` 选择循环实现：`cagent`（默认，基于 CAgent 框架的 `run_turn`：落库优先的历史、配对工具结果、协作式打断、轮末 turn_end/compression 记账、图片输入；压缩阈值默认关闭，可通过 `config.compression_token_threshold` / `compression_turn_threshold` / `max_steps` 开启；`config.turn_compression_tool_call_threshold` 开启单轮压缩：一轮工具调用次数达到该值时，本轮消息在模型上下文中被一条 turn_summary 摘要替代；`config.max_steps` 限制一轮调用模型的次数，`config.step_reminder_at` 设置后，从第 N 次调用模型起，每一步最后一个工具结果末尾附上 `config.step_reminder`（默认“你已经工作足够久了，该休息了。”；可写 `{remain_steps_to_limit}`、`{remain_steps_to_max}`、`{step}` 占位符，分别为到 `tool_limit_at` / `max_steps` 前剩余的步数和已调用模型的次数），提示模型在被截停前收尾；`config.tool_limit_at` 设置后，从第 N 次调用模型起仍调用模型，但工具调用一律不执行（也不进入人工确认），每个都返回 `config.tool_limit_message`，模型只能回复收尾，`max_steps` 仍是硬上限）或 `legacy`（适配器内自研循环，不支持图片）。两种引擎读写同一套消息行格式，可在同一部署中共存与切换；`mark` 角色行为框架内部记账，消息接口对客户端过滤。
+- **Tool-use Agent**：通过 OpenAI 兼容接口进行工具调用循环，解析模型返回的 `tool_calls`，并在执行需要确认的工具前通过 `tool_confirm` 事件等待人工批准。循环基于 CAgent 框架的 `run_turn`（落库优先的历史、配对工具结果、协作式打断、轮末 turn_end/compression 记账、图片输入；压缩阈值默认关闭，可通过 `config.compression_token_threshold` / `compression_turn_threshold` / `max_steps` 开启；`config.turn_compression_tool_call_threshold` 开启单轮压缩：一轮工具调用次数达到该值时，本轮消息在模型上下文中被一条 turn_summary 摘要替代；`config.max_steps` 限制一轮调用模型的次数，`config.step_reminder_at` 设置后，从第 N 次调用模型起，每一步最后一个工具结果末尾附上 `config.step_reminder`（默认“你已经工作足够久了，该休息了。”；可写 `{remain_steps_to_limit}`、`{remain_steps_to_max}`、`{step}` 占位符，分别为到 `tool_limit_at` / `max_steps` 前剩余的步数和已调用模型的次数），提示模型在被截停前收尾；`config.tool_limit_at` 设置后，从第 N 次调用模型起仍调用模型，但工具调用一律不执行（也不进入人工确认），每个都返回 `config.tool_limit_message`，模型只能回复收尾，`max_steps` 仍是硬上限）。原先的 `legacy` 引擎（适配器内自研循环）已移除：`config.engine` 只能省略或写 `cagent`，保存 agent 时其他值返回 400；早已存在的配置里若残留其他值，启动会话时忽略并按 cagent 运行。legacy 引擎写下的历史（拆开的 tool_call/tool 行、纯文本 agent 行）仍可读取，CAgent store 读取时会修复配对。`mark` 角色行为框架内部记账，消息接口对客户端过滤。
 - **Runtime Context 开关**：`config.append_runtime_context`（默认 `true`）决定开 session 时是否在 system prompt 末尾拼接 runtime 信息（操作系统、工作目录、session 开始时间、Windows 下 bash 可执行文件等）。设为 `false` 时最终 prompt 只包含 agent 基础 prompt 与 session 附加 prompt，适用于需要干净固定 prompt 的场景。该开关在 session 启动快照（`system_prompt_snapshot`）生成时生效，已有会话不受影响。
 
 ---

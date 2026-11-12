@@ -9,8 +9,6 @@ Covers:
   - busy session (turn in flight) -> 409
   - no live runner: snapshot persisted, rehydrated runner uses it
   - adapter without in-place support: runner is dropped and rebuilt
-  - legacy OpenAIToolUseAdapter.set_system_prompt swaps/inserts/drops the
-    leading system message
   - config.append_runtime_context: the runtime context block is appended by
     default and left out when the agent sets it to false
 
@@ -161,22 +159,6 @@ def test_http() -> None:
         cagent_module._make_model = original
 
 
-async def test_legacy_adapter() -> None:
-    section("legacy adapter: set_system_prompt")
-    from app.adapters.openai_tool_use import OpenAIToolUseAdapter
-
-    a = OpenAIToolUseAdapter(tool_names=[], session_id="s", config={})
-    a._messages = [{"role": "system", "content": "old"}, {"role": "user", "content": "hi"}]
-    await a.set_system_prompt("new")
-    check(a._messages == [{"role": "system", "content": "new"}, {"role": "user", "content": "hi"}],
-          "replaces the leading system message")
-    a._messages = [{"role": "user", "content": "hi"}]
-    await a.set_system_prompt("added")
-    check(a.current_system_prompt() == "added" and len(a._messages) == 2, "inserts when missing")
-    await a.set_system_prompt("")
-    check(a._messages == [{"role": "user", "content": "hi"}], "empty prompt drops it")
-
-
 def test_append_runtime_context() -> None:
     section("config.append_runtime_context")
     from app.core.session_prompt import effective_system_prompt, runtime_context_prompt
@@ -198,7 +180,6 @@ def test_append_runtime_context() -> None:
 
 if __name__ == "__main__":
     test_append_runtime_context()
-    asyncio.run(test_legacy_adapter())
     test_http()
     if FAILURES:
         print(f"\n{len(FAILURES)} CHECK(S) FAILED")

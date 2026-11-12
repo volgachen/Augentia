@@ -9,7 +9,7 @@ Covers:
     turn only; null switches a configured setting off for the turn; the user
     row records metadata.turn_overrides
   - HTTP: POST /messages and /retry accept them (202) and the turn honors
-    them; bad values -> 400; legacy-engine sessions -> 400
+    them; bad values -> 400
 
 Run from backend/:  python scripts/test_turn_overrides.py
 """
@@ -272,10 +272,6 @@ def test_http() -> None:
             check(any(m["id"] == plain["id"] for m in msgs),
                   "rejected retry deleted nothing")
 
-            legacy_sid = make_session(make_agent("ov-legacy", {"engine": "legacy"}))
-            r = c.post(f"/api/v1/sessions/{legacy_sid}/messages",
-                       json={"content": "go", "turn_overrides": {"max_steps": 2}})
-            check(r.status_code == 400 and "cagent" in r.json()["detail"], "legacy engine -> 400")
     finally:
         cagent_module._make_model = original
 

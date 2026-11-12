@@ -1,8 +1,8 @@
 """Offline test for config.model_params / compression_model_params.
 
-Drives both engines with a fake AsyncOpenAI client that records the
+Drives the CAgent engine with a fake AsyncOpenAI client that records the
 chat.completions.create kwargs, so no network is needed. Checks that:
-- model_params is merged into every request of the CAgent and legacy engines;
+- model_params is merged into every model request;
 - reserved keys (model, messages, tools, tool_choice, ...) are rejected at start;
 - the summarizer uses compression_model_params when set, model_params otherwise,
   and still sends tool_choice="none" (params cannot override it).
@@ -24,7 +24,6 @@ from _common import fail, ok, section, use_isolated_state
 use_isolated_state("augentia-model-params-")
 
 import app.adapters.cagent_adapter as cagent_adapter_module  # noqa: E402
-import app.adapters.openai_tool_use as legacy_module  # noqa: E402
 from app.adapters.model_params import validate_model_params  # noqa: E402
 from app.adapters.registry import AdapterRegistry  # noqa: E402
 from app.core.session_runtime import build_runner  # noqa: E402
@@ -174,38 +173,6 @@ async def test_cagent_params(db, wd) -> bool:
     return True
 
 
-async def test_legacy_params(db, wd) -> bool:
-    section("legacy engine: model_params reach every request")
-    FakeClient.calls = []
-    registry = AdapterRegistry()
-    agent = await db.create_agent(AgentTemplate(
-        name="params-legacy", description="x", agent_type=AgentType.TOOL_USE,
-        system_prompt="You are a test agent.", tool_names=TOOL_NAMES,
-        config={"engine": "legacy", "model_params": {"temperature": 0.9, "top_p": 0.5}},
-        openai_model="main-model"))
-    (wd / "legacy").mkdir(parents=True, exist_ok=True)
-    session = await db.create_session(agent.id, working_dir=str(wd / "legacy"),
-                                      session_id="s-params-legacy")
-    runner = await build_runner(session, agent, db, registry)
-    try:
-        async def consume():
-            async with runner.subscribe() as events:
-                return await collect_until_done(events)
-        await runner.submit("hello")
-        await asyncio.wait_for(consume(), 15)
-    finally:
-        await registry.remove(session.id)
-    if not FakeClient.calls:
-        fail("legacy engine made no model call")
-        return False
-    call = FakeClient.calls[0]
-    if call.get("temperature") != 0.9 or call.get("top_p") != 0.5 or call["model"] != "main-model":
-        fail(f"legacy request params wrong: {sorted(call.items())}")
-        return False
-    ok("legacy request carries model_params")
-    return True
-
-
 def test_agent_api_validation() -> bool:
     section("REST: agents API rejects bad model_params with 400")
     from fastapi.testclient import TestClient
@@ -231,14 +198,24 @@ def test_agent_api_validation() -> bool:
         if r.status_code != 400:
             fail(f"update with reserved key -> {r.status_code}, expected 400")
             return False
-    ok("create/update with reserved or non-object params -> 400; valid params -> 201")
+        for config in ({"engine": "legacy"}, {"engine": "other"}):
+            r = c.post("/api/v1/agents", json={**base, "config": config})
+            if r.status_code != 400 or "legacy" not in r.json()["detail"]:
+                fail(f"{config} -> {r.status_code}, expected 400")
+                return False
+        r = c.post("/api/v1/agents", json={**base, "name": "params-api-cagent",
+                                           "config": {"engine": "cagent"}})
+        if r.status_code != 201:
+            fail(f"engine=cagent -> {r.status_code} {r.text}")
+            return False
+    ok("create/update with reserved or non-object params -> 400; valid params -> 201; "
+       "config.engine other than cagent -> 400")
     return True
 
 
 async def main() -> int:
-    originals = (cagent_adapter_module.AsyncOpenAI, legacy_module.AsyncOpenAI)
+    original = cagent_adapter_module.AsyncOpenAI
     cagent_adapter_module.AsyncOpenAI = FakeClient
-    legacy_module.AsyncOpenAI = FakeClient
     try:
         db = MockMemoryDatabase()
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,11 +223,10 @@ async def main() -> int:
             results = [
                 await test_validation(),
                 await test_cagent_params(db, wd / "cagent"),
-                await test_legacy_params(db, wd),
             ]
         results.append(test_agent_api_validation())
     finally:
-        cagent_adapter_module.AsyncOpenAI, legacy_module.AsyncOpenAI = originals
+        cagent_adapter_module.AsyncOpenAI = original
     if all(results):
         ok("ALL MODEL PARAMS TESTS PASSED")
         return 0

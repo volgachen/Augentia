@@ -44,6 +44,12 @@ def _validate_tools(names: list[str]) -> None:
 
 
 def _validate_config(config: dict) -> None:
+    # Only the CAgent engine is left; the key may still be written as "cagent".
+    if config.get("engine", "cagent") != "cagent":
+        raise HTTPException(
+            status_code=400,
+            detail="config.engine: the legacy engine has been removed; omit the key or use \"cagent\"",
+        )
     approvals = config.get("tool_approvals", {})
     if not isinstance(approvals, dict):
         raise HTTPException(

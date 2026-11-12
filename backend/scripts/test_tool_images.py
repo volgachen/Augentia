@@ -11,7 +11,6 @@ no network. Covers:
     tool images, tool_image_mode=user_message relocates them, image_detail
   - interleaved output: order seen by the model, stored "at" offsets, limit,
     vision off / rejected images leave markers, user_message relocation
-  - legacy engine: ToolOutput degrades to text instead of crashing the loop
 
 Run from backend/:  python scripts/test_tool_images.py
 """
@@ -22,7 +21,6 @@ import struct
 import sys
 import zlib
 from pathlib import Path
-from types import SimpleNamespace
 
 import _common  # noqa: F401 — sys.path + logging
 
@@ -32,7 +30,6 @@ from _common import ok, fail, section  # noqa: E402
 
 from app.adapters.base import StreamEventType  # noqa: E402
 from app.adapters.cagent_adapter import CAgentAdapter  # noqa: E402
-from app.adapters.openai_tool_use import OpenAIToolUseAdapter  # noqa: E402
 from app.adapters.tools.base import ToolImage, ToolOutput  # noqa: E402
 from app.adapters.tools.registry import load_tools  # noqa: E402
 from app.core import attachments  # noqa: E402
@@ -329,45 +326,6 @@ async def test_interleaved_engine(h: Harness) -> None:
         ReadTool.execute = original
 
 
-# ------------------------------------------------------------ legacy
-
-class _FakeCompletions:
-    """Minimal AsyncOpenAI stand-in: one read call, then a final answer."""
-
-    def __init__(self):
-        self.requests: list[list[dict]] = []
-
-    async def create(self, **kwargs):
-        self.requests.append(kwargs["messages"])
-        if len(self.requests) == 1:
-            call = SimpleNamespace(id="legacy-read", type="function",
-                                   function=SimpleNamespace(name="read", arguments=json.dumps({"file_path": "red.png"})))
-            msg = SimpleNamespace(content=None, tool_calls=[call])
-            msg.model_dump = lambda **_: {"role": "assistant", "content": None, "tool_calls": [{
-                "id": "legacy-read", "type": "function",
-                "function": {"name": "read", "arguments": json.dumps({"file_path": "red.png"})}}]}
-        else:
-            msg = SimpleNamespace(content="done", tool_calls=None)
-            msg.model_dump = lambda **_: {"role": "assistant", "content": "done"}
-        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=None)
-
-
-async def test_legacy() -> None:
-    section("legacy engine: ToolOutput degrades to text")
-    adapter = OpenAIToolUseAdapter(tool_names=["read"], session_id="legacy", working_dir=str(WORKDIR),
-                                   config={"tool_approvals": {"read": False}})
-    await adapter.start("test")
-    fake = _FakeCompletions()
-    adapter._client = SimpleNamespace(chat=SimpleNamespace(completions=fake))
-    await adapter.send("read it")
-    events = [e async for e in adapter.stream()]
-    check(not any(e.type == StreamEventType.ERROR for e in events), "no error in the legacy loop")
-    tool_msg = [m for m in fake.requests[1] if m.get("role") == "tool"][0]
-    check(isinstance(tool_msg["content"], str) and "legacy engine" in tool_msg["content"],
-          "image replaced by a text note")
-    await adapter.stop()
-
-
 async def main() -> int:
     WORKDIR.mkdir(parents=True, exist_ok=True)
     (WORKDIR / "red.png").write_bytes(make_png((230, 20, 20)))
@@ -384,7 +342,6 @@ async def main() -> int:
     await test_engine(harness)
     await test_interleaved_unit()
     await test_interleaved_engine(harness)
-    await test_legacy()
     if FAILURES:
         print(f"\n{len(FAILURES)} CHECK(S) FAILED")
         return 1

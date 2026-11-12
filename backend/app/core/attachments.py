@@ -135,12 +135,8 @@ def data_url(ref: str) -> str:
 
 # ---- turn-level validation ----
 
-def agent_engine(agent: AgentTemplate) -> str:
-    return (agent.config or {}).get("engine", "cagent")
-
-
 def agent_supports_images(agent: AgentTemplate) -> bool:
-    return agent_engine(agent) == "cagent" and bool((agent.config or {}).get("vision"))
+    return bool((agent.config or {}).get("vision"))
 
 
 def normalize_turn_images(agent: AgentTemplate, images: Any) -> list[dict[str, str]]:
@@ -155,8 +151,6 @@ def normalize_turn_images(agent: AgentTemplate, images: Any) -> list[dict[str, s
         return []
     if not isinstance(images, list):
         raise AttachmentError("images must be a list")
-    if agent_engine(agent) != "cagent":
-        raise AttachmentError("image input requires the cagent engine")
     if not (agent.config or {}).get("vision"):
         raise AttachmentError("this agent does not accept images (config.vision is off)")
     if len(images) > MAX_IMAGES_PER_TURN:

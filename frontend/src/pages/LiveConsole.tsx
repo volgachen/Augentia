@@ -121,7 +121,7 @@ export default function LiveConsole() {
   }, []);
 
   // Image input: only offered when the session's agent accepts images
-  // (cagent engine + config.vision); the backend enforces the same rule.
+  // (config.vision); the backend enforces the same rule.
   // Draft images and the hint are scoped to the session they were added in.
   const attachments = useImageAttachments(sessionId);
   const [agent, setAgent] = useState<AgentTemplate | null>(null);
@@ -142,10 +142,6 @@ export default function LiveConsole() {
   // A previous session's agent must not decide the current composer.
   const canAttachImages = agent?.id === agentId && agentAcceptsImages(agent);
   const hintText = attachHint && attachHint.scope === sessionId ? attachHint.text : null;
-  // Manual in-place compression is a CAgent feature; legacy sessions get a
-  // disabled button. Unknown until the agent loads.
-  const agentLoaded = agent?.id === agentId;
-  const isCagent = agentLoaded && (agent?.config?.engine ?? "cagent") === "cagent";
   const note = compressNote && compressNote.scope === sessionId ? compressNote : null;
 
   const loadCompressed = useCallback(
@@ -272,7 +268,7 @@ export default function LiveConsole() {
   };
 
   const handleCompress = async () => {
-    if (!sessionId || generating || compressing || !isCagent) return;
+    if (!sessionId || generating || compressing) return;
     const hours = compressHours.trim() ? Number(compressHours) : undefined;
     if (hours !== undefined && !(Number.isFinite(hours) && hours > 0)) {
       setCompressNote({ scope: sessionId, ok: false, text: "小时数需为正数" });
@@ -507,47 +503,36 @@ export default function LiveConsole() {
                   <button
                     type="button"
                     onClick={handleCompress}
-                    disabled={generating || compressing || !isCagent || events.length === 0}
-                    title={
-                      !agentLoaded
-                        ? undefined
-                        : !isCagent
-                          ? "Manual compression is only supported by the cagent engine"
-                          : "Summarize history through the last completed turn, in place (or only the last N hours, keeping earlier history). Original messages stay visible but the model sees only the summary."
-                    }
+                    disabled={generating || compressing || events.length === 0}
+                    title="Summarize history through the last completed turn, in place (or only the last N hours, keeping earlier history). Original messages stay visible but the model sees only the summary."
                     className="w-full rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
                   >
                     {compressing ? "Compressing…" : "Compress"}
                   </button>
-                  {isCagent && (
-                    <div className="mt-2 flex flex-col gap-1.5">
-                      <label className="flex items-center gap-1.5 text-[11px] text-gray-400">
-                        只压缩最近
-                        <input
-                          type="number"
-                          min={0}
-                          step="any"
-                          value={compressHours}
-                          onChange={(e) => setCompressHours(e.target.value)}
-                          placeholder="全部"
-                          disabled={compressing}
-                          className="w-16 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[11px] text-gray-200 placeholder:text-gray-600"
-                        />
-                        小时
-                      </label>
-                      <textarea
-                        value={compressInstruction}
-                        onChange={(e) => setCompressInstruction(e.target.value)}
-                        placeholder="自定义压缩指令（可选，整个替换默认指令）"
-                        rows={2}
+                  <div className="mt-2 flex flex-col gap-1.5">
+                    <label className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                      只压缩最近
+                      <input
+                        type="number"
+                        min={0}
+                        step="any"
+                        value={compressHours}
+                        onChange={(e) => setCompressHours(e.target.value)}
+                        placeholder="全部"
                         disabled={compressing}
-                        className="w-full resize-y rounded border border-gray-700 bg-gray-900 px-1.5 py-1 text-[11px] text-gray-200 placeholder:text-gray-600"
+                        className="w-16 rounded border border-gray-700 bg-gray-900 px-1.5 py-0.5 text-[11px] text-gray-200 placeholder:text-gray-600"
                       />
-                    </div>
-                  )}
-                  {agentLoaded && !isCagent && (
-                    <p className="mt-1.5 text-[11px] text-gray-500">仅 cagent 引擎支持压缩</p>
-                  )}
+                      小时
+                    </label>
+                    <textarea
+                      value={compressInstruction}
+                      onChange={(e) => setCompressInstruction(e.target.value)}
+                      placeholder="自定义压缩指令（可选，整个替换默认指令）"
+                      rows={2}
+                      disabled={compressing}
+                      className="w-full resize-y rounded border border-gray-700 bg-gray-900 px-1.5 py-1 text-[11px] text-gray-200 placeholder:text-gray-600"
+                    />
+                  </div>
                   {note && (
                     <p className={`mt-1.5 text-[11px] break-words ${note.ok ? "text-emerald-400" : "text-amber-400"}`}>
                       {note.text}

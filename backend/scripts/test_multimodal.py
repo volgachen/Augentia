@@ -127,7 +127,6 @@ def test_turn_validation() -> None:
     )
     rejections = [
         (agent({}), [ref], "vision off"),
-        (agent({"vision": True, "engine": "legacy"}), [ref], "legacy engine"),
         (vision, ["att:" + "0" * 64], "unknown attachment"),
         (vision, ["https://example.com/a.png"], "non-att reference"),
         (vision, [{"ref": ref, "detail": "huge"}], "bad detail"),
@@ -248,10 +247,6 @@ def test_http() -> None:
             r = c.post(f"/api/v1/sessions/{plain_sid}/messages",
                        json={"content": "look", "images": [att["ref"]]})
             check(r.status_code == 400 and "vision" in r.json()["detail"], "vision-off agent rejects images -> 400")
-            legacy_sid = make_session(make_agent({"vision": True, "engine": "legacy"}))
-            r = c.post(f"/api/v1/sessions/{legacy_sid}/messages",
-                       json={"content": "look", "images": [att["ref"]]})
-            check(r.status_code == 400 and "cagent" in r.json()["detail"], "legacy-engine agent rejects images -> 400")
             r = c.post(f"/api/v1/sessions/{plain_sid}/messages", json={"content": "   "})
             check(r.status_code == 400, "empty text without images -> 400")
 

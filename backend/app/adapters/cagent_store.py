@@ -1,13 +1,13 @@
 """CAgent Store protocol bridged onto Augentia's IAgentDatabase.
 
-Row formats stay exactly what the legacy engine persists: agent rows hold
+Row formats are the ones the removed legacy engine also wrote: agent rows hold
 OpenAI-native assistant message JSON in ``content`` (``{"role": "assistant",
 "content": ..., "tool_calls": [{"id", "type", "function": {...}}]}``), tool rows
 hold native tool message JSON (``{"role": "tool", "tool_call_id", "content"}``),
 user rows hold plain text. CAgent's internal tool-call format
 (``{"id", "name", "arguments"}`` with dict arguments) is translated at this
-boundary, so legacy and cagent engines read and write the same history and a
-session can switch engines without migration.
+boundary, so history the legacy engine wrote still reads back without
+migration.
 
 Framework marks (turn_end / compression_started / compression_completed) are
 persisted as ``MessageRole.MARK`` rows whose content is JSON
@@ -31,8 +31,7 @@ per-store (one store per session adapter) and is refreshed on every
 ``list_messages`` repairs incomplete tool history on read (cancelled turns can
 leave an assistant tool_call without its result row): missing results are
 synthesized as ``[result not recorded]`` and legacy split tool_call/tool rows
-are re-paired with synthesized ids — the same repair the legacy adapter's
-``restore_history`` performs at rehydrate time, applied continuously.
+(written by the removed legacy engine) are re-paired with synthesized ids.
 """
 
 from __future__ import annotations

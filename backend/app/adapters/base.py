@@ -1,20 +1,20 @@
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING, AsyncGenerator
+from typing import AsyncGenerator
 from pydantic import BaseModel
-
-if TYPE_CHECKING:
-    from app.models.domain import Message
 
 
 class StreamEventType(str, Enum):
     USER = "user"
     TEXT = "text"
-    # Internal persistence event: data is the raw OpenAI assistant message JSON.
-    # The runner stores it but does not broadcast it to UI subscribers.
+    # data is the raw OpenAI assistant message JSON (content + tool_calls),
+    # already persisted by the adapter; broadcast to UI subscribers.
     ASSISTANT_MESSAGE = "assistant_message"
+    # Not emitted any more; kept because old tool_call rows (from the removed
+    # legacy engine) still replay to clients under this type.
     TOOL_CALL = "tool_call"
-    # Internal persistence event: data is the raw OpenAI tool message JSON.
+    # Internal event: data is the raw OpenAI tool message JSON (already
+    # persisted); the runner does not broadcast it, TOOL_RESULT carries it.
     TOOL_MESSAGE = "tool_message"
     # Emitted before a tool that isn't auto-approved runs; the adapter blocks on
     # a human decision routed back via resolve_decision. data is JSON
@@ -68,16 +68,6 @@ class BaseAgentAdapter(ABC):
     @abstractmethod
     async def stop(self) -> None:
         """终止 Agent，释放所有资源。"""
-
-    async def restore_history(self, messages: "list[Message]") -> None:
-        """Rebuild in-memory conversation state from persisted messages.
-
-        Called when a session is rehydrated after a backend restart (the
-        in-memory runner/adapter is gone but the DB rows survive). Default is a
-        no-op; adapters that keep conversation history in process memory (e.g.
-        OpenAI tool-use) override this so a resumed session isn't amnesiac.
-        """
-        return
 
     async def resolve_decision(self, call_id: str, approved: bool, supplementary_msg: str = "") -> None:
         """Resolve a pending tool-confirm request (see TOOL_CONFIRM).

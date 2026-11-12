@@ -7,7 +7,7 @@ from typing import AsyncIterator
 
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.db.interface import IAgentDatabase
-from app.models.domain import MessageRole, SessionStatus
+from app.models.domain import SessionStatus
 
 logger = logging.getLogger("augentia.runner")
 
@@ -19,10 +19,9 @@ class _InboxItem:
     content: str
     from_session_id: str | None = None
     # Validated image references for this turn ([{"ref", "detail"?}]); routers
-    # check engine/vision support before anything reaches the inbox.
+    # check vision support before anything reaches the inbox.
     images: list[dict] | None = None
-    # Validated per-turn settings (max_steps, step_reminder_at, ...); routers
-    # only accept them for cagent-engine sessions.
+    # Validated per-turn settings (max_steps, step_reminder_at, ...).
     turn_overrides: dict | None = None
     # Set for a manual compression job instead of a user turn: the loop runs
     # adapter.compress() and resolves this future with its result dict.
@@ -146,12 +145,6 @@ class SessionRunner:
         await self._adapter.set_system_prompt(system_prompt)
         self._adapter.system_prompt_id = prompt_id
 
-    def _reply_metadata(self) -> dict | None:
-        # Replies saved here (legacy engine) record the prompt version too;
-        # the CAgent engine's store does the same for the rows it writes.
-        prompt_id = self._adapter.system_prompt_id
-        return {"system_prompt_id": prompt_id} if prompt_id else None
-
     def _remember_confirm(self, event: StreamEvent) -> None:
         # event.data is JSON: {"call_id", "name", "args"}. Key the cache by
         # call_id so a resolved/expired confirm can be dropped individually.
@@ -247,36 +240,15 @@ class SessionRunner:
                 self._turn_task = None
 
     async def _run_turn(self, item: _InboxItem) -> None:
-        # Adapters that persist their own conversation rows (CAgentAdapter,
-        # whose loop writes through its Store) skip the runner's second-write
-        # persistence; the runner only relays their events. The raw content and
-        # sender are still broadcast, and the from-session prefix stays baked
-        # into the delivered text the same way.
-        persists_own = getattr(self._adapter, "persists_own_messages", False)
+        # The adapter (CAgentAdapter) persists every conversation row through
+        # its Store and broadcasts the turn's USER event itself, carrying the
+        # saved row id; the runner relays its events and tracks status. The
+        # from-session prefix stays baked into the delivered text.
         delivered = (
             f"[from-session:{item.from_session_id}] {item.content}"
             if item.from_session_id
             else item.content
         )
-        if not persists_own:
-            user_message = await self._db.add_message(
-                self._session_id,
-                MessageRole.USER,
-                item.content,
-                from_session_id=item.from_session_id,
-                metadata={"images": item.images} if item.images else None,
-            )
-            self._broadcast(StreamEvent(
-                type=StreamEventType.USER, data=delivered,
-                message_id=user_message.id, images=item.images,
-            ))
-        else:
-            if not getattr(self._adapter, "emits_user_event", False):
-                self._broadcast(StreamEvent(
-                    type=StreamEventType.USER, data=delivered, images=item.images,
-                ))
-
-        agent_buf: list[str] = []
         saw_native_messages = False
         errored = False
         awaiting_confirm = False
@@ -307,56 +279,16 @@ class SessionRunner:
                 await self._db.update_session_status(
                     self._session_id, SessionStatus.RUNNING
                 )
-            if persists_own:
-                # The adapter's loop already persisted every row; the runner
-                # only applies the same broadcast suppression rules.
-                if event.type == StreamEventType.ASSISTANT_MESSAGE:
-                    saw_native_messages = True
-                elif event.type == StreamEventType.TEXT and saw_native_messages:
-                    should_broadcast = False
-            elif event.type == StreamEventType.ASSISTANT_MESSAGE:
+            if event.type == StreamEventType.ASSISTANT_MESSAGE:
                 saw_native_messages = True
-                message = await self._db.add_message(
-                    self._session_id, MessageRole.AGENT, event.data,
-                    metadata=self._reply_metadata(),
-                )
-                event.message_id = message.id
-                agent_buf.clear()
-            elif event.type == StreamEventType.TOOL_MESSAGE:
-                saw_native_messages = True
-                message = await self._db.add_message(
-                    self._session_id, MessageRole.TOOL, event.data
-                )
-                event.message_id = message.id
-            elif event.type == StreamEventType.TEXT:
-                if saw_native_messages:
-                    should_broadcast = False
-                else:
-                    agent_buf.append(event.data)
-            elif event.type == StreamEventType.TOOL_CALL:
-                if saw_native_messages:
-                    should_broadcast = False
-                else:
-                    message = await self._db.add_message(
-                        self._session_id, MessageRole.TOOL_CALL, event.data
-                    )
-                    event.message_id = message.id
-            elif event.type == StreamEventType.TOOL_RESULT:
-                if not saw_native_messages:
-                    message = await self._db.add_message(
-                        self._session_id, MessageRole.TOOL, event.data
-                    )
-                    event.message_id = message.id
+            elif event.type == StreamEventType.TEXT and saw_native_messages:
+                # The assistant message already carries this text.
+                should_broadcast = False
             elif event.type == StreamEventType.ERROR:
                 errored = True
             if should_broadcast:
                 self._broadcast(event)
 
-        if agent_buf and not saw_native_messages:
-            await self._db.add_message(
-                self._session_id, MessageRole.AGENT, "\n".join(agent_buf),
-                metadata=self._reply_metadata(),
-            )
         if errored:
             await self._db.update_session_status(self._session_id, SessionStatus.ERROR)
         else:
