@@ -33,7 +33,7 @@ from openai import AsyncOpenAI
 from cagent import Image, ToolResult, relocate_tool_images
 
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
-from app.adapters.cagent_agent import make_agent_class
+from app.adapters.cagent_agent import make_agent_class, with_turn_overrides
 from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
 from app.adapters.model_params import resolve_model_params
 from app.adapters.tools.base import (  # noqa: F401 — BaseTool for type hints
@@ -211,6 +211,7 @@ class CAgentAdapter(BaseAgentAdapter):
         self._pending: str | None = None
         self._pending_images: list[dict] | None = None
         self._pending_from_session: str | None = None
+        self._pending_overrides: dict | None = None
         self._pending_confirms: dict[str, tuple[asyncio.Future, str]] = {}
         self._events: asyncio.Queue | None = None
         self._turn_task: asyncio.Task | None = None
@@ -351,9 +352,13 @@ class CAgentAdapter(BaseAgentAdapter):
 
         return recording
 
-    async def send(self, message: str, images: list[dict] | None = None) -> None:
+    async def send(self, message: str, images: list[dict] | None = None,
+                   turn_overrides: dict | None = None) -> None:
+        # turn_overrides: validated settings for this turn only (see
+        # cagent_agent.validate_turn_overrides); the routers check them.
         self._pending = message
         self._pending_images = list(images) if images else None
+        self._pending_overrides = dict(turn_overrides) if turn_overrides else None
         match = _FROM_SESSION_RE.match(message)
         if match:
             self._pending_from_session = match.group(1)
@@ -363,12 +368,15 @@ class CAgentAdapter(BaseAgentAdapter):
             return
         content, self._pending = self._pending, None
         images, self._pending_images = self._pending_images, None
+        overrides, self._pending_overrides = self._pending_overrides, None
         if not content.strip() and not images:
             return
         self._announced_assistant_id = None
         self._call_info = {}
         self._store.pending_from_session = self._pending_from_session
         self._pending_from_session = None
+        # Recorded on the turn's user row as metadata.turn_overrides.
+        self._store.pending_turn_overrides = overrides
         self._events = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
         # The runner leaves the USER broadcast to us (emits_user_event): CAgent
         # saves the user row inside run_turn, and only then is its id known.
@@ -379,7 +387,7 @@ class CAgentAdapter(BaseAgentAdapter):
             await self._emit(StreamEventType.USER, content, images=images, message_id=row.id)
 
         self._store.on_turn_user_saved = _announce_user
-        turn_task = asyncio.create_task(self._run_turn_task(content, images))
+        turn_task = asyncio.create_task(self._run_turn_task(content, images, overrides))
         self._turn_task = turn_task
         try:
             while True:
@@ -517,9 +525,11 @@ class CAgentAdapter(BaseAgentAdapter):
 
     # ---- turn execution ----
 
-    async def _run_turn_task(self, content: str, images: list[dict] | None = None) -> None:
+    async def _run_turn_task(self, content: str, images: list[dict] | None = None,
+                             overrides: dict | None = None) -> None:
         try:
-            ctx = await self._agent_cls.run_turn(
+            agent_cls = with_turn_overrides(self._agent_cls, overrides or {})
+            ctx = await agent_cls.run_turn(
                 content,
                 session_id=self.session_id,
                 store=self._store,

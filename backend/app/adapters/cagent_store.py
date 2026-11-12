@@ -72,6 +72,8 @@ _STATUS_TO_FRAMEWORK = {
 # A user row's framework ``name`` (e.g. CAgent's turn_summary) has no column of
 # its own; it rides in metadata under this key and is lifted back out on read.
 _NAME_KEY = "cagent_name"
+# A user row's per-turn settings (POST /messages "turn_overrides"), if any.
+TURN_OVERRIDES_KEY = "turn_overrides"
 
 
 def reply_metadata(response: dict | None, system_prompt_id: str | None) -> dict | None:
@@ -136,6 +138,9 @@ class AugentiaStore:
         # Injected by the adapter before each turn: called once with the turn's
         # first saved user row so the live USER event can carry its real id.
         self.on_turn_user_saved = None
+        # Injected by the adapter before each turn: the settings this turn
+        # overrides, recorded on its first user row as metadata.turn_overrides.
+        self.pending_turn_overrides: dict | None = None
         # Set by the adapter's model wrapper after each agent-model call: that
         # response's details (usage, model, finish_reason, id, latency_ms).
         # CAgent saves the reply right after the call, so the next saved row
@@ -239,6 +244,10 @@ class AugentiaStore:
         metadata = dict(message.get("metadata") or {})
         if message.get("name"):
             metadata[_NAME_KEY] = message["name"]
+        elif self.pending_turn_overrides:
+            # The turn's own input row (summaries are user rows too, but named).
+            metadata[TURN_OVERRIDES_KEY] = self.pending_turn_overrides
+            self.pending_turn_overrides = None
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,

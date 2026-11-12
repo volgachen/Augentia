@@ -7,7 +7,8 @@ and returns a subclass whose classmethods reach back into it, giving the
 framework class-shaped hooks over instance-shaped state.
 
 The generated class is created once per adapter (per session) in the adapter's
-``start()`` and reused for every turn of that session.
+``start()`` and reused for every turn of that session. A turn sent with
+overrides runs on a throwaway subclass (``with_turn_overrides``).
 """
 
 from __future__ import annotations
@@ -57,6 +58,63 @@ def _wrap_tool(base_tool: BaseTool, adapter) -> Tool:
         description=base_tool.description,
         parameters=base_tool.parameters_schema(),
     )
+
+
+# Settings one turn may override (POST /messages and /retry "turn_overrides"),
+# mapped to the CAgent class attribute each one replaces for that turn.
+TURN_OVERRIDE_ATTRS = {
+    "max_steps": "MAX_STEPS",
+    "step_reminder_at": "STEP_REMINDER_AT",
+    "step_reminder": "STEP_REMINDER",
+    "tool_limit_at": "TOOL_LIMIT_AT",
+    "tool_limit_message": "TOOL_LIMIT_MESSAGE",
+}
+# Of those, the ones null may be given for: null switches it off for the turn.
+_NULLABLE_OVERRIDES = ("step_reminder_at", "tool_limit_at")
+
+
+def _positive_int(value) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= 1
+
+
+def validate_turn_overrides(overrides) -> dict:
+    """Checked copy of a turn's overrides; ValueError names the bad key.
+
+    Keys left out keep the session's value. max_steps is a positive integer,
+    step_reminder_at / tool_limit_at a positive integer or null (off for this
+    turn), step_reminder / tool_limit_message a non-empty string.
+    """
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, dict):
+        raise ValueError("turn_overrides must be an object")
+    unknown = sorted(set(overrides) - set(TURN_OVERRIDE_ATTRS))
+    if unknown:
+        raise ValueError(f"turn_overrides: unknown key(s) {unknown}; "
+                         f"allowed: {sorted(TURN_OVERRIDE_ATTRS)}")
+    for key, value in overrides.items():
+        if key in ("step_reminder", "tool_limit_message"):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"turn_overrides.{key} must be a non-empty string")
+        elif value is None:
+            if key not in _NULLABLE_OVERRIDES:
+                raise ValueError(f"turn_overrides.{key} must be a positive integer")
+        elif not _positive_int(value):
+            suffix = " or null" if key in _NULLABLE_OVERRIDES else ""
+            raise ValueError(f"turn_overrides.{key} must be a positive integer{suffix}")
+    return dict(overrides)
+
+
+def with_turn_overrides(agent_cls: type[BaseAgent], overrides: dict) -> type[BaseAgent]:
+    """agent_cls itself, or a one-turn subclass carrying the overrides.
+
+    CAgent reads these settings from the class at the start of run_turn, so a
+    subclass applies them to one turn without touching the session's class.
+    """
+    if not overrides:
+        return agent_cls
+    attrs = {TURN_OVERRIDE_ATTRS[key]: value for key, value in overrides.items()}
+    return type(agent_cls.__name__, (agent_cls,), attrs)
 
 
 def make_agent_class(

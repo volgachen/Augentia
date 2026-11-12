@@ -25,6 +25,7 @@ from app.core.workspace import (
 )
 from app.adapters.tools.permissions import explain_tool_permission, validate_tool_permissions_config
 from app.core.attachments import AttachmentError, agent_engine, normalize_turn_images
+from app.adapters.cagent_agent import validate_turn_overrides
 
 logger = logging.getLogger("augentia.sessions")
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -91,6 +92,11 @@ class PostMessageRequest(BaseModel):
     # Image references from POST /attachments: "att:<sha256>" strings or
     # {"ref", "detail"} objects. Only cagent-engine agents with config.vision.
     images: list[str | dict] | None = None
+    # Settings for this turn only, over the session/agent config: max_steps,
+    # step_reminder_at, step_reminder, tool_limit_at, tool_limit_message
+    # (null for step_reminder_at / tool_limit_at turns it off this turn).
+    # cagent-engine sessions only.
+    turn_overrides: dict | None = None
 
 
 class CompressRequest(BaseModel):
@@ -107,6 +113,9 @@ class RetryMessageRequest(BaseModel):
     content: str = ""
     # None keeps the edited message's original images; [] drops them.
     images: list[str | dict] | None = None
+    # As PostMessageRequest.turn_overrides; not carried over from the edited
+    # message.
+    turn_overrides: dict | None = None
 
 
 class DeriveSessionRequest(BaseModel):
@@ -119,6 +128,20 @@ async def _turn_images(db: IAgentDatabase, session: Session, images) -> list[dic
         return []
     agent = await db.get_agent(session.agent_id)
     return normalize_turn_images(agent, images)
+
+
+async def _turn_overrides(db: IAgentDatabase, session: Session, overrides) -> dict:
+    """Validate a turn's overrides against the session's agent; 400 on rejection."""
+    if overrides is None:
+        return {}
+    agent = await db.get_agent(session.agent_id)
+    if agent.agent_type != AgentType.TOOL_USE or agent_engine(agent) != "cagent":
+        raise HTTPException(status_code=400,
+                            detail="turn_overrides is supported only for cagent-engine sessions")
+    try:
+        return validate_turn_overrides(overrides)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 async def _create_derived_session(
@@ -798,12 +821,14 @@ async def post_message(
         raise HTTPException(status_code=400, detail=str(e))
     if not body.content.strip() and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
+    overrides = await _turn_overrides(db, session, body.turn_overrides)
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    logger.info("HTTP submit session=%s len=%d images=%d from=%s",
-                session_id, len(body.content), len(images), body.from_session_id)
-    await runner.submit(body.content, from_session_id=body.from_session_id, images=images)
+    logger.info("HTTP submit session=%s len=%d images=%d from=%s overrides=%s",
+                session_id, len(body.content), len(images), body.from_session_id, overrides or None)
+    await runner.submit(body.content, from_session_id=body.from_session_id, images=images,
+                        turn_overrides=overrides)
     return {"status": "queued"}
 
 
@@ -843,6 +868,7 @@ async def retry_from_message(
         raise HTTPException(status_code=400, detail=str(e))
     if not content and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
+    overrides = await _turn_overrides(db, session, body.turn_overrides)
     await db.soft_delete_messages_from(session_id, message_id)
 
     # Drop any in-memory context that still contains the deleted suffix, then
@@ -852,9 +878,9 @@ async def retry_from_message(
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    logger.info("HTTP retry session=%s message=%s len=%d images=%d",
-                session_id, message_id, len(content), len(images))
-    await runner.submit(content, images=images)
+    logger.info("HTTP retry session=%s message=%s len=%d images=%d overrides=%s",
+                session_id, message_id, len(content), len(images), overrides or None)
+    await runner.submit(content, images=images, turn_overrides=overrides)
     return {"status": "queued"}
 
 

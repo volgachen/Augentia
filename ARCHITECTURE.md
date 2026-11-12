@@ -132,7 +132,8 @@ class IAgentDatabase(ABC):
 | PATCH | `/api/v1/sessions/{session_id}` | Rename a session |
 | GET / PUT | `/api/v1/sessions/{session_id}/system-prompt` | Get / replace the session's effective system prompt (PUT: 409 while a turn runs) |
 | GET | `/api/v1/sessions/{session_id}/messages` | Get message history |
-| POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session |
+| POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session. Optional `turn_overrides` (cagent engine only) sets `max_steps`, `step_reminder_at`, `step_reminder`, `tool_limit_at`, `tool_limit_message` for this turn only (`null` turns `step_reminder_at` / `tool_limit_at` off); recorded on the user row as `metadata.turn_overrides` |
+| POST | `/api/v1/sessions/{session_id}/messages/{message_id}/retry` | Rewrite from a user message: delete it and everything after, then send the edited text; accepts `turn_overrides` too (not inherited from the edited message) |
 | GET | `/api/v1/sessions/{session_id}/tasks` | Get the session's task list |
 | DELETE | `/api/v1/sessions/{session_id}` | Terminate a session |
 | WS | `/api/v1/sessions/{session_id}/stream` | Real-time session event stream |

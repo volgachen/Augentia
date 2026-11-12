@@ -21,6 +21,9 @@ class _InboxItem:
     # Validated image references for this turn ([{"ref", "detail"?}]); routers
     # check engine/vision support before anything reaches the inbox.
     images: list[dict] | None = None
+    # Validated per-turn settings (max_steps, step_reminder_at, ...); routers
+    # only accept them for cagent-engine sessions.
+    turn_overrides: dict | None = None
     # Set for a manual compression job instead of a user turn: the loop runs
     # adapter.compress() and resolves this future with its result dict.
     compress_result: "asyncio.Future[dict] | None" = None
@@ -92,9 +95,11 @@ class SessionRunner:
         content: str,
         from_session_id: str | None = None,
         images: list[dict] | None = None,
+        turn_overrides: dict | None = None,
     ) -> None:
         await self._inbox.put(_InboxItem(
             content=content, from_session_id=from_session_id, images=images or None,
+            turn_overrides=turn_overrides or None,
         ))
 
     @property
@@ -275,10 +280,12 @@ class SessionRunner:
         saw_native_messages = False
         errored = False
         awaiting_confirm = False
+        send_kwargs: dict = {}
         if item.images:
-            await self._adapter.send(delivered, images=item.images)
-        else:
-            await self._adapter.send(delivered)
+            send_kwargs["images"] = item.images
+        if item.turn_overrides:
+            send_kwargs["turn_overrides"] = item.turn_overrides
+        await self._adapter.send(delivered, **send_kwargs)
         async for event in self._adapter.stream():
             should_broadcast = True
             # Reflect a pending confirm in the session status so the
