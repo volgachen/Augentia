@@ -313,11 +313,15 @@ export default function LiveConsole() {
     <div className="relative flex flex-col h-full p-4 gap-3">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-white">
-          {session.title ?? "Live Console"}
-        </h1>
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold text-white">
+            {session.title ?? "Live Console"}
+          </h1>
+          <p className="text-xs text-gray-500 font-mono select-all" title="会话 id">
+            {session.id}
+          </p>
+        </div>
         <div className="text-left">
-          <p className="text-xs text-gray-500 font-mono">{session.id}</p>
           <WorkingDirEditor session={session} />
           <ModelEditor session={session} />
         </div>
