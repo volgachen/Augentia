@@ -208,6 +208,11 @@ interface Store {
     workingDir: string,
     updatePrompt: boolean,
   ) => Promise<{ prompt_updated: boolean }>;
+  updateModel: (
+    sessionId: string,
+    model: string | null,
+    modelParams: Record<string, unknown> | null,
+  ) => Promise<void>;
   refreshSession: (sessionId: string) => Promise<void>;
   fetchTasks: (sessionId: string) => Promise<void>;
 }
@@ -705,6 +710,29 @@ export const useStore = create<Store>((set, get) => {
       try {
         const r = await api.sessions.updateWorkingDir(sessionId, workingDir, updatePrompt);
         return { prompt_updated: r.prompt_updated };
+      } finally {
+        const session = await api.sessions.get(sessionId);
+        const socket = hadSocket ? attachSocket(sessionId) : null;
+        set((s) => {
+          const cur = s.sessions[sessionId];
+          if (!cur) return s;
+          return {
+            sessions: {
+              ...s.sessions,
+              [sessionId]: { ...cur, session, socket: socket ?? cur.socket },
+            },
+          };
+        });
+      }
+    },
+
+    updateModel: async (sessionId, model, modelParams) => {
+      // Same as updateWorkingDir: a live runner is rebuilt, which closes this
+      // socket, so drop it first and reattach once the change is in.
+      const hadSocket = !!get().sessions[sessionId]?.socket;
+      get().sessions[sessionId]?.socket?.close();
+      try {
+        await api.sessions.updateModel(sessionId, model, modelParams);
       } finally {
         const session = await api.sessions.get(sessionId);
         const socket = hadSocket ? attachSocket(sessionId) : null;

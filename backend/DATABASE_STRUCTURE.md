@@ -50,6 +50,8 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `additional_prompt` | LONGTEXT | nullable |
 | `additional_prompt_path` | VARCHAR(1000) | nullable |
 | `system_prompt_id` | VARCHAR(36) | nullable; current `system_prompts` version of the effective prompt (agent prompt + additions + runtime context, frozen at first start). NULL until first start |
+| `model` | VARCHAR(200) | nullable; the session's own model (PUT `/sessions/{id}/model`). NULL uses the agent's `openai_model` |
+| `model_params` | JSON | nullable; the session's own Chat Completions params, replacing the agent's `config.model_params` as a whole. NULL uses the agent's |
 | `status` | VARCHAR(30) | default `'INITIALIZING'` |
 | `created_at` | DATETIME(3) | NOT NULL |
 | `updated_at` | DATETIME(3) | NOT NULL |
@@ -57,6 +59,8 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `deleted_at` | DATETIME(3) | nullable; NULL means visible, non-NULL means soft-deleted |
 
 Indexes: `idx_sessions_agent (agent_id)`, `idx_sessions_parent (parent_session_id)`.
+
+`model` / `model_params` are added to existing databases on startup (both NULL).
 
 The API still returns the resolved text as `agents.system_prompt` /
 `sessions.system_prompt_snapshot` alongside `system_prompt_id`. Databases

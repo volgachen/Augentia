@@ -25,6 +25,7 @@ from app.core.workspace import (
 )
 from app.adapters.tools.permissions import explain_tool_permission, validate_tool_permissions_config
 from app.core.attachments import AttachmentError, normalize_turn_images
+from app.adapters.model_params import validate_model_params
 from app.adapters.cagent_agent import validate_turn_overrides
 
 logger = logging.getLogger("augentia.sessions")
@@ -61,6 +62,15 @@ class CreateSessionRequest(BaseModel):
 
 class UpdateSessionRequest(BaseModel):
     title: str
+
+
+class UpdateSessionModelRequest(BaseModel):
+    # null (or a blank string) uses the agent's openai_model again.
+    model: str | None = None
+    # Chat Completions parameters for this session (temperature,
+    # reasoning_effort, extra_body, ...), replacing the agent's
+    # config.model_params as a whole; null uses the agent's again.
+    model_params: dict | None = None
 
 
 class UpdateSystemPromptRequest(BaseModel):
@@ -160,6 +170,9 @@ async def _create_derived_session(
         # Versions are immutable, so the branch shares the source's current
         # one; editing the branch's prompt later chains a version of its own.
         system_prompt_id=source.system_prompt_id,
+        # Same model as the source; the branch can change it on its own.
+        model=source.model,
+        model_params=source.model_params,
     )
     try:
         await db.clone_messages(source.id, target.id, before_message_id=before_message_id)
@@ -280,6 +293,85 @@ async def rename_session(
         return await db.update_session_title(session_id, title)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/{session_id}/model")
+async def get_session_model(
+    session_id: str,
+    db: IAgentDatabase = Depends(get_db),
+):
+    """The session's model override and what the next turn will use.
+
+    model / model_params are the session's own values (null: none set);
+    effective_* resolve them against the agent (openai_model,
+    config.model_params) the way the engine does.
+    """
+    try:
+        session = await db.get_session(session_id)
+        agent = await db.get_agent(session.agent_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return _model_view(session, agent)
+
+
+def _model_view(session: Session, agent) -> dict:
+    agent_params = (agent.config or {}).get("model_params") or {}
+    return {
+        "model": session.model,
+        "model_params": session.model_params,
+        "agent_model": agent.openai_model,
+        "agent_model_params": agent_params,
+        "effective_model": session.model or agent.openai_model,
+        "effective_model_params": (
+            session.model_params if session.model_params is not None else agent_params),
+    }
+
+
+@router.put("/{session_id}/model")
+async def update_session_model(
+    session_id: str,
+    body: UpdateSessionModelRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Give this session its own model and/or model_params (null: the agent's).
+
+    Both fields are set together, so send the current value of the one you
+    keep. Allowed between turns only (409 while running or awaiting a tool
+    confirm). A live runner is rebuilt so the next turn uses the new model;
+    history is kept. Each reply records the model that answered in
+    metadata.response.model.
+    """
+    model = body.model.strip() if body.model is not None else None
+    model = model or None
+    try:
+        params = (validate_model_params(body.model_params)
+                  if body.model_params is not None else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        session = await db.get_session(session_id)
+        agent = await db.get_agent(session.agent_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        runner = None
+    if (runner is not None and runner.is_busy) or session.status in (
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="session is running; change the model after the turn finishes",
+        )
+    session = await db.update_session_model(session_id, model, params)
+    if runner is not None:
+        await registry.remove(session_id)
+        await get_or_rehydrate(session, db, registry)
+    logger.info("model changed session=%s model=%s params=%s", session_id, model, params)
+    return {"session": (await db.get_session(session_id)).model_dump(mode="json"),
+            **_model_view(session, agent)}
 
 
 @router.delete("/{session_id}/parent", response_model=Session)

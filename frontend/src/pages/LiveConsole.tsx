@@ -13,6 +13,7 @@ import ToolPermissionsPanel from "../components/ToolPermissionsPanel";
 import SystemPromptPanel from "../components/SystemPromptPanel";
 import ShareButton from "../components/ShareButton";
 import WorkingDirEditor from "../components/WorkingDirEditor";
+import ModelEditor from "../components/ModelEditor";
 import { AttachmentTray } from "../components/ImageAttachments";
 import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAttachments";
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
@@ -318,6 +319,7 @@ export default function LiveConsole() {
         <div className="text-left">
           <p className="text-xs text-gray-500 font-mono">{session.id}</p>
           <WorkingDirEditor session={session} />
+          <ModelEditor session={session} />
         </div>
         <div className="flex flex-col items-end gap-1">
         <div className="flex items-center gap-2">

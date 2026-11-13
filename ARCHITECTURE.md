@@ -129,6 +129,8 @@ class IAgentDatabase(ABC):
 | GET | `/api/v1/sessions` | List sessions |
 | GET | `/api/v1/sessions/{session_id}` | Get session status |
 | PATCH | `/api/v1/sessions/{session_id}` | Rename a session |
+| GET / PUT | `/api/v1/sessions/{session_id}/model` | Get / set the session's own `model` and `model_params` (null: the agent's `openai_model` / `config.model_params`; params replace the agent's as a whole). PUT: 409 while a turn runs; the live runner is rebuilt, history kept. Branches (diverge) start with the source's values |
+| DELETE | `/api/v1/sessions/{session_id}/parent` | Unlink the session from its parent (it becomes top-level) |
 | GET / PUT | `/api/v1/sessions/{session_id}/system-prompt` | Get / replace the session's effective system prompt (PUT: 409 while a turn runs) |
 | GET | `/api/v1/sessions/{session_id}/messages` | Get message history |
 | POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session. Optional `turn_overrides` sets `max_steps`, `step_reminder_at`, `step_reminder`, `tool_limit_at`, `tool_limit_message` for this turn only (`null` turns `step_reminder_at` / `tool_limit_at` off); recorded on the user row as `metadata.turn_overrides` |

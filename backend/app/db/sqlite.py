@@ -87,6 +87,7 @@ def _session(row: sqlite3.Row) -> Session:
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
+        model=row["model"], model_params=_json(row["model_params"], None),
         status=SessionStatus(row["status"]), created_at=_dt(row["created_at"]),
         updated_at=_dt(row["updated_at"]), last_message_at=_dt(row["last_message_at"]),
         deleted_at=_dt(row["deleted_at"]),
@@ -203,6 +204,8 @@ class SqliteDatabase(IAgentDatabase):
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
                 system_prompt_id TEXT DEFAULT NULL,
+                model TEXT DEFAULT NULL,
+                model_params TEXT DEFAULT NULL,
                 status TEXT NOT NULL DEFAULT 'INITIALIZING',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -311,6 +314,9 @@ class SqliteDatabase(IAgentDatabase):
             row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")
         }
         self._migrate_system_prompts(session_columns)
+        for column in ("model", "model_params"):
+            if column not in session_columns:
+                self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
 
         plugin_log_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(plugin_logs)")
@@ -470,6 +476,8 @@ class SqliteDatabase(IAgentDatabase):
             parent_session_id=kwargs.get("parent_session_id"),
             additional_prompt=kwargs.get("additional_prompt"),
             additional_prompt_path=kwargs.get("additional_prompt_path"),
+            model=kwargs.get("model"),
+            model_params=kwargs.get("model_params"),
         )
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
@@ -481,12 +489,12 @@ class SqliteDatabase(IAgentDatabase):
             self._conn.execute(
                 """INSERT INTO sessions
                    (id, agent_id, title, working_dir, parent_session_id, additional_prompt,
-                    additional_prompt_path, system_prompt_id, status, created_at,
-                    updated_at, last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    additional_prompt_path, system_prompt_id, model, model_params, status,
+                    created_at, updated_at, last_message_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session.id, session.agent_id, session.title, session.working_dir,
                  session.parent_session_id, session.additional_prompt, session.additional_prompt_path,
-                 prompt_id, session.status.value, _iso(session.created_at),
+                 prompt_id, session.model, _dump(session.model_params), session.status.value, _iso(session.created_at),
                  _iso(session.updated_at), _iso(session.last_message_at)),
             )
         return await self.get_session(session.id)
@@ -520,6 +528,19 @@ class SqliteDatabase(IAgentDatabase):
         cur = self._execute(
             "UPDATE sessions SET working_dir = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
             (working_dir, _iso(now), session_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id)
+
+    async def update_session_model(
+        self, session_id: str, model: str | None, model_params: dict | None,
+    ) -> Session:
+        now = datetime.now(timezone.utc)
+        cur = self._execute(
+            "UPDATE sessions SET model = ?, model_params = ?, updated_at = ? "
+            "WHERE id = ? AND deleted_at IS NULL",
+            (model, _dump(model_params), _iso(now), session_id),
         )
         if cur.rowcount == 0:
             raise KeyError(f"Session '{session_id}' not found")

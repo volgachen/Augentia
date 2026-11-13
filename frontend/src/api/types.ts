@@ -82,12 +82,26 @@ export interface Session {
   parent_session_id: string | null;
   additional_prompt: string | null;
   additional_prompt_path: string | null;
+  // The session's own model / Chat Completions params; null = the agent's.
+  model?: string | null;
+  model_params?: Record<string, unknown> | null;
   status: SessionStatus;
   created_at: string;
   updated_at: string;
   // created_at of the newest message; null for a session with no messages yet.
   last_message_at: string | null;
   deleted_at: string | null;
+}
+
+// GET/PUT /sessions/{id}/model: the session's values (null = not set) and
+// what the next turn uses after falling back to the agent.
+export interface SessionModelView {
+  model: string | null;
+  model_params: Record<string, unknown> | null;
+  agent_model: string;
+  agent_model_params: Record<string, unknown>;
+  effective_model: string;
+  effective_model_params: Record<string, unknown>;
 }
 
 export interface Message {

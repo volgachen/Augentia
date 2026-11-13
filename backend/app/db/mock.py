@@ -110,6 +110,8 @@ class MockMemoryDatabase(IAgentDatabase):
         additional_prompt_path: str | None = None,
         system_prompt_snapshot: str | None = None,
         system_prompt_id: str | None = None,
+        model: str | None = None,
+        model_params: dict | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)  # validate agent exists
         session = Session(
@@ -120,6 +122,8 @@ class MockMemoryDatabase(IAgentDatabase):
             parent_session_id=parent_session_id,
             additional_prompt=additional_prompt,
             additional_prompt_path=additional_prompt_path,
+            model=model,
+            model_params=dict(model_params) if model_params is not None else None,
         )
         if system_prompt_snapshot is not None:
             self._point_at(session, system_prompt_snapshot, new_chain=True)
@@ -158,6 +162,15 @@ class MockMemoryDatabase(IAgentDatabase):
     async def update_session_working_dir(self, session_id: str, working_dir: str | None) -> Session:
         session = await self.get_session(session_id)
         session.working_dir = working_dir
+        session.updated_at = datetime.now(timezone.utc)
+        return session
+
+    async def update_session_model(
+        self, session_id: str, model: str | None, model_params: dict | None,
+    ) -> Session:
+        session = await self.get_session(session_id)
+        session.model = model
+        session.model_params = dict(model_params) if model_params is not None else None
         session.updated_at = datetime.now(timezone.utc)
         return session
 

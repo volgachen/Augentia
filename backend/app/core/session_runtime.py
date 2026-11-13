@@ -55,10 +55,15 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
             "model_params", "compression_model_params",
             "vision", "image_detail", "tool_image_limit", "tool_image_mode",
             "step_reminder_at", "step_reminder", "tool_limit_at", "tool_limit_message"))
+        # PUT /sessions/{id}/model: the session's own model / params replace the
+        # agent's. Params replace as a whole; a summarizer without its own
+        # compression_model / compression_model_params follows them too.
+        if session.model_params is not None:
+            config["model_params"] = session.model_params
         return CAgentAdapter(
             db=db,
             tool_names=agent.tool_names,
-            model=agent.openai_model,
+            model=session.model or agent.openai_model,
             base_url=agent.openai_base_url,
             session_id=session.id,
             working_dir=session.working_dir,

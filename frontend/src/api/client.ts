@@ -5,6 +5,7 @@ import type {
   CompressResult,
   Session,
   SessionCreateMode,
+  SessionModelView,
   Message,
   PluginDefinition,
   PluginInstance,
@@ -209,6 +210,16 @@ export const api = {
       request<{ session: Session; prompt_updated: boolean }>(`/sessions/${id}/working-dir`, {
         method: "PUT",
         body: JSON.stringify({ working_dir, update_prompt }),
+      }),
+    model: (id: string) => request<SessionModelView>(`/sessions/${id}/model`),
+    updateModel: (
+      id: string,
+      model: string | null,
+      model_params: Record<string, unknown> | null,
+    ) =>
+      request<SessionModelView & { session: Session }>(`/sessions/${id}/model`, {
+        method: "PUT",
+        body: JSON.stringify({ model, model_params }),
       }),
     config: (id: string) => request<Record<string, unknown>>(`/sessions/${id}/config`),
     updateConfig: (id: string, config: Record<string, unknown>) =>

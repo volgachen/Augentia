@@ -97,6 +97,11 @@ class Session(BaseModel):
     # table stores system_prompt_id; editing the prompt adds a version.
     system_prompt_snapshot: Optional[str] = None
     system_prompt_id: Optional[str] = None
+    # Per-session model override (PUT /sessions/{id}/model). None uses the
+    # agent's openai_model / config.model_params. model_params replaces the
+    # agent's params as a whole (no merge), like compression_model_params.
+    model: Optional[str] = None
+    model_params: Optional[dict] = None
     status: SessionStatus = SessionStatus.INITIALIZING
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

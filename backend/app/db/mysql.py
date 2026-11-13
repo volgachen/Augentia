@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
     system_prompt_id  VARCHAR(36)   DEFAULT NULL,
+    model             VARCHAR(200)  DEFAULT NULL,
+    model_params      JSON          DEFAULT NULL,
     status            VARCHAR(30)   NOT NULL DEFAULT 'INITIALIZING',
     created_at        DATETIME(3)   NOT NULL,
     updated_at        DATETIME(3)   NOT NULL,
@@ -205,6 +207,16 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
         ["ALTER TABLE messages ADD COLUMN metadata JSON DEFAULT NULL AFTER from_session_id"],
     ),
     (
+        "sessions",
+        "model",
+        ["ALTER TABLE sessions ADD COLUMN model VARCHAR(200) DEFAULT NULL AFTER system_prompt_id"],
+    ),
+    (
+        "sessions",
+        "model_params",
+        ["ALTER TABLE sessions ADD COLUMN model_params JSON DEFAULT NULL AFTER model"],
+    ),
+    (
         "plugin_logs",
         "session_id",
         [
@@ -267,6 +279,8 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         additional_prompt_path=row.get("additional_prompt_path"),
         system_prompt_snapshot=row.get("prompt_text"),
         system_prompt_id=row.get("system_prompt_id"),
+        model=row.get("model"),
+        model_params=_json_col(row.get("model_params"), None),
         status=SessionStatus(row["status"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -683,6 +697,8 @@ class MySqlDatabase(IAgentDatabase):
         additional_prompt_path: str | None = None,
         system_prompt_snapshot: str | None = None,
         system_prompt_id: str | None = None,
+        model: str | None = None,
+        model_params: dict | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)
         session = Session(
@@ -693,6 +709,8 @@ class MySqlDatabase(IAgentDatabase):
             parent_session_id=parent_session_id,
             additional_prompt=additional_prompt,
             additional_prompt_path=additional_prompt_path,
+            model=model,
+            model_params=model_params,
         )
         # Seed a friendly default so the UI never shows a blank title. Uses the
         # agent's name + creation time; a caller-supplied title (e.g. a spawning
@@ -710,9 +728,9 @@ class MySqlDatabase(IAgentDatabase):
                     """INSERT INTO sessions
                        (id, agent_id, title, working_dir, parent_session_id,
                         additional_prompt, additional_prompt_path,
-                        system_prompt_id,
+                        system_prompt_id, model, model_params,
                         status, created_at, updated_at, last_message_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         session.id,
                         session.agent_id,
@@ -722,6 +740,8 @@ class MySqlDatabase(IAgentDatabase):
                         session.additional_prompt,
                         session.additional_prompt_path,
                         prompt_id,
+                        session.model,
+                        _json_dump(session.model_params),
                         session.status.value,
                         session.created_at,
                         session.updated_at,
@@ -752,6 +772,21 @@ class MySqlDatabase(IAgentDatabase):
                 await cur.execute(
                     "UPDATE sessions SET working_dir = %s, updated_at = %s WHERE id = %s",
                     (session.working_dir, session.updated_at, session_id),
+                )
+        return session
+
+    async def update_session_model(
+        self, session_id: str, model: str | None, model_params: dict | None,
+    ) -> Session:
+        session = await self.get_session(session_id)
+        session.model = model
+        session.model_params = model_params
+        session.updated_at = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE sessions SET model = %s, model_params = %s, updated_at = %s WHERE id = %s",
+                    (model, _json_dump(model_params), session.updated_at, session_id),
                 )
         return session
 
