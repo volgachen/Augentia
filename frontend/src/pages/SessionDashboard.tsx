@@ -68,6 +68,18 @@ function loadSortMode(): SortMode {
   }
 }
 
+// Directory groups the user collapsed (by dirKey), remembered across visits.
+const COLLAPSED_DIRS_KEY = "augentia.sessions.collapsedDirs";
+
+function loadCollapsedDirs(): Set<string> {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSED_DIRS_KEY) ?? "[]");
+    return new Set(Array.isArray(raw) ? raw.filter((k): k is string => typeof k === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
 // Last activity; sessions with no messages yet fall back to their creation
 // time so they don't sink below every session that has ever been talked to.
 const lastActivity = (e: Entry) => e.session.last_message_at ?? e.session.created_at;
@@ -206,6 +218,22 @@ export default function SessionDashboard() {
     }
   };
 
+  const [collapsedDirs, setCollapsedDirsState] = useState<Set<string>>(loadCollapsedDirs);
+  const setCollapsedDirs = (next: Set<string>) => {
+    setCollapsedDirsState(next);
+    try {
+      localStorage.setItem(COLLAPSED_DIRS_KEY, JSON.stringify([...next]));
+    } catch {
+      // Not remembered; still applies for this visit.
+    }
+  };
+  const toggleDir = (key: string) => {
+    const next = new Set(collapsedDirs);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    setCollapsedDirs(next);
+  };
+
   const handleUnlink = (session: Session) => {
     const name = session.title?.trim() || session.id.slice(0, 8);
     if (!window.confirm(`把「${name}」从父会话解绑？解绑后它成为独立的会话，父会话的子会话列表里不再显示它。`)) {
@@ -273,14 +301,19 @@ export default function SessionDashboard() {
   }
 
   // Table body: plain rows by time, or rows under one header per directory.
+  // A collapsed group keeps its header row and hides its sessions.
   type Item = { kind: "group"; group: DirGroup } | { kind: "row"; row: Row };
+  const dirGroups = sortMode === "dir" ? buildDirGroups(entries) : [];
   const items: Item[] =
     sortMode === "dir"
-      ? buildDirGroups(entries).flatMap((group): Item[] => [
+      ? dirGroups.flatMap((group): Item[] => [
           { kind: "group", group },
-          ...group.rows.map((row): Item => ({ kind: "row", row })),
+          ...(collapsedDirs.has(group.key)
+            ? []
+            : group.rows.map((row): Item => ({ kind: "row", row }))),
         ])
       : buildForest(entries, byUpdated).map((row): Item => ({ kind: "row", row }));
+  const allCollapsed = dirGroups.length > 0 && dirGroups.every((g) => collapsedDirs.has(g.key));
 
   const openSession = (sessionId: string) => {
     setActive(sessionId);
@@ -291,28 +324,41 @@ export default function SessionDashboard() {
     <div className="p-6 flex flex-col min-h-0 flex-1">
       <div className="mb-6 flex shrink-0 items-center justify-between gap-4">
         <h1 className="text-2xl font-semibold text-white">Sessions</h1>
-        <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-900/60 p-0.5 text-xs">
-          <span className="px-2 text-gray-500">排序</span>
-          {(
-            [
-              ["time", "按时间", "按最后活动时间，最新在前（子会话跟在父会话下）"],
-              ["dir", "按工作目录", "按工作目录归类：有 active 会话的目录在前，其中会话少的靠前；active 会话只在自己的目录里置顶"],
-            ] as const
-          ).map(([mode, label, hint]) => (
+        <div className="flex items-center gap-2">
+          {sortMode === "dir" && dirGroups.length > 0 && (
             <button
-              key={mode}
               type="button"
-              title={hint}
-              onClick={() => setSortMode(mode)}
-              className={`rounded-md px-2.5 py-1 transition-colors ${
-                sortMode === mode
-                  ? "bg-indigo-700 text-white"
-                  : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
-              }`}
+              onClick={() =>
+                setCollapsedDirs(allCollapsed ? new Set() : new Set(dirGroups.map((g) => g.key)))
+              }
+              className="rounded-md px-2.5 py-1 text-xs text-gray-400 hover:bg-gray-800 hover:text-gray-200 transition-colors"
             >
-              {label}
+              {allCollapsed ? "全部展开" : "全部折叠"}
             </button>
-          ))}
+          )}
+          <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-900/60 p-0.5 text-xs">
+            <span className="px-2 text-gray-500">排序</span>
+            {(
+              [
+                ["time", "按时间", "按最后活动时间，最新在前（子会话跟在父会话下）"],
+                ["dir", "按工作目录", "按工作目录归类：有 active 会话的目录在前，其中会话少的靠前；active 会话只在自己的目录里置顶"],
+              ] as const
+            ).map(([mode, label, hint]) => (
+              <button
+                key={mode}
+                type="button"
+                title={hint}
+                onClick={() => setSortMode(mode)}
+                className={`rounded-md px-2.5 py-1 transition-colors ${
+                  sortMode === mode
+                    ? "bg-indigo-700 text-white"
+                    : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
       {openPluginDialog && (
@@ -340,10 +386,22 @@ export default function SessionDashboard() {
             {items.map((item) => {
               if (item.kind === "group") {
                 const { group } = item;
+                const collapsed = collapsedDirs.has(group.key);
                 return (
-                  <tr key={`dir:${group.key}`} className="border-b border-gray-800 bg-gray-900/70">
+                  <tr
+                    key={`dir:${group.key}`}
+                    onClick={() => toggleDir(group.key)}
+                    title={collapsed ? "展开这个目录" : "折叠这个目录"}
+                    className="border-b border-gray-800 bg-gray-900/70 cursor-pointer select-none hover:bg-gray-800/70"
+                  >
                     <td colSpan={7} className="px-2 py-1.5">
                       <span className="flex items-center gap-2 text-xs">
+                        <span
+                          aria-hidden="true"
+                          className={`w-3 shrink-0 text-gray-500 transition-transform ${collapsed ? "" : "rotate-90"}`}
+                        >
+                          ▶
+                        </span>
                         <span
                           className={`h-2 w-2 shrink-0 rounded-full ${
                             group.activeCount > 0 ? "bg-green-400" : "bg-gray-600"
