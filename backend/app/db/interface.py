@@ -91,6 +91,10 @@ class IAgentDatabase(ABC):
     async def update_session_working_dir(self, session_id: str, working_dir: str | None) -> Session: pass
 
     @abstractmethod
+    async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
+        """Set or clear (None) the session's parent; KeyError if the session is unknown."""
+
+    @abstractmethod
     async def list_sessions(self) -> List[Session]: pass
 
     @abstractmethod

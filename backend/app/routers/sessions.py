@@ -282,6 +282,27 @@ async def rename_session(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.delete("/{session_id}/parent", response_model=Session)
+async def unlink_parent(
+    session_id: str,
+    db: IAgentDatabase = Depends(get_db),
+):
+    """Detach the session from its parent; it becomes a top-level session.
+
+    Only the link is cleared: both sessions, their history and working
+    directories are untouched, and the parent's list_subagents no longer
+    shows it. Unlinking a session without a parent is a no-op.
+    """
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if session.parent_session_id is None:
+        return session
+    logger.info("unlink parent session=%s parent=%s", session_id, session.parent_session_id)
+    return await db.update_session_parent(session_id, None)
+
+
 @router.get("/{session_id}/system-prompt")
 async def get_session_system_prompt(
     session_id: str,

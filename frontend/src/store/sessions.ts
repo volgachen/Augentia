@@ -202,6 +202,7 @@ interface Store {
   disconnectSession: (sessionId: string) => void;
   closeSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
+  unlinkParent: (sessionId: string) => Promise<void>;
   updateWorkingDir: (
     sessionId: string,
     workingDir: string,
@@ -596,6 +597,20 @@ export const useStore = create<Store>((set, get) => {
 
     renameSession: async (sessionId, title) => {
       const updated = await api.sessions.updateTitle(sessionId, title);
+      set((s) => {
+        const entry = s.sessions[sessionId];
+        if (!entry) return s;
+        return {
+          sessions: {
+            ...s.sessions,
+            [sessionId]: { ...entry, session: updated },
+          },
+        };
+      });
+    },
+
+    unlinkParent: async (sessionId) => {
+      const updated = await api.sessions.unlinkParent(sessionId);
       set((s) => {
         const entry = s.sessions[sessionId];
         if (!entry) return s;

@@ -57,10 +57,29 @@ interface OpenPluginDialog {
   plugin: SessionDialogPlugin;
 }
 
+type SortMode = "time" | "dir";
+const SORT_MODE_KEY = "augentia.sessions.sortMode";
+
+function loadSortMode(): SortMode {
+  try {
+    return localStorage.getItem(SORT_MODE_KEY) === "dir" ? "dir" : "time";
+  } catch {
+    return "time";
+  }
+}
+
+// Last activity; sessions with no messages yet fall back to their creation
+// time so they don't sink below every session that has ever been talked to.
+const lastActivity = (e: Entry) => e.session.last_message_at ?? e.session.created_at;
+const byUpdated = (a: Entry, b: Entry) => lastActivity(b).localeCompare(lastActivity(a));
+const byActiveThenUpdated = (a: Entry, b: Entry) =>
+  Number(isActive(b)) - Number(isActive(a)) || byUpdated(a, b);
+
 // Flatten the sessions into a depth-first list ordered as a parent -> child
-// forest. Children whose parent is not loaded (closed, or owned by another
-// client) become roots so nothing is ever hidden.
-function buildForest(entries: Entry[]): Row[] {
+// forest, `compare` ordering the roots and each sibling group. Children whose
+// parent is not among `entries` (closed, owned by another client, or in
+// another directory group) become roots so nothing is ever hidden.
+function buildForest(entries: Entry[], compare: (a: Entry, b: Entry) => number): Row[] {
   const byId = new Map(entries.map((e) => [e.session.id, e]));
   const childrenOf = new Map<string, Entry[]>();
   for (const e of entries) {
@@ -72,25 +91,12 @@ function buildForest(entries: Entry[]): Row[] {
     }
   }
 
-  // Active sessions float to the top; ties break by last activity, newest
-  // first. Sessions with no messages yet fall back to their creation time so
-  // they don't sink below every session that has ever been talked to. Applied
-  // to roots and to each sibling group so the parent -> child forest stays
-  // intact.
-  const lastActivity = (e: Entry) =>
-    e.session.last_message_at ?? e.session.created_at;
-  const byActiveThenUpdated = (a: Entry, b: Entry) => {
-    const activeDiff = Number(isActive(b)) - Number(isActive(a));
-    if (activeDiff !== 0) return activeDiff;
-    return lastActivity(b).localeCompare(lastActivity(a));
-  };
-
   const roots = entries
     .filter((e) => {
       const pid = e.session.parent_session_id;
       return !pid || !byId.has(pid);
     })
-    .sort(byActiveThenUpdated);
+    .sort(compare);
 
   const rows: Row[] = [];
   const visited = new Set<string>();
@@ -103,13 +109,70 @@ function buildForest(entries: Entry[]): Row[] {
       depth,
       orphanParent: pid && !byId.has(pid) ? pid : null,
     });
-    const kids = (childrenOf.get(entry.session.id) ?? [])
-      .slice()
-      .sort(byActiveThenUpdated);
+    const kids = (childrenOf.get(entry.session.id) ?? []).slice().sort(compare);
     for (const kid of kids) walk(kid, depth + 1);
   };
   for (const root of roots) walk(root, 0);
   return rows;
+}
+
+interface DirGroup {
+  key: string;
+  // A path as one of its sessions shows it; null for sessions without one.
+  dir: string | null;
+  rows: Row[];
+  count: number;
+  activeCount: number;
+}
+
+// Windows paths compare case-insensitively and with either slash.
+function dirKey(dir: string | null): string {
+  if (!dir) return "";
+  const path = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+  return /^[a-zA-Z]:/.test(path) ? path.toLowerCase() : path;
+}
+
+// One group per working directory. Groups holding an active session come
+// first, the ones with fewer sessions ahead (then the most recent); the other
+// groups follow by most recent activity. Inside a group, active sessions are
+// pinned to the top of that group only, the rest follow by time.
+function buildDirGroups(entries: Entry[]): DirGroup[] {
+  const byKey = new Map<string, Entry[]>();
+  for (const e of entries) {
+    const key = dirKey(e.session.working_dir);
+    const arr = byKey.get(key) ?? [];
+    arr.push(e);
+    byKey.set(key, arr);
+  }
+  const groups = [...byKey.entries()].map(([key, members]) => ({
+    key,
+    dir: members[0].session.working_dir,
+    rows: buildForest(members, byActiveThenUpdated),
+    count: members.length,
+    activeCount: members.filter(isActive).length,
+    latest: members.map(lastActivity).reduce((x, y) => (y > x ? y : x)),
+  }));
+  groups.sort((a, b) => {
+    const aActive = a.activeCount > 0;
+    const bActive = b.activeCount > 0;
+    if (aActive !== bActive) return aActive ? -1 : 1;
+    if (aActive && a.count !== b.count) return a.count - b.count;
+    return b.latest.localeCompare(a.latest);
+  });
+  return groups;
+}
+
+function UnlinkIcon() {
+  // A chain link with a break: "detach from parent".
+  return (
+    <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor"
+      strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 17H7a5 5 0 0 1 0-10h2" />
+      <path d="M15 7h2a5 5 0 0 1 4 8" />
+      <path d="M8 12h3" />
+      <path d="M3 3l18 18" />
+    </svg>
+  );
 }
 
 export default function SessionDashboard() {
@@ -117,6 +180,7 @@ export default function SessionDashboard() {
   const setActive = useStore((s) => s.setActiveSession);
   const closeSession = useStore((s) => s.closeSession);
   const renameSession = useStore((s) => s.renameSession);
+  const unlinkParent = useStore((s) => s.unlinkParent);
   const hydrateSessions = useStore((s) => s.hydrateSessions);
   const pluginCatalog = usePluginStore((s) => s.catalog);
   const pluginInstances = usePluginStore((s) => s.instances);
@@ -132,6 +196,26 @@ export default function SessionDashboard() {
   const [draftTitle, setDraftTitle] = useState("");
   const [openPluginDialog, setOpenPluginDialog] = useState<OpenPluginDialog | null>(null);
   const [openMoreForSession, setOpenMoreForSession] = useState<string | null>(null);
+  const [sortMode, setSortModeState] = useState<SortMode>(loadSortMode);
+  const setSortMode = (mode: SortMode) => {
+    setSortModeState(mode);
+    try {
+      localStorage.setItem(SORT_MODE_KEY, mode);
+    } catch {
+      // Private mode etc.: the choice just isn't remembered.
+    }
+  };
+
+  const handleUnlink = (session: Session) => {
+    const name = session.title?.trim() || session.id.slice(0, 8);
+    if (!window.confirm(`把「${name}」从父会话解绑？解绑后它成为独立的会话，父会话的子会话列表里不再显示它。`)) {
+      return;
+    }
+    unlinkParent(session.id).catch((err) => {
+      console.error("failed to unlink session", err);
+      window.alert(`解绑失败：${err instanceof Error ? err.message : String(err)}`);
+    });
+  };
 
   useEffect(() => {
     hydrateSessions().catch((err) =>
@@ -188,7 +272,15 @@ export default function SessionDashboard() {
     );
   }
 
-  const rows = buildForest(entries);
+  // Table body: plain rows by time, or rows under one header per directory.
+  type Item = { kind: "group"; group: DirGroup } | { kind: "row"; row: Row };
+  const items: Item[] =
+    sortMode === "dir"
+      ? buildDirGroups(entries).flatMap((group): Item[] => [
+          { kind: "group", group },
+          ...group.rows.map((row): Item => ({ kind: "row", row })),
+        ])
+      : buildForest(entries, byUpdated).map((row): Item => ({ kind: "row", row }));
 
   const openSession = (sessionId: string) => {
     setActive(sessionId);
@@ -197,7 +289,32 @@ export default function SessionDashboard() {
 
   return (
     <div className="p-6 flex flex-col min-h-0 flex-1">
-      <h1 className="text-2xl font-semibold text-white mb-6 shrink-0">Sessions</h1>
+      <div className="mb-6 flex shrink-0 items-center justify-between gap-4">
+        <h1 className="text-2xl font-semibold text-white">Sessions</h1>
+        <div className="flex items-center gap-1 rounded-lg border border-gray-800 bg-gray-900/60 p-0.5 text-xs">
+          <span className="px-2 text-gray-500">排序</span>
+          {(
+            [
+              ["time", "按时间", "按最后活动时间，最新在前（子会话跟在父会话下）"],
+              ["dir", "按工作目录", "按工作目录归类：有 active 会话的目录在前，其中会话少的靠前；active 会话只在自己的目录里置顶"],
+            ] as const
+          ).map(([mode, label, hint]) => (
+            <button
+              key={mode}
+              type="button"
+              title={hint}
+              onClick={() => setSortMode(mode)}
+              className={`rounded-md px-2.5 py-1 transition-colors ${
+                sortMode === mode
+                  ? "bg-indigo-700 text-white"
+                  : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
       {openPluginDialog && (
         <PluginSessionConsoleDialog
           sessionId={openPluginDialog.sessionId}
@@ -220,7 +337,31 @@ export default function SessionDashboard() {
             </tr>
           </thead>
           <tbody>
-            {rows.map(({ entry, depth, orphanParent }) => {
+            {items.map((item) => {
+              if (item.kind === "group") {
+                const { group } = item;
+                return (
+                  <tr key={`dir:${group.key}`} className="border-b border-gray-800 bg-gray-900/70">
+                    <td colSpan={7} className="px-2 py-1.5">
+                      <span className="flex items-center gap-2 text-xs">
+                        <span
+                          className={`h-2 w-2 shrink-0 rounded-full ${
+                            group.activeCount > 0 ? "bg-green-400" : "bg-gray-600"
+                          }`}
+                        />
+                        <span className="truncate font-mono text-gray-300" title={group.dir ?? undefined}>
+                          {group.dir ?? "（无工作目录）"}
+                        </span>
+                        <span className="shrink-0 text-gray-500">
+                          {group.count} 个会话
+                          {group.activeCount > 0 && `，${group.activeCount} 个 active`}
+                        </span>
+                      </span>
+                    </td>
+                  </tr>
+                );
+              }
+              const { entry, depth, orphanParent } = item.row;
               const { session } = entry;
               const active = isActive(entry);
               return (
@@ -248,6 +389,19 @@ export default function SessionDashboard() {
                     className="inline-flex items-center gap-1 max-w-full"
                     style={{ paddingLeft: `${depth * 1.25}rem` }}
                   >
+                    {session.parent_session_id && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleUnlink(session);
+                        }}
+                        title={`从父会话 ${session.parent_session_id} 解绑`}
+                        className="shrink-0 rounded p-0.5 text-gray-600 hover:bg-gray-800 hover:text-amber-300 transition-colors"
+                      >
+                        <UnlinkIcon />
+                      </button>
+                    )}
                     {depth > 0 && (
                       <span className="text-gray-600 shrink-0">└─</span>
                     )}

@@ -194,6 +194,8 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ title }),
       }),
+    unlinkParent: (id: string) =>
+      request<Session>(`/sessions/${id}/parent`, { method: "DELETE" }),
     get: (id: string) => request<Session>(`/sessions/${id}`),
     list: () => request<Session[]>("/sessions"),
     systemPrompt: (id: string) =>
