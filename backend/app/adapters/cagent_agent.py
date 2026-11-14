@@ -13,7 +13,13 @@ overrides runs on a throwaway subclass (``with_turn_overrides``).
 
 from __future__ import annotations
 
+import inspect
+
 from cagent import BaseAgent, Tool
+from cagent.images import Image
+from cagent.tools.base import ToolResult
+
+from app.adapters.plugin_hooks import ARGS_MODIFIED_KEY
 
 from app.adapters.tools.base import BaseTool, ToolOutput
 
@@ -48,9 +54,26 @@ def _wrap_tool(base_tool: BaseTool, adapter) -> Tool:
     async def handler(*, store=None, ctx=None, agent_cls=None, **kwargs):
         # The framework's injected dependencies are not tool parameters.
         base_tool.call_context = _call_context(ctx)
+        call_id = (base_tool.call_context or {}).get("tool_call_id")
+        # tool.before hooks may have replaced the arguments (see gate_tool_call).
+        kwargs, modified_by = adapter.call_arguments(call_id, kwargs)
+        if modified_by:
+            try:
+                inspect.signature(base_tool.execute).bind(**kwargs)
+            except TypeError as exc:
+                # CAgent checked the model's arguments; re-check the replacement.
+                return _with_metadata(
+                    f"工具执行失败：{base_tool.name} 参数不匹配（{exc}；参数已被插件 "
+                    f"{', '.join(modified_by)} 修改）",
+                    {ARGS_MODIFIED_KEY: modified_by, "arguments": kwargs})
         result = await base_tool.execute(**kwargs)
+        result = await adapter.after_tool_hooks(base_tool.name, call_id, kwargs, result)
         if isinstance(result, ToolOutput):
-            return await adapter.tool_output_result(result)
+            result = await adapter.tool_output_result(result)
+        if modified_by:
+            # Kept on the saved tool row: the call ran with other arguments
+            # than the assistant message (the model's original) shows.
+            result = _with_metadata(result, {ARGS_MODIFIED_KEY: modified_by, "arguments": kwargs})
         return result
 
     return Tool(
@@ -58,6 +81,31 @@ def _wrap_tool(base_tool: BaseTool, adapter) -> Tool:
         description=base_tool.description,
         parameters=base_tool.parameters_schema(),
     )
+
+
+def _with_metadata(result, extra: dict) -> ToolResult:
+    """A CAgent ToolResult for result (str or ToolResult) with extra metadata."""
+    if not isinstance(result, ToolResult):
+        return ToolResult(result, metadata=extra)
+    metadata = {**result.metadata, **extra}
+    if any("at" in image for image in result.images):
+        return ToolResult(_interleaved(result), metadata=metadata)
+    return ToolResult(result.content, images=result.images, metadata=metadata)
+
+
+def _interleaved(result: ToolResult) -> list:
+    """Rebuild an interleaved content list from a normalized ToolResult."""
+    parts: list = []
+    cursor = 0
+    for image in result.images:
+        at = image.get("at", len(result.content))
+        if result.content[cursor:at]:
+            parts.append(result.content[cursor:at])
+        parts.append(Image(image["ref"], image["detail"]) if image.get("detail") else Image(image["ref"]))
+        cursor = at
+    if result.content[cursor:]:
+        parts.append(result.content[cursor:])
+    return parts
 
 
 # Settings one turn may override (POST /messages and /retry "turn_overrides"),

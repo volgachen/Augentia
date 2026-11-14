@@ -5,7 +5,9 @@ from app.db.interface import IAgentDatabase
 from app.db.deps import get_db
 from app.models.domain import AgentTemplate, AgentType
 import app.adapters.tools  # noqa: F401 — triggers tool registration
-from app.adapters.tools.registry import list_available
+from app.adapters.tools.registry import is_plugin_tool_name, list_available
+from app.plugins import session_settings
+from app.plugins.host import get_plugin_host
 from app.adapters.tools.permissions import validate_tool_permissions_config
 from app.adapters.model_params import resolve_model_params
 
@@ -34,8 +36,10 @@ class UpdateAgentRequest(BaseModel):
 
 
 def _validate_tools(names: list[str]) -> None:
+    # Plugin tools ("<plugin_id>__<tool>") may be listed while their plugin is
+    # disabled or not installed; the session then starts without them.
     available = list_available()
-    unknown = [n for n in names if n not in available]
+    unknown = [n for n in names if n not in available and not is_plugin_tool_name(n)]
     if unknown:
         raise HTTPException(
             status_code=400,
@@ -43,7 +47,7 @@ def _validate_tools(names: list[str]) -> None:
         )
 
 
-def _validate_config(config: dict) -> None:
+def _validate_config(config: dict, old_plugins: dict | None = None) -> None:
     # Only the CAgent engine is left; the key may still be written as "cagent".
     if config.get("engine", "cagent") != "cagent":
         raise HTTPException(
@@ -63,6 +67,14 @@ def _validate_config(config: dict) -> None:
             status_code=400,
             detail=f"config.tool_approvals values must be booleans; got non-bool for: {bad}",
         )
+    if "plugins" in config:
+        # Defaults copied into each new session of this agent; checked like a
+        # session's plugins section (unknown / not installed plugins pass).
+        try:
+            config["plugins"] = session_settings.prepare_for_write(
+                get_plugin_host(), config["plugins"], old_plugins)
+        except session_settings.SessionPluginsError as e:
+            raise HTTPException(status_code=400, detail={"message": "invalid plugin config", "errors": e.errors})
     try:
         validate_tool_permissions_config(config.get("tool_permissions"))
         # model_params / compression_model_params: same check the engines run
@@ -72,9 +84,17 @@ def _validate_config(config: dict) -> None:
         raise HTTPException(status_code=400, detail=str(e))
 
 
+def _masked(agent: AgentTemplate) -> AgentTemplate:
+    """Agent with x-secret values in its plugin defaults masked."""
+    masked = session_settings.mask_config(get_plugin_host(), agent.config or {})
+    if masked is agent.config:
+        return agent
+    return agent.model_copy(update={"config": masked})
+
+
 @router.get("", response_model=List[AgentTemplate])
 async def list_agents(db: IAgentDatabase = Depends(get_db)):
-    return await db.list_agents()
+    return [_masked(a) for a in await db.list_agents()]
 
 
 @router.post("", response_model=AgentTemplate, status_code=201)
@@ -85,13 +105,13 @@ async def create_agent(
     _validate_tools(body.tool_names)
     _validate_config(body.config)
     template = AgentTemplate(**body.model_dump())
-    return await db.create_agent(template)
+    return _masked(await db.create_agent(template))
 
 
 @router.get("/{agent_id}", response_model=AgentTemplate)
 async def get_agent(agent_id: str, db: IAgentDatabase = Depends(get_db)):
     try:
-        return await db.get_agent(agent_id)
+        return _masked(await db.get_agent(agent_id))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -103,16 +123,16 @@ async def update_agent(
     db: IAgentDatabase = Depends(get_db),
 ):
     try:
-        await db.get_agent(agent_id)
+        agent = await db.get_agent(agent_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     if body.tool_names is not None:
         _validate_tools(body.tool_names)
     if body.config is not None:
-        _validate_config(body.config)
+        _validate_config(body.config, session_settings.plugins_section(agent.config))
 
-    return await db.update_agent(agent_id, **body.model_dump(exclude_unset=True))
+    return _masked(await db.update_agent(agent_id, **body.model_dump(exclude_unset=True)))
 
 
 @router.get("/{agent_id}/system-prompt/history")

@@ -150,51 +150,36 @@ class Task(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class PluginStatus(str, Enum):
-    STOPPED = "stopped"
-    STARTING = "starting"
-    WAITING_INPUT = "waiting_input"
-    RUNNING = "running"
-    STOPPING = "stopping"
-    EXITED = "exited"
-    ERRORED = "errored"
-    CANCELLED = "cancelled"
+# ---- v2 plugin services (app/plugins/README.md §6, §11.3) ----
 
+class PluginServiceRun(BaseModel):
+    """One start of a plugin service (a global one, or one per session)."""
 
-class PluginInstance(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     plugin_id: str
-    display_name: str
-    status: PluginStatus = PluginStatus.STOPPED
-    config: dict[str, Any] | None = None
-    auto_start: bool = False
-    current_run_id: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class PluginRun(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    plugin_instance_id: str
-    plugin_id: str
-    status: PluginStatus = PluginStatus.STARTING
-    config_snapshot: dict[str, Any] | None = None
-    started_at: datetime | None = None
+    service: str
+    session_id: str | None = None
+    # starting / running / stopping / exited / errored (README §6.2).
+    status: str = "starting"
+    # How many automatic restarts preceded this run.
+    restart_count: int = 0
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     running_at: datetime | None = None
     exited_at: datetime | None = None
     exit_code: int | None = None
     error: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class PluginLog(BaseModel):
+class PluginServiceLog(BaseModel):
+    """A log line written by a plugin (ctx.log) or by the host about it."""
+
     id: int | None = None
-    plugin_instance_id: str
-    plugin_run_id: str
+    plugin_id: str
+    # The service run it came from; None for hooks, tools, actions, on_load.
+    run_id: str | None = None
     session_id: str | None = None
     ts: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    stream: str
-    level: str | None = None
+    # debug / info / warning / error
+    level: str = "info"
     line: str
 

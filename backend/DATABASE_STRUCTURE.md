@@ -4,7 +4,7 @@ Augentia persists runtime state through the `IAgentDatabase` interface (`app/db/
 
 The MySQL schema is auto-created idempotently (`CREATE TABLE IF NOT EXISTS`) on startup via the FastAPI `lifespan` → `MySqlDatabase.connect()`.
 
-Plugin definitions are not stored in the database. Installed plugin definitions are scanned dynamically from local `plugins/*/plugin.json` by `app/plugins/catalog.py`.
+Plugin definitions and settings are not stored in the database: plugins are scanned from `~/.augentia/plugins/*/plugin.json` (`app/plugins/loader.py`), global settings live in `~/.augentia/plugin_settings.json`, per-session settings in each session's `config.json`. The database only keeps plugin service runs and plugin log lines.
 
 ## `system_prompts`
 Immutable system prompt versions. Agents and sessions point at their current
@@ -78,63 +78,47 @@ Turn history.
 | `session_id` | VARCHAR(36) | NOT NULL |
 | `role` | VARCHAR(20) | NOT NULL |
 | `content` | LONGTEXT | NOT NULL |
-| `from_session_id` | VARCHAR(100) | nullable source id, for example another session id or `plugin:{instance_id}` |
+| `from_session_id` | VARCHAR(100) | nullable source id: another session id, or `plugin:{plugin_id}` for messages a plugin sent |
 | `created_at` | DATETIME(3) | NOT NULL |
 | `deleted_at` | DATETIME(3) | nullable; NULL means visible, non-NULL means soft-deleted |
 
 Index: `idx_messages_session (session_id)`. FK: `session_id → sessions(id) ON DELETE CASCADE`.
 
-## `plugin_instances`
-Long-lived user-created plugin instances. A definition comes from local `plugins/*/plugin.json`; this table stores the user's instance, configuration, current status, and current/latest run pointer.
+## `plugin_service_runs`
+One row per start of a plugin service (global, or one instance per session), including automatic restarts.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | VARCHAR(36) | PK |
-| `plugin_id` | VARCHAR(200) | manifest id, for example `wechat-bridge` |
-| `display_name` | VARCHAR(200) | user-facing instance name |
-| `status` | VARCHAR(30) | `stopped` \| `starting` \| `waiting_input` \| `running` \| `stopping` \| `exited` \| `errored` \| `cancelled` |
-| `config` | JSON | nullable instance config |
-| `auto_start` | BOOLEAN | whether backend startup should start this instance |
-| `current_run_id` | VARCHAR(36) | nullable current/latest run id |
-| `created_at` | DATETIME(3) | NOT NULL |
-| `updated_at` | DATETIME(3) | NOT NULL |
-
-Indexes: `plugin_id`, `status`, `auto_start`, `current_run_id`.
-
-## `plugin_runs`
-One row per plugin instance start attempt. Logs attach to runs so previous failures remain inspectable.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | VARCHAR(36) | PK |
-| `plugin_instance_id` | VARCHAR(36) | FK to `plugin_instances.id` |
-| `plugin_id` | VARCHAR(200) | copied from the instance for easier querying |
-| `status` | VARCHAR(30) | same enum family as `plugin_instances.status`, except normally starts at `starting` |
-| `config_snapshot` | JSON | nullable config used for this run |
-| `started_at` | DATETIME(3) | nullable start-attempt time |
-| `running_at` | DATETIME(3) | nullable time when the process was spawned successfully |
-| `exited_at` | DATETIME(3) | nullable exit time |
-| `exit_code` | INT | nullable process exit code |
+| `plugin_id` | VARCHAR(40) | NOT NULL |
+| `service` | VARCHAR(40) | service name declared by the plugin |
+| `session_id` | VARCHAR(36) | nullable; set for per-session services |
+| `status` | VARCHAR(20) | `starting` \| `running` \| `stopping` \| `exited` \| `errored` |
+| `restart_count` | INT | automatic restarts before this run |
+| `started_at` | DATETIME(3) | NOT NULL |
+| `running_at` | DATETIME(3) | nullable |
+| `exited_at` | DATETIME(3) | nullable |
+| `exit_code` | INT | nullable (subprocess services only) |
 | `error` | TEXT | nullable error summary |
-| `created_at` | DATETIME(3) | NOT NULL |
-| `updated_at` | DATETIME(3) | NOT NULL |
 
-Indexes: `(plugin_instance_id, started_at)`, `plugin_id`, `status`, `started_at`. FK: `plugin_instance_id → plugin_instances(id) ON DELETE CASCADE`.
+Indexes: `(plugin_id, started_at)`, `status`. Runs still active at startup are marked `errored` ("backend restarted while the service ran").
 
-## `plugin_logs`
-Persistent plugin run logs.
+## `plugin_service_logs`
+Log lines written by plugins (`ctx.log`, except debug) and by the host about them. The newest 20000 lines per plugin are kept.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | BIGINT | auto-increment PK |
-| `plugin_instance_id` | VARCHAR(36) | FK to `plugin_instances.id` |
-| `plugin_run_id` | VARCHAR(36) | FK to `plugin_runs.id` |
+| `plugin_id` | VARCHAR(40) | NOT NULL |
+| `run_id` | VARCHAR(36) | nullable; the service run that wrote it (NULL for hooks, tools, actions) |
+| `session_id` | VARCHAR(36) | nullable |
 | `ts` | DATETIME(3) | NOT NULL |
-| `stream` | VARCHAR(20) | `stdout` \| `stderr` \| `system` \| `event` |
-| `level` | VARCHAR(20) | nullable structured log level |
+| `level` | VARCHAR(10) | `info` \| `warning` \| `error` |
 | `line` | TEXT | NOT NULL |
 
-Indexes: `(plugin_run_id, ts)`, `(plugin_instance_id, ts)`, `stream`. FKs cascade on instance/run deletion.
+Indexes: `(plugin_id, id)`, `(run_id, id)`, `(session_id, id)`.
+
+The v1 tables `plugin_instances`, `plugin_runs` and `plugin_logs` are dropped at startup if present.
 
 ## `tasks`
 Agent todo lists. Keyed by `task_list_id` (= the owning session id); ids are per-list monotonic integers.

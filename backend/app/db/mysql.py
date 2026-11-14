@@ -16,10 +16,8 @@ from app.models.domain import (
     AgentType,
     Message,
     MessageRole,
-    PluginInstance,
-    PluginLog,
-    PluginRun,
-    PluginStatus,
+    PluginServiceLog,
+    PluginServiceRun,
     Session,
     SessionStatus,
     SystemPrompt,
@@ -83,57 +81,33 @@ CREATE TABLE IF NOT EXISTS messages (
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     """\
-CREATE TABLE IF NOT EXISTS plugin_instances (
-    id              VARCHAR(36)   PRIMARY KEY,
-    plugin_id       VARCHAR(200)  NOT NULL,
-    display_name    VARCHAR(200)  NOT NULL,
-    status          VARCHAR(30)   NOT NULL DEFAULT 'stopped',
-    config          JSON          DEFAULT NULL,
-    auto_start      BOOLEAN       NOT NULL DEFAULT FALSE,
-    current_run_id  VARCHAR(36)   DEFAULT NULL,
-    created_at      DATETIME(3)   NOT NULL,
-    updated_at      DATETIME(3)   NOT NULL,
-    INDEX idx_plugin_instances_plugin_id (plugin_id),
-    INDEX idx_plugin_instances_status (status),
-    INDEX idx_plugin_instances_auto_start (auto_start),
-    INDEX idx_plugin_instances_current_run (current_run_id)
+CREATE TABLE IF NOT EXISTS plugin_service_runs (
+    id             VARCHAR(36)   PRIMARY KEY,
+    plugin_id      VARCHAR(40)   NOT NULL,
+    service        VARCHAR(40)   NOT NULL,
+    session_id     VARCHAR(36)   DEFAULT NULL,
+    status         VARCHAR(20)   NOT NULL,
+    restart_count  INT           NOT NULL DEFAULT 0,
+    started_at     DATETIME(3)   NOT NULL,
+    running_at     DATETIME(3)   DEFAULT NULL,
+    exited_at      DATETIME(3)   DEFAULT NULL,
+    exit_code      INT           DEFAULT NULL,
+    error          TEXT          DEFAULT NULL,
+    INDEX idx_service_runs_plugin_started (plugin_id, started_at),
+    INDEX idx_service_runs_status (status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     """\
-CREATE TABLE IF NOT EXISTS plugin_runs (
-    id                  VARCHAR(36)   PRIMARY KEY,
-    plugin_instance_id  VARCHAR(36)   NOT NULL,
-    plugin_id           VARCHAR(200)  NOT NULL,
-    status              VARCHAR(30)   NOT NULL DEFAULT 'starting',
-    config_snapshot     JSON          DEFAULT NULL,
-    started_at          DATETIME(3)   DEFAULT NULL,
-    running_at          DATETIME(3)   DEFAULT NULL,
-    exited_at           DATETIME(3)   DEFAULT NULL,
-    exit_code           INT           DEFAULT NULL,
-    error               TEXT          DEFAULT NULL,
-    created_at          DATETIME(3)   NOT NULL,
-    updated_at          DATETIME(3)   NOT NULL,
-    INDEX idx_plugin_runs_instance_started (plugin_instance_id, started_at),
-    INDEX idx_plugin_runs_plugin_id (plugin_id),
-    INDEX idx_plugin_runs_status (status),
-    INDEX idx_plugin_runs_started_at (started_at),
-    FOREIGN KEY (plugin_instance_id) REFERENCES plugin_instances(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
-    """\
-CREATE TABLE IF NOT EXISTS plugin_logs (
-    id                  BIGINT        AUTO_INCREMENT PRIMARY KEY,
-    plugin_instance_id  VARCHAR(36)   NOT NULL,
-    plugin_run_id       VARCHAR(36)   NOT NULL,
-    session_id          VARCHAR(36)   DEFAULT NULL,
-    ts                  DATETIME(3)   NOT NULL,
-    stream              VARCHAR(20)   NOT NULL,
-    level               VARCHAR(20)   DEFAULT NULL,
-    line                TEXT          NOT NULL,
-    INDEX idx_plugin_logs_run_ts (plugin_run_id, ts),
-    INDEX idx_plugin_logs_instance_ts (plugin_instance_id, ts),
-    INDEX idx_plugin_logs_session_ts (session_id, ts),
-    INDEX idx_plugin_logs_stream (stream),
-    FOREIGN KEY (plugin_instance_id) REFERENCES plugin_instances(id) ON DELETE CASCADE,
-    FOREIGN KEY (plugin_run_id) REFERENCES plugin_runs(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS plugin_service_logs (
+    id          BIGINT        AUTO_INCREMENT PRIMARY KEY,
+    plugin_id   VARCHAR(40)   NOT NULL,
+    run_id      VARCHAR(36)   DEFAULT NULL,
+    session_id  VARCHAR(36)   DEFAULT NULL,
+    ts          DATETIME(3)   NOT NULL,
+    level       VARCHAR(10)   NOT NULL,
+    line        TEXT          NOT NULL,
+    INDEX idx_service_logs_plugin (plugin_id, id),
+    INDEX idx_service_logs_run (run_id, id),
+    INDEX idx_service_logs_session (session_id, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     """\
 CREATE TABLE IF NOT EXISTS tasks (
@@ -216,15 +190,10 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
         "model_params",
         ["ALTER TABLE sessions ADD COLUMN model_params JSON DEFAULT NULL AFTER model"],
     ),
-    (
-        "plugin_logs",
-        "session_id",
-        [
-            "ALTER TABLE plugin_logs ADD COLUMN session_id VARCHAR(36) DEFAULT NULL AFTER plugin_run_id",
-            "ALTER TABLE plugin_logs ADD INDEX idx_plugin_logs_session_ts (session_id, ts)",
-        ],
-    ),
 ]
+
+# v1 plugin tables, replaced by plugin_service_*; children first for the FKs.
+_DROP_V1_PLUGIN_TABLES = ("plugin_logs", "plugin_runs", "plugin_instances")
 
 def _row_to_agent(row: dict[str, Any]) -> AgentTemplate:
     tool_names = row["tool_names"]
@@ -327,50 +296,6 @@ def _json_dump(value: Any) -> str | None:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _row_to_plugin_instance(row: dict[str, Any]) -> PluginInstance:
-    return PluginInstance(
-        id=row["id"],
-        plugin_id=row["plugin_id"],
-        display_name=row["display_name"],
-        status=PluginStatus(row["status"]),
-        config=_json_col(row.get("config"), None),
-        auto_start=bool(row["auto_start"]),
-        current_run_id=row.get("current_run_id"),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
-
-
-def _row_to_plugin_run(row: dict[str, Any]) -> PluginRun:
-    return PluginRun(
-        id=row["id"],
-        plugin_instance_id=row["plugin_instance_id"],
-        plugin_id=row["plugin_id"],
-        status=PluginStatus(row["status"]),
-        config_snapshot=_json_col(row.get("config_snapshot"), None),
-        started_at=row.get("started_at"),
-        running_at=row.get("running_at"),
-        exited_at=row.get("exited_at"),
-        exit_code=row.get("exit_code"),
-        error=row.get("error"),
-        created_at=row["created_at"],
-        updated_at=row["updated_at"],
-    )
-
-
-def _row_to_plugin_log(row: dict[str, Any]) -> PluginLog:
-    return PluginLog(
-        id=row["id"],
-        plugin_instance_id=row["plugin_instance_id"],
-        plugin_run_id=row["plugin_run_id"],
-        session_id=row.get("session_id"),
-        ts=row["ts"],
-        stream=row["stream"],
-        level=row.get("level"),
-        line=row["line"],
-    )
-
-
 def _row_to_task(row: dict[str, Any]) -> Task:
     return Task(
         id=row["id"],
@@ -421,6 +346,8 @@ class MySqlDatabase(IAgentDatabase):
             async with conn.cursor() as cur:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
+                    for table in _DROP_V1_PLUGIN_TABLES:
+                        await cur.execute(f"DROP TABLE IF EXISTS {table}")
                     for sql in _SCHEMA_SQL:
                         await cur.execute(sql)
 
@@ -1066,271 +993,114 @@ class MySqlDatabase(IAgentDatabase):
                 raise
         return changed
 
-    # ---- Plugin instances/runs/logs ----
+    # ------- v2 plugin service runs / logs -------
 
-    async def list_plugin_instances(self) -> list[PluginInstance]:
-        async with self._pool.acquire() as conn:
-            async with conn.cursor(DictCursor) as cur:
-                await cur.execute("SELECT * FROM plugin_instances ORDER BY created_at")
-                rows = await cur.fetchall()
-        return [_row_to_plugin_instance(r) for r in rows]
-
-    async def get_plugin_instance(self, instance_id: str) -> PluginInstance:
-        async with self._pool.acquire() as conn:
-            async with conn.cursor(DictCursor) as cur:
-                await cur.execute(
-                    "SELECT * FROM plugin_instances WHERE id = %s", (instance_id,)
-                )
-                row = await cur.fetchone()
-        if row is None:
-            raise KeyError(f"Plugin instance '{instance_id}' not found")
-        return _row_to_plugin_instance(row)
-
-    async def create_plugin_instance(
-        self,
-        plugin_id: str,
-        display_name: str,
-        *,
-        config: dict | None = None,
-        auto_start: bool = False,
-    ) -> PluginInstance:
-        instance = PluginInstance(
-            plugin_id=plugin_id,
-            display_name=display_name,
-            config=config,
-            auto_start=auto_start,
-        )
+    async def create_service_run(self, plugin_id: str, service: str, *, session_id: str | None = None,
+                                 restart_count: int = 0) -> PluginServiceRun:
+        run = PluginServiceRun(plugin_id=plugin_id, service=service, session_id=session_id,
+                               restart_count=restart_count)
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    """INSERT INTO plugin_instances
-                       (id, plugin_id, display_name, status, config, auto_start,
-                        current_run_id, created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        instance.id,
-                        instance.plugin_id,
-                        instance.display_name,
-                        instance.status.value,
-                        _json_dump(instance.config),
-                        instance.auto_start,
-                        instance.current_run_id,
-                        instance.created_at,
-                        instance.updated_at,
-                    ),
-                )
-        return instance
-
-    async def update_plugin_instance(
-        self,
-        instance_id: str,
-        *,
-        display_name: str | None = None,
-        config: dict | None = None,
-        auto_start: bool | None = None,
-        status: PluginStatus | None = None,
-        current_run_id: str | None = None,
-    ) -> PluginInstance:
-        updates: dict[str, Any] = {}
-        if display_name is not None:
-            updates["display_name"] = display_name
-        if config is not None:
-            updates["config"] = _json_dump(config)
-        if auto_start is not None:
-            updates["auto_start"] = auto_start
-        if status is not None:
-            updates["status"] = status.value
-        if current_run_id is not None:
-            updates["current_run_id"] = current_run_id
-        if not updates:
-            return await self.get_plugin_instance(instance_id)
-        updates["updated_at"] = datetime.now(timezone.utc)
-        set_clause = ", ".join(f"{k} = %s" for k in updates)
-        values = list(updates.values()) + [instance_id]
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                result = await cur.execute(
-                    f"UPDATE plugin_instances SET {set_clause} WHERE id = %s",
-                    values,
-                )
-        if result == 0:
-            raise KeyError(f"Plugin instance '{instance_id}' not found")
-        return await self.get_plugin_instance(instance_id)
-
-    async def delete_plugin_instance(self, instance_id: str) -> None:
-        await self.get_plugin_instance(instance_id)
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM plugin_instances WHERE id = %s", (instance_id,))
-
-    async def create_plugin_run(
-        self,
-        plugin_instance_id: str,
-        plugin_id: str,
-        *,
-        config_snapshot: dict | None = None,
-    ) -> PluginRun:
-        await self.get_plugin_instance(plugin_instance_id)
-        now = datetime.now(timezone.utc)
-        run = PluginRun(
-            plugin_instance_id=plugin_instance_id,
-            plugin_id=plugin_id,
-            config_snapshot=config_snapshot,
-            started_at=now,
-            created_at=now,
-            updated_at=now,
-        )
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """INSERT INTO plugin_runs
-                       (id, plugin_instance_id, plugin_id, status, config_snapshot,
-                        started_at, running_at, exited_at, exit_code, error,
-                        created_at, updated_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        run.id,
-                        run.plugin_instance_id,
-                        run.plugin_id,
-                        run.status.value,
-                        _json_dump(run.config_snapshot),
-                        run.started_at,
-                        run.running_at,
-                        run.exited_at,
-                        run.exit_code,
-                        run.error,
-                        run.created_at,
-                        run.updated_at,
-                    ),
+                    "INSERT INTO plugin_service_runs "
+                    "(id, plugin_id, service, session_id, status, restart_count, started_at) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (run.id, plugin_id, service, session_id, run.status, restart_count, run.started_at),
                 )
         return run
 
-    async def get_plugin_run(self, run_id: str) -> PluginRun:
+    async def _get_service_run(self, run_id: str) -> PluginServiceRun:
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
-                await cur.execute("SELECT * FROM plugin_runs WHERE id = %s", (run_id,))
+                await cur.execute("SELECT * FROM plugin_service_runs WHERE id = %s", (run_id,))
                 row = await cur.fetchone()
         if row is None:
-            raise KeyError(f"Plugin run '{run_id}' not found")
-        return _row_to_plugin_run(row)
+            raise KeyError(f"Service run '{run_id}' not found")
+        return PluginServiceRun(**row)
 
-    async def list_plugin_runs(self, plugin_instance_id: str) -> list[PluginRun]:
-        await self.get_plugin_instance(plugin_instance_id)
-        async with self._pool.acquire() as conn:
-            async with conn.cursor(DictCursor) as cur:
-                await cur.execute(
-                    """SELECT * FROM plugin_runs
-                       WHERE plugin_instance_id = %s ORDER BY created_at DESC""",
-                    (plugin_instance_id,),
-                )
-                rows = await cur.fetchall()
-        return [_row_to_plugin_run(r) for r in rows]
-
-    async def update_plugin_run(
-        self,
-        run_id: str,
-        *,
-        status: PluginStatus | None = None,
-        running_at: Any = _UNSET,
-        exited_at: Any = _UNSET,
-        exit_code: Any = _UNSET,
-        error: Any = _UNSET,
-    ) -> PluginRun:
+    async def update_service_run(self, run_id: str, *, status: str | None = None, running_at: Any = _UNSET,
+                                 exited_at: Any = _UNSET, exit_code: Any = _UNSET,
+                                 error: Any = _UNSET) -> PluginServiceRun:
         updates: dict[str, Any] = {}
         if status is not None:
-            updates["status"] = status.value
-        if running_at is not _UNSET:
-            updates["running_at"] = running_at
-        if exited_at is not _UNSET:
-            updates["exited_at"] = exited_at
-        if exit_code is not _UNSET:
-            updates["exit_code"] = exit_code
-        if error is not _UNSET:
-            updates["error"] = error
-        if not updates:
-            return await self.get_plugin_run(run_id)
-        updates["updated_at"] = datetime.now(timezone.utc)
-        set_clause = ", ".join(f"{k} = %s" for k in updates)
-        values = list(updates.values()) + [run_id]
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                result = await cur.execute(
-                    f"UPDATE plugin_runs SET {set_clause} WHERE id = %s",
-                    values,
-                )
-        if result == 0:
-            raise KeyError(f"Plugin run '{run_id}' not found")
-        return await self.get_plugin_run(run_id)
+            updates["status"] = status
+        for key, value in (("running_at", running_at), ("exited_at", exited_at),
+                           ("exit_code", exit_code), ("error", error)):
+            if value is not _UNSET:
+                updates[key] = value
+        if updates:
+            set_clause = ", ".join(f"{k} = %s" for k in updates)
+            async with self._pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"UPDATE plugin_service_runs SET {set_clause} WHERE id = %s",
+                                      [*updates.values(), run_id])
+        return await self._get_service_run(run_id)
 
-    async def add_plugin_log(
-        self,
-        plugin_instance_id: str,
-        plugin_run_id: str,
-        stream: str,
-        line: str,
-        *,
-        level: str | None = None,
-        session_id: str | None = None,
-    ) -> PluginLog:
-        log = PluginLog(
-            plugin_instance_id=plugin_instance_id,
-            plugin_run_id=plugin_run_id,
-            session_id=session_id,
-            stream=stream,
-            level=level,
-            line=line,
-        )
-        async with self._pool.acquire() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """INSERT INTO plugin_logs
-                       (plugin_instance_id, plugin_run_id, session_id, ts, stream, level, line)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                    (
-                        log.plugin_instance_id,
-                        log.plugin_run_id,
-                        log.session_id,
-                        log.ts,
-                        log.stream,
-                        log.level,
-                        log.line,
-                    ),
-                )
-                log.id = cur.lastrowid
-        return log
-
-    async def list_plugin_logs(
-        self,
-        *,
-        plugin_instance_id: str | None = None,
-        plugin_run_id: str | None = None,
-        session_id: str | None = None,
-        limit: int = 500,
-    ) -> list[PluginLog]:
-        clauses: list[str] = []
-        values: list[Any] = []
-        if plugin_instance_id is not None:
-            clauses.append("plugin_instance_id = %s")
-            values.append(plugin_instance_id)
-        if plugin_run_id is not None:
-            clauses.append("plugin_run_id = %s")
-            values.append(plugin_run_id)
+    async def list_service_runs(self, plugin_id: str, *, service: str | None = None,
+                                session_id: str | None = None, limit: int = 100) -> list[PluginServiceRun]:
+        clauses, values = ["plugin_id = %s"], [plugin_id]
+        if service is not None:
+            clauses.append("service = %s")
+            values.append(service)
         if session_id is not None:
             clauses.append("session_id = %s")
             values.append(session_id)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        values.append(limit)
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
                 await cur.execute(
-                    f"""SELECT * FROM plugin_logs {where}
-                        ORDER BY ts DESC, id DESC LIMIT %s""",
-                    values,
-                )
+                    f"SELECT * FROM plugin_service_runs WHERE {' AND '.join(clauses)} "
+                    "ORDER BY started_at DESC LIMIT %s", [*values, limit])
                 rows = await cur.fetchall()
-        return [_row_to_plugin_log(r) for r in reversed(rows)]
+        return [PluginServiceRun(**r) for r in rows]
 
-    # ---- Tasks ----
+    async def interrupt_active_service_runs(self, error: str) -> int:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                return await cur.execute(
+                    "UPDATE plugin_service_runs SET status = 'errored', error = %s, exited_at = %s "
+                    "WHERE status IN ('starting', 'running', 'stopping')",
+                    (error, datetime.now(timezone.utc)))
+
+    async def add_service_log(self, plugin_id: str, line: str, *, level: str = "info",
+                              run_id: str | None = None, session_id: str | None = None) -> PluginServiceLog:
+        log = PluginServiceLog(plugin_id=plugin_id, run_id=run_id, session_id=session_id, level=level, line=line)
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO plugin_service_logs (plugin_id, run_id, session_id, ts, level, line) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    (plugin_id, run_id, session_id, log.ts, level, line))
+                log.id = cur.lastrowid
+        return log
+
+    async def list_service_logs(self, plugin_id: str, *, run_id: str | None = None,
+                                session_id: str | None = None, limit: int = 500) -> list[PluginServiceLog]:
+        clauses, values = ["plugin_id = %s"], [plugin_id]
+        if run_id is not None:
+            clauses.append("run_id = %s")
+            values.append(run_id)
+        if session_id is not None:
+            clauses.append("session_id = %s")
+            values.append(session_id)
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute(
+                    f"SELECT * FROM plugin_service_logs WHERE {' AND '.join(clauses)} "
+                    "ORDER BY id DESC LIMIT %s", [*values, limit])
+                rows = await cur.fetchall()
+        return [PluginServiceLog(**r) for r in reversed(rows)]
+
+    async def prune_service_logs(self, plugin_id: str, keep: int) -> int:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute(
+                    "SELECT id FROM plugin_service_logs WHERE plugin_id = %s ORDER BY id DESC LIMIT 1 OFFSET %s",
+                    (plugin_id, keep))
+                row = await cur.fetchone()
+                if row is None:
+                    return 0
+                return await cur.execute(
+                    "DELETE FROM plugin_service_logs WHERE plugin_id = %s AND id <= %s", (plugin_id, row["id"]))
 
     async def _next_task_id(self, task_list_id: str) -> int:
 

@@ -15,6 +15,11 @@ class Settings:
             "AUGENTIA_HOME",
             os.path.join(os.path.expanduser("~"), ".augentia"),
         )
+        # Extra plugin directories scanned after {augentia_home}/plugins,
+        # separated by os.pathsep. For plugin development.
+        self.plugin_path: list[str] = [
+            p for p in os.getenv("AUGENTIA_PLUGIN_PATH", "").split(os.pathsep) if p.strip()
+        ]
         self.worktree_root: str = os.getenv(
             "AUGENTIA_WORKTREE_ROOT",
             os.path.join(os.path.expanduser("~"), ".augentia", "worktrees"),

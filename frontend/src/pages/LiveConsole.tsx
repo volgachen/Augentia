@@ -10,6 +10,7 @@ import SubAgentListPanel from "../components/SubAgentListPanel";
 import SessionListPanel from "../components/SessionListPanel";
 import ToolConfirmPanel from "../components/ToolConfirmPanel";
 import ToolPermissionsPanel from "../components/ToolPermissionsPanel";
+import SessionPluginsPanel from "../components/SessionPluginsPanel";
 import SystemPromptPanel from "../components/SystemPromptPanel";
 import ShareButton from "../components/ShareButton";
 import WorkingDirEditor from "../components/WorkingDirEditor";
@@ -40,7 +41,7 @@ export default function LiveConsole() {
   const bottomRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
   const [focusedItemIndex, setFocusedItemIndex] = useState<number | null>(null);
-  const [sidebarTab, setSidebarTab] = useState<"overview" | "permissions" | "systemPrompt" | "sessions">("overview");
+  const [sidebarTab, setSidebarTab] = useState<"overview" | "permissions" | "plugins" | "systemPrompt" | "sessions">("overview");
   const [showToolCalls, setShowToolCalls] = useState(true);
   const [showToolResults, setShowToolResults] = useState(true);
   const [deriving, setDeriving] = useState(false);
@@ -476,6 +477,7 @@ export default function LiveConsole() {
             {[
               ["overview", "Overview"],
               ["permissions", "Tools"],
+              ["plugins", "Plugins"],
               ["sessions", "Sessions"],
               ["systemPrompt", "System Prompt"],
             ].map(([key, label]) => (
@@ -557,6 +559,7 @@ export default function LiveConsole() {
             {sidebarTab === "permissions" && (
               <ToolPermissionsPanel session={session} />
             )}
+            {sidebarTab === "plugins" && <SessionPluginsPanel key={session.id} session={session} />}
             {sidebarTab === "systemPrompt" && (
               // Re-key on working_dir: changing it may rewrite the prompt.
               <SystemPromptPanel key={`${session.id}:${session.working_dir}`} session={session} />

@@ -23,6 +23,17 @@ export type StreamEventType =
   // Client-only: a compression_completed mark loaded from history.
   | "compression";
 
+// GET /tools: one entry per selectable tool (built-in, or from a loaded plugin).
+export interface ToolInfo {
+  name: string;
+  description: string;
+  source: "builtin" | "plugin";
+  plugin_id: string | null;
+  plugin_name: string | null;
+  // Default confirm policy; config.tool_approvals overrides it per agent.
+  requires_approval: boolean;
+}
+
 export interface AgentTemplate {
   id: string;
   name: string;
@@ -206,91 +217,144 @@ export interface Task {
   updated_at: string;
 }
 
-export type PluginScope = "system_side" | "session_side" | "hybrid";
+// ---- v2 plugin host (backend/app/plugins/README.md) ----
 
-export type PluginStatus =
+// A JSON Schema as written in plugin.json (config.global / config.session).
+export type JsonSchema = Record<string, unknown>;
+
+// GET /sessions/{id}/plugins: one plugin as seen from a session.
+export interface SessionPluginInfo {
+  id: string;
+  name: string;
+  description: string;
+  state: "loaded" | "disabled" | "error";
+  error: string | null;
+  // Hooks and session services run only when enabled (tools do not depend on it).
+  enabled: boolean;
+  default_enabled: boolean;
+  // Effective config: schema defaults applied, x-secret values masked.
+  config: Record<string, unknown>;
+  schema: JsonSchema | null;
+  // The stored entry no longer matches the schema (e.g. after a plugin upgrade).
+  config_errors: string[];
+  tools: string[];
+  hooks: string[];
+  session_services: string[];
+  actions: string[];
+  // This session's service instances and the plugin's UI card for it.
+  services: ServiceState[];
+  ui: PluginUIState | null;
+}
+
+export type ServiceStatus =
   | "stopped"
   | "starting"
-  | "waiting_input"
   | "running"
   | "stopping"
   | "exited"
   | "errored"
-  | "cancelled";
+  | "backoff";
 
-export interface PluginEntrySpec {
-  type: string;
-  main: string | null;
-  skill: string | null;
-  scripts_dir: string | null;
-}
-
-export interface PluginSessionSpec {
-  selectable: boolean;
-  default_enabled: boolean;
-}
-
-export interface PluginDefinition {
-  id: string;
-  name: string;
-  version: string;
-  scope: PluginScope;
-  has_session_dialog: boolean;
-  provider: string;
-  description: string;
-  entry: PluginEntrySpec;
-  capabilities: string[];
-  subscriptions: string[];
-  actions: string[];
-  default_config: Record<string, unknown>;
-  session: PluginSessionSpec;
-  root: string;
-}
-
-export interface PluginInstance {
-  id: string;
+export interface ServiceState {
   plugin_id: string;
-  display_name: string;
-  status: PluginStatus;
-  config: Record<string, unknown> | null;
-  auto_start: boolean;
-  current_run_id: string | null;
-  created_at: string;
+  service: string;
+  session_id: string | null;
+  scope: "global" | "session";
+  restart: "never" | "on-failure" | "always";
+  status: ServiceStatus;
+  run_id: string | null;
+  restart_count: number;
+  error: string | null;
+  next_restart_at: string | null;
+  started_at: string | null;
+}
+
+export interface PluginUIAction {
+  id: string;
+  label: string;
+  style?: "default" | "primary" | "danger";
+}
+
+// Status card a plugin pushes with ctx.ui.update (README §5.4).
+export interface PluginUIState {
+  plugin_id: string;
+  session_id: string | null;
+  status: "idle" | "waiting" | "ok" | "error";
+  message: string | null;
+  link: string | null;
+  qr: string | null;
+  actions: PluginUIAction[];
   updated_at: string;
 }
 
-export interface PluginRun {
-  id: string;
-  plugin_instance_id: string;
+export interface PluginLogEntry {
+  id: number | null;
   plugin_id: string;
-  status: PluginStatus;
-  config_snapshot: Record<string, unknown> | null;
-  started_at: string | null;
+  run_id: string | null;
+  session_id: string | null;
+  ts: string;
+  level: "debug" | "info" | "warning" | "error";
+  line: string;
+}
+
+export interface PluginServiceRun {
+  id: string;
+  plugin_id: string;
+  service: string;
+  session_id: string | null;
+  status: string;
+  restart_count: number;
+  started_at: string;
   running_at: string | null;
   exited_at: string | null;
   exit_code: number | null;
   error: string | null;
-  created_at: string;
-  updated_at: string;
 }
 
-export type PluginLogStream = "stdout" | "stderr" | "system" | "plugin";
-
-export interface PluginLogLine {
-  id?: number | null;
-  plugin_instance_id?: string;
-  plugin_run_id?: string;
-  session_id?: string | null;
-  ts: string;
-  stream: PluginLogStream;
-  level?: string | null;
-  line: string;
+export interface PluginCapabilities {
+  tools: { name: string; full_name: string; description: string; requires_approval: boolean }[];
+  hooks: { event: string; priority: number; timeout: number; on_error: "skip" | "fail" }[];
+  services: { name: string; scope: "global" | "session"; restart: string; autostart: boolean }[];
+  actions: string[];
+  http_routes: boolean;
 }
 
-export type PluginWsFrame =
-  | { type: "plugin_instance_state"; data: PluginInstance }
-  | { type: "log"; data: PluginLogLine }
-  | { type: "plugin_event"; data: Record<string, unknown> }
-  | { type: "status"; data: { status: PluginStatus; error?: string | null; run_id?: string | null } }
-  | { type: "logs_cleared"; data: null }
-  | { type: "error"; data: string };
+// GET /plugins.
+export interface PluginInfo {
+  id: string;
+  path: string;
+  state: "loaded" | "disabled" | "error";
+  enabled: boolean;
+  error: string | null;
+  missing_dependencies: string[];
+  name: string | null;
+  version: string | null;
+  description: string;
+  author: string;
+  api_version: number | null;
+  python_dependencies: string[];
+  global_config_schema: JsonSchema | null;
+  session_config_schema: JsonSchema | null;
+  session_default_enabled: boolean;
+  public_routes: string[];
+  // Known only while loaded.
+  capabilities: PluginCapabilities | null;
+  services: ServiceState[];
+  ui: PluginUIState | null;
+}
+
+// Frames of WS /plugins/stream.
+export type PluginStreamFrame =
+  | {
+      type: "snapshot";
+      data: {
+        plugins: PluginInfo[];
+        services: ServiceState[];
+        ui: PluginUIState[];
+        logs: PluginLogEntry[];
+      };
+    }
+  | { type: "plugin"; data: PluginInfo }
+  | { type: "service"; data: ServiceState }
+  | { type: "ui"; data: PluginUIState }
+  | { type: "log"; data: PluginLogEntry };

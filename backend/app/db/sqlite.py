@@ -15,10 +15,8 @@ from app.models.domain import (
     AgentType,
     Message,
     MessageRole,
-    PluginInstance,
-    PluginLog,
-    PluginRun,
-    PluginStatus,
+    PluginServiceLog,
+    PluginServiceRun,
     Session,
     SessionStatus,
     SystemPrompt,
@@ -107,31 +105,19 @@ def _metadata_json(metadata: dict) -> str | None:
     return json.dumps(metadata, ensure_ascii=False) if metadata else None
 
 
-def _plugin_instance(row: sqlite3.Row) -> PluginInstance:
-    return PluginInstance(
-        id=row["id"], plugin_id=row["plugin_id"], display_name=row["display_name"],
-        status=PluginStatus(row["status"]), config=_json(row["config"], None),
-        auto_start=bool(row["auto_start"]), current_run_id=row["current_run_id"],
-        created_at=_dt(row["created_at"]), updated_at=_dt(row["updated_at"]),
-    )
-
-
-def _plugin_run(row: sqlite3.Row) -> PluginRun:
-    return PluginRun(
-        id=row["id"], plugin_instance_id=row["plugin_instance_id"], plugin_id=row["plugin_id"],
-        status=PluginStatus(row["status"]), config_snapshot=_json(row["config_snapshot"], None),
-        started_at=_dt(row["started_at"]), running_at=_dt(row["running_at"]),
+def _service_run(row: sqlite3.Row) -> PluginServiceRun:
+    return PluginServiceRun(
+        id=row["id"], plugin_id=row["plugin_id"], service=row["service"], session_id=row["session_id"],
+        status=row["status"], restart_count=row["restart_count"],
+        started_at=_dt(row["started_at"]) or datetime.now(timezone.utc), running_at=_dt(row["running_at"]),
         exited_at=_dt(row["exited_at"]), exit_code=row["exit_code"], error=row["error"],
-        created_at=_dt(row["created_at"]), updated_at=_dt(row["updated_at"]),
     )
 
 
-def _plugin_log(row: sqlite3.Row) -> PluginLog:
-    return PluginLog(
-        id=row["id"], plugin_instance_id=row["plugin_instance_id"],
-        plugin_run_id=row["plugin_run_id"], session_id=row["session_id"],
-        ts=_dt(row["ts"]), stream=row["stream"], level=row["level"],
-        line=row["line"],
+def _service_log(row: sqlite3.Row) -> PluginServiceLog:
+    return PluginServiceLog(
+        id=row["id"], plugin_id=row["plugin_id"], run_id=row["run_id"], session_id=row["session_id"],
+        ts=_dt(row["ts"]) or datetime.now(timezone.utc), level=row["level"], line=row["line"],
     )
 
 
@@ -226,60 +212,34 @@ class SqliteDatabase(IAgentDatabase):
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id);
-            CREATE TABLE IF NOT EXISTS plugin_instances (
+            CREATE TABLE IF NOT EXISTS plugin_service_runs (
                 id TEXT PRIMARY KEY,
                 plugin_id TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'stopped',
-                config TEXT DEFAULT NULL,
-                auto_start INTEGER NOT NULL DEFAULT 0,
-                current_run_id TEXT DEFAULT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_plugin_instances_plugin_id ON plugin_instances (plugin_id);
-            CREATE INDEX IF NOT EXISTS idx_plugin_instances_status ON plugin_instances (status);
-            CREATE INDEX IF NOT EXISTS idx_plugin_instances_auto_start ON plugin_instances (auto_start);
-            CREATE INDEX IF NOT EXISTS idx_plugin_instances_current_run ON plugin_instances (current_run_id);
-            """
-        )
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS plugin_runs (
-                id TEXT PRIMARY KEY,
-                plugin_instance_id TEXT NOT NULL,
-                plugin_id TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'starting',
-                config_snapshot TEXT DEFAULT NULL,
-                started_at TEXT DEFAULT NULL,
+                service TEXT NOT NULL,
+                session_id TEXT DEFAULT NULL,
+                status TEXT NOT NULL,
+                restart_count INTEGER NOT NULL DEFAULT 0,
+                started_at TEXT NOT NULL,
                 running_at TEXT DEFAULT NULL,
                 exited_at TEXT DEFAULT NULL,
                 exit_code INTEGER DEFAULT NULL,
-                error TEXT DEFAULT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY (plugin_instance_id) REFERENCES plugin_instances(id) ON DELETE CASCADE
+                error TEXT DEFAULT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_plugin_runs_instance_started
-                ON plugin_runs (plugin_instance_id, started_at);
-            CREATE INDEX IF NOT EXISTS idx_plugin_runs_plugin_id ON plugin_runs (plugin_id);
-            CREATE INDEX IF NOT EXISTS idx_plugin_runs_status ON plugin_runs (status);
-            CREATE INDEX IF NOT EXISTS idx_plugin_runs_started_at ON plugin_runs (started_at);
-            CREATE TABLE IF NOT EXISTS plugin_logs (
+            CREATE INDEX IF NOT EXISTS idx_service_runs_plugin_started
+                ON plugin_service_runs (plugin_id, started_at);
+            CREATE INDEX IF NOT EXISTS idx_service_runs_status ON plugin_service_runs (status);
+            CREATE TABLE IF NOT EXISTS plugin_service_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                plugin_instance_id TEXT NOT NULL,
-                plugin_run_id TEXT NOT NULL,
+                plugin_id TEXT NOT NULL,
+                run_id TEXT DEFAULT NULL,
                 session_id TEXT DEFAULT NULL,
                 ts TEXT NOT NULL,
-                stream TEXT NOT NULL,
-                level TEXT DEFAULT NULL,
-                line TEXT NOT NULL,
-                FOREIGN KEY (plugin_instance_id) REFERENCES plugin_instances(id) ON DELETE CASCADE,
-                FOREIGN KEY (plugin_run_id) REFERENCES plugin_runs(id) ON DELETE CASCADE
+                level TEXT NOT NULL,
+                line TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_plugin_logs_run_ts ON plugin_logs (plugin_run_id, ts);
-            CREATE INDEX IF NOT EXISTS idx_plugin_logs_instance_ts ON plugin_logs (plugin_instance_id, ts);
-            CREATE INDEX IF NOT EXISTS idx_plugin_logs_stream ON plugin_logs (stream);
+            CREATE INDEX IF NOT EXISTS idx_service_logs_plugin ON plugin_service_logs (plugin_id, id);
+            CREATE INDEX IF NOT EXISTS idx_service_logs_run ON plugin_service_logs (run_id, id);
+            CREATE INDEX IF NOT EXISTS idx_service_logs_session ON plugin_service_logs (session_id, id);
             """
         )
         self._conn.executescript(
@@ -318,17 +278,10 @@ class SqliteDatabase(IAgentDatabase):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
 
-        plugin_log_columns = {
-            row["name"] for row in self._conn.execute("PRAGMA table_info(plugin_logs)")
-        }
-        if "session_id" not in plugin_log_columns:
-            self._conn.execute(
-                "ALTER TABLE plugin_logs ADD COLUMN session_id TEXT DEFAULT NULL"
-            )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_plugin_logs_session_ts "
-            "ON plugin_logs (session_id, ts)"
-        )
+        # v1 plugin tables (instances / runs / logs), replaced by the
+        # plugin_service_* tables; they only held test data.
+        for table in ("plugin_logs", "plugin_runs", "plugin_instances"):
+            self._conn.execute(f"DROP TABLE IF EXISTS {table}")
 
         message_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(messages)")
@@ -707,143 +660,91 @@ class SqliteDatabase(IAgentDatabase):
                 "UPDATE sessions SET last_message_at = ? WHERE id = ?", (latest["value"], session_id))
         return changed
 
-    async def list_plugin_instances(self) -> list[PluginInstance]:
-        return [_plugin_instance(r) for r in self._rows("SELECT * FROM plugin_instances ORDER BY created_at")]
+    # ------- v2 plugin service runs / logs -------
 
-    async def get_plugin_instance(self, instance_id: str) -> PluginInstance:
-        row = self._row("SELECT * FROM plugin_instances WHERE id = ?", (instance_id,))
-        if row is None:
-            raise KeyError(f"Plugin instance '{instance_id}' not found")
-        return _plugin_instance(row)
-
-    async def create_plugin_instance(self, plugin_id: str, display_name: str, **kwargs: Any) -> PluginInstance:
-        instance = PluginInstance(plugin_id=plugin_id, display_name=display_name,
-                                  config=kwargs.get("config"), auto_start=kwargs.get("auto_start", False))
+    async def create_service_run(self, plugin_id: str, service: str, *, session_id: str | None = None,
+                                 restart_count: int = 0) -> PluginServiceRun:
+        run = PluginServiceRun(plugin_id=plugin_id, service=service, session_id=session_id,
+                               restart_count=restart_count)
         self._execute(
-            """INSERT INTO plugin_instances
-               (id, plugin_id, display_name, status, config, auto_start, current_run_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (instance.id, instance.plugin_id, instance.display_name, instance.status.value,
-             _dump(instance.config), int(instance.auto_start), instance.current_run_id,
-             _iso(instance.created_at), _iso(instance.updated_at)),
-        )
-        return instance
-
-    async def update_plugin_instance(self, instance_id: str, **kwargs: Any) -> PluginInstance:
-        updates: dict[str, Any] = {}
-        for key in ("display_name", "config", "auto_start", "status", "current_run_id"):
-            if key in kwargs and kwargs[key] is not None:
-                updates[key] = kwargs[key]
-        if "config" in updates:
-            updates["config"] = _dump(updates["config"])
-        if "auto_start" in updates:
-            updates["auto_start"] = int(updates["auto_start"])
-        if "status" in updates:
-            updates["status"] = updates["status"].value
-        if updates:
-            updates["updated_at"] = _iso(datetime.now(timezone.utc))
-            clause = ", ".join(f"{k} = ?" for k in updates)
-            cur = self._execute(f"UPDATE plugin_instances SET {clause} WHERE id = ?", [*updates.values(), instance_id])
-            if cur.rowcount == 0:
-                raise KeyError(f"Plugin instance '{instance_id}' not found")
-        return await self.get_plugin_instance(instance_id)
-
-    async def delete_plugin_instance(self, instance_id: str) -> None:
-        await self.get_plugin_instance(instance_id)
-        self._execute("DELETE FROM plugin_instances WHERE id = ?", (instance_id,))
-
-    async def create_plugin_run(self, plugin_instance_id: str, plugin_id: str, **kwargs: Any) -> PluginRun:
-        await self.get_plugin_instance(plugin_instance_id)
-        now = datetime.now(timezone.utc)
-        run = PluginRun(plugin_instance_id=plugin_instance_id, plugin_id=plugin_id,
-                        config_snapshot=kwargs.get("config_snapshot"), started_at=now,
-                        created_at=now, updated_at=now)
-        self._execute(
-            """INSERT INTO plugin_runs
-               (id, plugin_instance_id, plugin_id, status, config_snapshot, started_at,
-                running_at, exited_at, exit_code, error, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (run.id, run.plugin_instance_id, run.plugin_id, run.status.value,
-             _dump(run.config_snapshot), _iso(run.started_at), _iso(run.running_at),
-             _iso(run.exited_at), run.exit_code, run.error, _iso(run.created_at), _iso(run.updated_at)),
+            "INSERT INTO plugin_service_runs "
+            "(id, plugin_id, service, session_id, status, restart_count, started_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run.id, plugin_id, service, session_id, run.status, restart_count, _iso(run.started_at)),
         )
         return run
 
-    async def get_plugin_run(self, run_id: str) -> PluginRun:
-        row = self._row("SELECT * FROM plugin_runs WHERE id = ?", (run_id,))
-        if row is None:
-            raise KeyError(f"Plugin run '{run_id}' not found")
-        return _plugin_run(row)
-
-    async def list_plugin_runs(self, plugin_instance_id: str) -> list[PluginRun]:
-        await self.get_plugin_instance(plugin_instance_id)
-        rows = self._rows("SELECT * FROM plugin_runs WHERE plugin_instance_id = ? ORDER BY created_at DESC", (plugin_instance_id,))
-        return [_plugin_run(r) for r in rows]
-
-    async def update_plugin_run(self, run_id: str, **kwargs: Any) -> PluginRun:
+    async def update_service_run(self, run_id: str, *, status: str | None = None, running_at: Any = _UNSET,
+                                 exited_at: Any = _UNSET, exit_code: Any = _UNSET,
+                                 error: Any = _UNSET) -> PluginServiceRun:
         updates: dict[str, Any] = {}
-        for key in ("status", "running_at", "exited_at", "exit_code", "error"):
-            if kwargs.get(key, _UNSET) is not _UNSET:
-                updates[key] = kwargs[key]
-        if "status" in updates and updates["status"] is not None:
-            updates["status"] = updates["status"].value
-        for key in ("running_at", "exited_at"):
-            if key in updates:
-                updates[key] = _iso(updates[key])
+        if status is not None:
+            updates["status"] = status
+        for key, value in (("running_at", running_at), ("exited_at", exited_at)):
+            if value is not _UNSET:
+                updates[key] = _iso(value)
+        for key, value in (("exit_code", exit_code), ("error", error)):
+            if value is not _UNSET:
+                updates[key] = value
         if updates:
-            updates["updated_at"] = _iso(datetime.now(timezone.utc))
             clause = ", ".join(f"{k} = ?" for k in updates)
-            cur = self._execute(f"UPDATE plugin_runs SET {clause} WHERE id = ?", [*updates.values(), run_id])
-            if cur.rowcount == 0:
-                raise KeyError(f"Plugin run '{run_id}' not found")
-        return await self.get_plugin_run(run_id)
+            self._execute(f"UPDATE plugin_service_runs SET {clause} WHERE id = ?", [*updates.values(), run_id])
+        row = self._row("SELECT * FROM plugin_service_runs WHERE id = ?", (run_id,))
+        if row is None:
+            raise KeyError(f"Service run '{run_id}' not found")
+        return _service_run(row)
 
-    async def add_plugin_log(self, plugin_instance_id: str, plugin_run_id: str, stream: str, line: str, **kwargs: Any) -> PluginLog:
-        await self.get_plugin_instance(plugin_instance_id)
-        await self.get_plugin_run(plugin_run_id)
-        log = PluginLog(
-            plugin_instance_id=plugin_instance_id,
-            plugin_run_id=plugin_run_id,
-            session_id=kwargs.get("session_id"),
-            stream=stream,
-            level=kwargs.get("level"),
-            line=line,
-        )
-        cur = self._execute(
-            """INSERT INTO plugin_logs
-               (plugin_instance_id, plugin_run_id, session_id, ts, stream, level, line)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                log.plugin_instance_id,
-                log.plugin_run_id,
-                log.session_id,
-                _iso(log.ts),
-                log.stream,
-                log.level,
-                log.line,
-            ),
-        )
-        log.id = cur.lastrowid
-        return log
-
-    async def list_plugin_logs(self, *, plugin_instance_id: str | None = None,
-                               plugin_run_id: str | None = None,
-                               session_id: str | None = None,
-                               limit: int = 500) -> list[PluginLog]:
-        clauses: list[str] = []
-        values: list[Any] = []
-        if plugin_instance_id is not None:
-            clauses.append("plugin_instance_id = ?")
-            values.append(plugin_instance_id)
-        if plugin_run_id is not None:
-            clauses.append("plugin_run_id = ?")
-            values.append(plugin_run_id)
+    async def list_service_runs(self, plugin_id: str, *, service: str | None = None,
+                                session_id: str | None = None, limit: int = 100) -> list[PluginServiceRun]:
+        clauses, values = ["plugin_id = ?"], [plugin_id]
+        if service is not None:
+            clauses.append("service = ?")
+            values.append(service)
         if session_id is not None:
             clauses.append("session_id = ?")
             values.append(session_id)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        rows = self._rows(f"SELECT * FROM plugin_logs {where} ORDER BY ts DESC, id DESC LIMIT ?", [*values, limit])
-        return [_plugin_log(r) for r in reversed(rows)]
+        rows = self._rows(
+            f"SELECT * FROM plugin_service_runs WHERE {' AND '.join(clauses)} "
+            "ORDER BY started_at DESC LIMIT ?", [*values, limit])
+        return [_service_run(r) for r in rows]
+
+    async def interrupt_active_service_runs(self, error: str) -> int:
+        cur = self._execute(
+            "UPDATE plugin_service_runs SET status = 'errored', error = ?, exited_at = ? "
+            "WHERE status IN ('starting', 'running', 'stopping')",
+            (error, _iso(datetime.now(timezone.utc))))
+        return cur.rowcount
+
+    async def add_service_log(self, plugin_id: str, line: str, *, level: str = "info",
+                              run_id: str | None = None, session_id: str | None = None) -> PluginServiceLog:
+        log = PluginServiceLog(plugin_id=plugin_id, run_id=run_id, session_id=session_id, level=level, line=line)
+        cur = self._execute(
+            "INSERT INTO plugin_service_logs (plugin_id, run_id, session_id, ts, level, line) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (plugin_id, run_id, session_id, _iso(log.ts), level, line))
+        log.id = cur.lastrowid
+        return log
+
+    async def list_service_logs(self, plugin_id: str, *, run_id: str | None = None,
+                                session_id: str | None = None, limit: int = 500) -> list[PluginServiceLog]:
+        clauses, values = ["plugin_id = ?"], [plugin_id]
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            values.append(run_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            values.append(session_id)
+        rows = self._rows(
+            f"SELECT * FROM plugin_service_logs WHERE {' AND '.join(clauses)} ORDER BY id DESC LIMIT ?",
+            [*values, limit])
+        return [_service_log(r) for r in reversed(rows)]
+
+    async def prune_service_logs(self, plugin_id: str, keep: int) -> int:
+        cur = self._execute(
+            "DELETE FROM plugin_service_logs WHERE plugin_id = ? AND id NOT IN "
+            "(SELECT id FROM plugin_service_logs WHERE plugin_id = ? ORDER BY id DESC LIMIT ?)",
+            (plugin_id, plugin_id, keep))
+        return cur.rowcount
 
     async def _next_task_id(self, task_list_id: str) -> int:
         row = self._row("SELECT next_id FROM task_counters WHERE task_list_id = ?", (task_list_id,))

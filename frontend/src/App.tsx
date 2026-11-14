@@ -2,7 +2,7 @@ import { useEffect } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useStore } from "./store/sessions";
 import { useAuthStore } from "./store/auth";
-import { usePluginStore } from "./store/plugins";
+import { usePluginHostStore } from "./store/pluginHost";
 import ActiveSessionsMenu from "./components/ActiveSessionsMenu";
 import ToastCenter from "./components/ToastCenter";
 
@@ -18,10 +18,10 @@ export default function App() {
   const logout = useAuthStore((s) => s.logout);
   const setActiveSession = useStore((s) => s.setActiveSession);
   const sessionCount = Object.keys(sessions).length;
-  const instances = usePluginStore((s) => s.instances);
-  const runningPlugins = Object.values(instances).filter(
-    (instance) => instance.status === "running",
-  ).length;
+  // Running plugin services, as last seen by the plugin stream (live while a
+  // page that uses it is open).
+  const hostServices = usePluginHostStore((s) => s.services);
+  const runningPlugins = Object.values(hostServices).filter((sv) => sv.status === "running").length;
   // Highlight the session we're viewing (if the current route is a console).
   const match = useLocation().pathname.match(/^\/console\/(.+)$/);
   const currentSessionId = match?.[1];

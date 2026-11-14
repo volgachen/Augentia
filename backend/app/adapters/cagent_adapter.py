@@ -35,13 +35,17 @@ from cagent import Image, ToolResult, relocate_tool_images
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.adapters.cagent_agent import make_agent_class, with_turn_overrides
 from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
+from app.adapters import plugin_hooks
 from app.adapters.model_params import resolve_model_params
 from app.adapters.tools.base import (  # noqa: F401 — BaseTool for type hints
     IMAGE_OMITTED_MARKER, BaseTool, ToolOutput,
 )
 from app.adapters.tools.permissions import decide_tool_permission
-from app.adapters.tools.registry import load_tools
+from app.adapters.tools.registry import resolve_tools
 from app.core import attachments
+from app.plugins.hooks import HookFailed, HookRejected, HookRunner
+from app.plugins.host import get_plugin_host
+from app.plugins.sdk import IncomingMessage, ModelRequest, ToolCall, TurnSummary
 
 logger = logging.getLogger("augentia.adapter.cagent")
 
@@ -198,6 +202,18 @@ class CAgentAdapter(BaseAgentAdapter):
         self._model_callable = model_callable
         self._working_dir = working_dir
         self._tools: list = []
+        # Tools the agent lists but that are unavailable (e.g. a disabled
+        # plugin); shown once as a STATUS line at the start of the next turn.
+        self._tool_warnings: list[str] = []
+        # Plugin hooks (app/plugins/README.md §7.2); built in start().
+        self._hooks: HookRunner | None = None
+        # call_id -> (arguments after tool.before hooks, plugin ids that changed them).
+        self._arg_overrides: dict[str, tuple[dict, list[str]]] = {}
+        # Per-turn bookkeeping for the turn.end summary.
+        self._turn_steps = 0
+        self._turn_tool_calls = 0
+        self._turn_last_text: str | None = None
+        self._turn_last_usage: dict | None = None
         self._client: AsyncOpenAI | None = None
         self._model = None
         self._compression_model = None
@@ -209,6 +225,7 @@ class CAgentAdapter(BaseAgentAdapter):
         self._pending_images: list[dict] | None = None
         self._pending_from_session: str | None = None
         self._pending_overrides: dict | None = None
+        self._pending_metadata: dict | None = None
         self._pending_confirms: dict[str, tuple[asyncio.Future, str]] = {}
         self._events: asyncio.Queue | None = None
         self._turn_task: asyncio.Task | None = None
@@ -252,7 +269,9 @@ class CAgentAdapter(BaseAgentAdapter):
         if api_key:
             kwargs["api_key"] = api_key
         self._client = AsyncOpenAI(**kwargs)
-        self._tools = load_tools(self._tool_names)
+        self._tools, self._tool_warnings = resolve_tools(self._tool_names)
+        for warning in self._tool_warnings:
+            logger.warning("session=%s %s", self.session_id, warning)
         for tool in self._tools:
             tool.session_id = self.session_id
             tool.working_dir = self._working_dir
@@ -261,6 +280,10 @@ class CAgentAdapter(BaseAgentAdapter):
             for tool in self._tools
         }
         self._system_prompt = system_prompt
+        self._hooks = HookRunner(
+            get_plugin_host(), self.session_id or "",
+            working_dir=self._working_dir, on_warning=self._hook_warning,
+        )
         self._store = AugentiaStore(self._db, self.session_id)
         # Read at save time, so a prompt edited mid-session is attributed to
         # its new version from the next reply on.
@@ -273,7 +296,9 @@ class CAgentAdapter(BaseAgentAdapter):
             if self._model_callable is not None
             else self._build_model(self._model_name, params)
         )
-        self._model = self._wrap_model(model)
+        # Agent steps go through the plugin hooks; the summarizer never does.
+        base_model = self._wrap_model(model)
+        self._model = self._hooking_model(base_model)
         # Optional summarizer model (config.compression_model, a model name on
         # the agent's own endpoint/key). Unset -> same model as the agent.
         compression_name = self._config.get("compression_model")
@@ -287,7 +312,7 @@ class CAgentAdapter(BaseAgentAdapter):
                 self._build_model(self._compression_model_name, compression_params),
                 record_response=False)
         else:
-            self._compression_model = self._model
+            self._compression_model = base_model
         self._agent_cls = make_agent_class(
             self,
             name="Augentia Agent",
@@ -306,8 +331,9 @@ class CAgentAdapter(BaseAgentAdapter):
             step_reminder=self._config.get("step_reminder"),
             tool_limit_at=self._config.get("tool_limit_at"),
             tool_limit_message=self._config.get("tool_limit_message"),
-            compression_model=(
-                self._compression_model if self._compression_model is not self._model else None),
+            # Always set: with None CAgent would summarize through the hooked
+            # agent model. (Same callable as before hooks existed otherwise.)
+            compression_model=self._compression_model,
         )
         self._alive = True
         logger.info(
@@ -327,6 +353,44 @@ class CAgentAdapter(BaseAgentAdapter):
         if self._tool_image_mode == "user_message":
             model = _relocating_tool_images(model)
         return self._recording_response(model) if record_response else model
+
+    def _hooking_model(self, model):
+        """Wrap the agent model with the model.before / message.generated hooks.
+
+        Wraps outside _recording_response, so the reply metadata (usage,
+        latency) is recorded from the real call. A Reject or a failing
+        on_error="fail" hook raises here, which CAgent records as a failed
+        turn (turn_end with the error) and the adapter reports as ERROR.
+        """
+
+        async def hooking(*, messages, tools, **kwargs):
+            self._turn_steps += 1
+            step = self._turn_steps
+            hooks = self._hooks
+            if hooks is not None and hooks.has("model.before"):
+                request = ModelRequest(step=step, messages=messages, tools=tools)
+                request = await hooks.run(
+                    "model.before", request, validate=plugin_hooks.check_request)
+                messages, tools = request.messages, request.tools
+            output = await model(messages=messages, tools=tools, **kwargs)
+            if hooks is not None and isinstance(output, dict) and hooks.has("message.generated"):
+                reply = plugin_hooks.reply_from_output(step, output)
+                new = await hooks.run(
+                    "message.generated", reply, validate=plugin_hooks.check_reply)
+                if new is not reply:
+                    output = plugin_hooks.apply_reply(output, new)
+            if isinstance(output, dict):
+                self._turn_last_text = output.get("content") or ""
+                self._turn_last_usage = output.get("usage")
+                self._turn_tool_calls += len(output.get("tool_calls") or [])
+            return output
+
+        return hooking
+
+    async def _hook_warning(self, message: str) -> None:
+        # Only while a turn is streaming; outside it there is no event queue.
+        if self._events is not None:
+            await self._emit(StreamEventType.STATUS, f"Warning: {message}")
 
     def _recording_response(self, model):
         """Hand each agent-model response's details to the store.
@@ -350,14 +414,20 @@ class CAgentAdapter(BaseAgentAdapter):
         return recording
 
     async def send(self, message: str, images: list[dict] | None = None,
-                   turn_overrides: dict | None = None) -> None:
+                   turn_overrides: dict | None = None, metadata: dict | None = None,
+                   source: str | None = None) -> None:
         # turn_overrides: validated settings for this turn only (see
         # cagent_agent.validate_turn_overrides); the routers check them.
         self._pending = message
         self._pending_images = list(images) if images else None
         self._pending_overrides = dict(turn_overrides) if turn_overrides else None
+        self._pending_metadata = dict(metadata) if metadata else None
+        # source: a sender without a text prefix ("plugin:<id>"); otherwise
+        # the sender is read from the "[from-session:<id>]" prefix.
         match = _FROM_SESSION_RE.match(message)
-        if match:
+        if source:
+            self._pending_from_session = source
+        elif match:
             self._pending_from_session = match.group(1)
 
     async def stream(self):
@@ -366,15 +436,29 @@ class CAgentAdapter(BaseAgentAdapter):
         content, self._pending = self._pending, None
         images, self._pending_images = self._pending_images, None
         overrides, self._pending_overrides = self._pending_overrides, None
+        from_session, self._pending_from_session = self._pending_from_session, None
         if not content.strip() and not images:
             return
         self._announced_assistant_id = None
         self._call_info = {}
-        self._store.pending_from_session = self._pending_from_session
-        self._pending_from_session = None
+        self._arg_overrides = {}
+        self._turn_steps = 0
+        self._turn_tool_calls = 0
+        self._turn_last_text = None
+        self._turn_last_usage = None
+        self._events = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
+        if self._hooks is not None and self._hooks.has("message.received"):
+            async for event in self._received_hooks(content, images, overrides, from_session):
+                if isinstance(event, tuple):
+                    content, images = event
+                    break
+                yield event
+                if event.type == StreamEventType.DONE:
+                    return
+        self._store.pending_from_session = from_session
         # Recorded on the turn's user row as metadata.turn_overrides.
         self._store.pending_turn_overrides = overrides
-        self._events = asyncio.Queue(maxsize=_EVENT_QUEUE_MAX)
+        self._store.pending_user_metadata, self._pending_metadata = self._pending_metadata, None
         # The runner leaves the USER broadcast to us: CAgent
         # saves the user row inside run_turn, and only then is its id known.
         self._user_announced = False
@@ -384,6 +468,9 @@ class CAgentAdapter(BaseAgentAdapter):
             await self._emit(StreamEventType.USER, content, images=images, message_id=row.id)
 
         self._store.on_turn_user_saved = _announce_user
+        warnings, self._tool_warnings = self._tool_warnings, []
+        for warning in warnings:
+            await self._emit(StreamEventType.STATUS, f"Warning: {warning}; the session runs without it")
         turn_task = asyncio.create_task(self._run_turn_task(content, images, overrides))
         self._turn_task = turn_task
         try:
@@ -402,6 +489,38 @@ class CAgentAdapter(BaseAgentAdapter):
                 pass
             except Exception:
                 logger.exception("cagent turn task crashed session=%s", self.session_id)
+
+    async def _received_hooks(self, content: str, images: list[dict] | None,
+                              overrides: dict | None, from_session: str | None):
+        """Run message.received; yields the events to stream, then (content, images).
+
+        A rejected message ends the turn here: nothing is saved, the user
+        sees their input plus the reason. Hook warnings emitted meanwhile are
+        streamed first. The from-session prefix is part of the content the
+        hook sees (it is what the model will read).
+        """
+        hooks, events = self._hooks, self._events
+        assert hooks is not None and events is not None  # set by start() / stream()
+        source = f"session:{from_session}" if from_session else None
+        if from_session and from_session.startswith("plugin:"):
+            source = from_session
+        message = IncomingMessage(content=content, images=list(images) if images else None,
+                                  source=source, turn_overrides=overrides)
+        try:
+            message = await hooks.run(
+                "message.received", message, validate=plugin_hooks.check_incoming)
+        except (HookRejected, HookFailed) as exc:
+            yield StreamEvent(type=StreamEventType.USER, data=content, images=images)
+            text = (f"Message not sent: {exc.reason}" if isinstance(exc, HookRejected)
+                    else str(exc))
+            yield StreamEvent(type=StreamEventType.ERROR if isinstance(exc, HookFailed)
+                              else StreamEventType.STATUS, data=text)
+            yield StreamEvent(type=StreamEventType.DONE, data="")
+            return
+        finally:
+            while not events.empty():
+                yield events.get_nowait()
+        yield (message.content, message.images or None)
 
     async def resolve_decision(self, call_id: str, approved: bool, supplementary_msg: str = "") -> None:
         entry = self._pending_confirms.get(call_id)
@@ -434,6 +553,9 @@ class CAgentAdapter(BaseAgentAdapter):
             except Exception:
                 logger.exception("cagent turn task crashed during stop session=%s", self.session_id)
         self._turn_task = None
+        if self._hooks is not None:
+            # Give turn.end hooks of the last turn a moment to finish.
+            await self._hooks.drain()
         for future, _ in self._pending_confirms.values():
             if not future.done():
                 future.cancel()
@@ -537,6 +659,7 @@ class CAgentAdapter(BaseAgentAdapter):
                 images=images or None,
             )
         except asyncio.CancelledError:
+            self._notify_turn_end("cancelled")
             raise
         except Exception as exc:
             logger.exception("cagent turn failed session=%s", self.session_id)
@@ -545,11 +668,13 @@ class CAgentAdapter(BaseAgentAdapter):
                 self._user_announced = True
                 self._store.on_turn_user_saved = None
                 await self._emit(StreamEventType.USER, content, images=images)
+            self._notify_turn_end("failed")
             # ERROR must be followed by DONE or the stream consumer never
             # finishes and the session sticks in RUNNING.
             await self._emit(StreamEventType.ERROR, f"CAgent turn failed: {exc}")
             await self._emit(StreamEventType.DONE, "")
             return
+        self._notify_turn_end(ctx.stop_reason or "completed")
         usage = ctx.usage[-1] if ctx.usage else None
         prompt_tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
         completion_tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
@@ -568,6 +693,17 @@ class CAgentAdapter(BaseAgentAdapter):
             # them live should reload the transcript.
             await self._emit(StreamEventType.STATUS, HISTORY_COMPRESSED)
         await self._emit(StreamEventType.DONE, "")
+
+    def _notify_turn_end(self, stop_reason: str) -> None:
+        if self._hooks is None or not self._hooks.has("turn.end"):
+            return
+        self._hooks.notify("turn.end", TurnSummary(
+            stop_reason=stop_reason,
+            final_text=self._turn_last_text,
+            steps=self._turn_steps,
+            tool_calls=self._turn_tool_calls,
+            usage=self._turn_last_usage,
+        ))
 
     # ---- image resolution (called by the generated agent class) ----
 
@@ -631,6 +767,24 @@ class CAgentAdapter(BaseAgentAdapter):
         if assistant is not None and assistant["id"] != self._announced_assistant_id:
             await self._announce_assistant(assistant)
 
+        # tool.before runs before policy and the human: both judge (and the
+        # call then runs with) the arguments as the plugins left them.
+        if self._hooks is not None and self._hooks.has("tool.before"):
+            call = ToolCall(id=call_id, name=name, arguments=dict(arguments),
+                            message_id=assistant["id"] if assistant else None)
+            changed_by: list[str] = []
+            try:
+                call = await self._hooks.run(
+                    "tool.before", call, validate=plugin_hooks.check_tool_call, changed_by=changed_by)
+            except HookRejected as exc:
+                logger.info("tool %s rejected by plugin %s: %s", name, exc.plugin_id, exc.reason)
+                return f"rejected by plugin '{exc.plugin_id}': {exc.reason}"
+            if changed_by:
+                arguments = call.arguments
+                self._arg_overrides[call_id] = (arguments, changed_by)
+                if call_id in self._call_info:
+                    self._call_info[call_id]["args"] = arguments
+
         permission = decide_tool_permission(name, arguments, self._working_dir, self._config)
         if permission is not None and permission.action == "deny":
             logger.info("tool %s denied by policy: %s", name, permission.reason)
@@ -667,6 +821,35 @@ class CAgentAdapter(BaseAgentAdapter):
             await self._emit(StreamEventType.USER, supplementary)
             logger.info("queued supplementary message len=%d", len(supplementary))
         return None if approved else "用户拒绝执行该工具调用"
+
+    def call_arguments(self, call_id: str | None, arguments: dict) -> tuple[dict, list[str]]:
+        """(arguments to run the call with, plugin ids that changed them)."""
+        override = self._arg_overrides.pop(call_id, None) if call_id else None
+        if override is None:
+            return arguments, []
+        return dict(override[0]), list(override[1])
+
+    async def after_tool_hooks(self, name: str, call_id: str | None, arguments: dict, result):
+        """Run tool.after on a tool's str / ToolOutput result; returns the (new) result."""
+        hooks = self._hooks
+        if hooks is None or not hooks.has("tool.after"):
+            return result
+        view = plugin_hooks.tool_result_from(result)
+        if view is None:
+            return result
+        call = ToolCall(id=call_id or "", name=name, arguments=dict(arguments),
+                        message_id=None)
+        try:
+            new = await hooks.run("tool.after", view, call, validate=plugin_hooks.check_tool_result,
+                                  reject_allowed=False)
+        except HookFailed as exc:
+            # The tool already ran; failing the turn would hide its effect.
+            # Keep its result and tell the model the hook failed.
+            note = f"\n[{exc}]"
+            if isinstance(result, ToolOutput):
+                return ToolOutput(result.text + note, list(result.images))
+            return f"{result}{note}"
+        return result if new is view else plugin_hooks.tool_value_from(new)
 
     def _find_call_assistant(self, ctx, call_id: str) -> dict | None:
         for message in reversed(ctx.messages):

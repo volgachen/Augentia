@@ -1,3 +1,5 @@
+"""Plugin management API (app/plugins/README.md §12)."""
+
 import asyncio
 import json
 import logging
@@ -5,321 +7,273 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from app.adapters.registry import AdapterRegistry, get_registry as get_session_registry
 from app.auth import is_websocket_authenticated
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
-from app.models.domain import PluginInstance, PluginLog, PluginRun, PluginStatus
-from app.plugins.actions import PluginActionDispatcher
-from app.plugins.catalog import PluginCatalog, PluginDefinition, get_plugin_catalog
-from app.plugins.registry import PluginRunnerRegistry, get_plugin_registry
+from app.models.domain import PluginServiceLog, PluginServiceRun
+from app.plugins.host import (
+    ActionError, PluginConfigError, PluginHost, PluginInfo, PluginNotFound, PluginNotLoaded,
+    PluginUnavailable, get_plugin_host,
+)
+from app.plugins.services import ServiceState, UIState
 
 
 logger = logging.getLogger("augentia.plugins")
 router = APIRouter(prefix="/plugins", tags=["plugins"])
 
 
-class CreatePluginInstanceRequest(BaseModel):
-    plugin_id: str = Field(min_length=1, max_length=200)
-    display_name: str = Field(min_length=1, max_length=200)
-    config: dict | None = None
-    auto_start: bool = False
+
+class SetPluginEnabledRequest(BaseModel):
+    enabled: bool
 
 
-class UpdatePluginInstanceRequest(BaseModel):
-    display_name: str | None = Field(default=None, min_length=1, max_length=200)
-    config: dict | None = None
-    auto_start: bool | None = None
+class SetPluginConfigRequest(BaseModel):
+    config: dict
 
 
-class PluginCommandRequest(BaseModel):
-    command: str = Field(min_length=1, max_length=300)
-    data: dict = Field(default_factory=dict)
-    timeout_ms: int = Field(default=10000, ge=100, le=60000)
+class ReloadPluginsResponse(BaseModel):
+    changed: list[str]
+    plugins: list[PluginInfo]
 
 
-@router.get("/catalog", response_model=list[PluginDefinition])
-async def list_plugin_catalog(
-    catalog: PluginCatalog = Depends(get_plugin_catalog),
-):
-    return catalog.list()
-
-
-@router.get("/catalog/{plugin_id}", response_model=PluginDefinition)
-async def get_plugin_definition(
-    plugin_id: str,
-    catalog: PluginCatalog = Depends(get_plugin_catalog),
-):
+def _plugin_or_404(host: PluginHost, plugin_id: str):
     try:
-        return catalog.get(plugin_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+        return host.get(plugin_id)
+    except PluginNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e.args[0]))
 
 
-@router.get("/instances", response_model=list[PluginInstance])
-async def list_plugin_instances(db: IAgentDatabase = Depends(get_db)):
-    return await db.list_plugin_instances()
+@router.get("", response_model=list[PluginInfo])
+async def list_plugins(host: PluginHost = Depends(get_plugin_host)):
+    return host.list_info()
 
 
-@router.post("/instances", response_model=PluginInstance, status_code=201)
-async def create_plugin_instance(
-    body: CreatePluginInstanceRequest,
-    db: IAgentDatabase = Depends(get_db),
-    catalog: PluginCatalog = Depends(get_plugin_catalog),
-):
-    try:
-        catalog.get(body.plugin_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return await db.create_plugin_instance(
-        plugin_id=body.plugin_id,
-        display_name=body.display_name,
-        config=body.config,
-        auto_start=body.auto_start,
-    )
+@router.post("/reload", response_model=ReloadPluginsResponse)
+async def reload_plugins(host: PluginHost = Depends(get_plugin_host)):
+    changed = await host.reload()
+    return ReloadPluginsResponse(changed=changed, plugins=host.list_info())
 
 
-@router.get("/instances/{instance_id}", response_model=PluginInstance)
-async def get_plugin_instance(instance_id: str, db: IAgentDatabase = Depends(get_db)):
-    try:
-        return await db.get_plugin_instance(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@router.put("/instances/{instance_id}", response_model=PluginInstance)
-async def update_plugin_instance(
-    instance_id: str,
-    body: UpdatePluginInstanceRequest,
-    db: IAgentDatabase = Depends(get_db),
-):
-    try:
-        instance = await db.get_plugin_instance(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    if instance.status in {
-        PluginStatus.STARTING,
-        PluginStatus.WAITING_INPUT,
-        PluginStatus.RUNNING,
-        PluginStatus.STOPPING,
-    }:
-        raise HTTPException(status_code=409, detail="Stop the plugin instance before editing it.")
-    return await db.update_plugin_instance(
-        instance_id,
-        display_name=body.display_name,
-        config=body.config,
-        auto_start=body.auto_start,
-    )
-
-
-@router.delete("/instances/{instance_id}", status_code=204)
-async def delete_plugin_instance(
-    instance_id: str,
-    db: IAgentDatabase = Depends(get_db),
-    registry: PluginRunnerRegistry = Depends(get_plugin_registry),
-):
-    try:
-        await db.get_plugin_instance(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    await registry.remove(instance_id)
-    await db.delete_plugin_instance(instance_id)
-
-
-@router.post("/instances/{instance_id}/start", response_model=PluginRun)
-async def start_plugin_instance(
-    instance_id: str,
-    db: IAgentDatabase = Depends(get_db),
-    registry: PluginRunnerRegistry = Depends(get_plugin_registry),
-    catalog: PluginCatalog = Depends(get_plugin_catalog),
-    session_registry: AdapterRegistry = Depends(get_session_registry),
-):
-    try:
-        instance = await db.get_plugin_instance(instance_id)
-        definition = catalog.get(instance.plugin_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-    dispatcher = PluginActionDispatcher(db, session_registry)
-    runner = registry.get_or_create(instance_id, db, dispatcher)
-    if runner.is_running:
-        raise HTTPException(status_code=409, detail="plugin instance already running")
-
-    try:
-        return await runner.start(definition, instance)
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-
-@router.post("/instances/{instance_id}/stop", response_model=PluginInstance)
-async def stop_plugin_instance(
-    instance_id: str,
-    db: IAgentDatabase = Depends(get_db),
-    registry: PluginRunnerRegistry = Depends(get_plugin_registry),
-):
-    try:
-        await db.get_plugin_instance(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    runner = registry.get(instance_id)
-    if runner is not None:
-        await runner.stop()
-    return await db.get_plugin_instance(instance_id)
-
-
-@router.post("/instances/{instance_id}/commands")
-async def send_plugin_command(
-    instance_id: str,
-    body: PluginCommandRequest,
-    db: IAgentDatabase = Depends(get_db),
-    registry: PluginRunnerRegistry = Depends(get_plugin_registry),
-):
-    try:
-        await db.get_plugin_instance(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    runner = registry.get(instance_id)
-    if runner is None:
-        raise HTTPException(status_code=409, detail="plugin instance is not running")
-    try:
-        return await runner.send_command(
-            command=body.command,
-            data=body.data,
-            timeout=body.timeout_ms / 1000,
-        )
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-
-@router.post("/instances/{instance_id}/restart", response_model=PluginRun)
-async def restart_plugin_instance(
-    instance_id: str,
-    db: IAgentDatabase = Depends(get_db),
-    registry: PluginRunnerRegistry = Depends(get_plugin_registry),
-    catalog: PluginCatalog = Depends(get_plugin_catalog),
-    session_registry: AdapterRegistry = Depends(get_session_registry),
-):
-    try:
-        instance = await db.get_plugin_instance(instance_id)
-        definition = catalog.get(instance.plugin_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    dispatcher = PluginActionDispatcher(db, session_registry)
-    runner = registry.get_or_create(instance_id, db, dispatcher)
-    if runner.is_running:
-        await runner.stop()
-        instance = await db.get_plugin_instance(instance_id)
-    try:
-        return await runner.start(definition, instance)
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-
-
-@router.get("/instances/{instance_id}/runs", response_model=list[PluginRun])
-async def list_plugin_runs(instance_id: str, db: IAgentDatabase = Depends(get_db)):
-    try:
-        return await db.list_plugin_runs(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@router.get("/runs/{run_id}", response_model=PluginRun)
-async def get_plugin_run(run_id: str, db: IAgentDatabase = Depends(get_db)):
-    try:
-        return await db.get_plugin_run(run_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-
-
-@router.get("/runs/{run_id}/logs", response_model=list[PluginLog])
-async def get_plugin_run_logs(
-    run_id: str,
-    limit: int = Query(default=500, ge=1, le=5000),
-    session_id: str | None = Query(default=None),
-    db: IAgentDatabase = Depends(get_db),
-):
-    try:
-        await db.get_plugin_run(run_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return await db.list_plugin_logs(plugin_run_id=run_id, session_id=session_id, limit=limit)
-
-
-@router.get("/instances/{instance_id}/logs", response_model=list[PluginLog])
-async def get_plugin_instance_logs(
-    instance_id: str,
-    limit: int = Query(default=500, ge=1, le=5000),
-    session_id: str | None = Query(default=None),
-    db: IAgentDatabase = Depends(get_db),
-):
-    try:
-        await db.get_plugin_instance(instance_id)
-    except KeyError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return await db.list_plugin_logs(plugin_instance_id=instance_id, session_id=session_id, limit=limit)
-
-
-@router.websocket("/instances/{instance_id}/stream")
-async def plugin_instance_stream(
-    instance_id: str,
+@router.websocket("/stream")
+async def plugins_stream(
     ws: WebSocket,
-    db: IAgentDatabase = Depends(get_db),
-    registry: PluginRunnerRegistry = Depends(get_plugin_registry),
+    session_id: str | None = Query(default=None),
+    plugin_id: str | None = Query(default=None),
+    host: PluginHost = Depends(get_plugin_host),
 ):
+    """Live plugin updates (README §10.5).
+
+    On connect: one ``snapshot`` frame {plugins, services, ui, logs} (logs:
+    recent buffered lines), then incremental frames:
+    ``plugin`` (PluginInfo), ``service`` (ServiceState), ``ui`` (UIState),
+    ``log`` (log line). With ``session_id``, only that session's items plus
+    global ones; with ``plugin_id``, only that plugin.
+    """
     if not is_websocket_authenticated(ws):
         await ws.close(code=1008, reason="authentication required")
         return
     await ws.accept()
+    sub = host.services.subscribe(session_id=session_id, plugin_id=plugin_id)
     try:
-        instance = await db.get_plugin_instance(instance_id)
-    except KeyError:
-        await ws.send_text(json.dumps({"type": "error", "data": f"plugin instance '{instance_id}' not found"}))
-        await ws.close()
-        return
+        plugins = [p for p in host.list_info() if plugin_id is None or p.id == plugin_id]
+        services = [s for s in host.services.states(plugin_id)
+                    if session_id is None or s.session_id in (None, session_id)]
+        ui = [u for u in host.services.ui_states()
+              if (plugin_id is None or u.plugin_id == plugin_id)
+              and (session_id is None or u.session_id in (None, session_id))]
+        logs = []
+        for p in plugins:
+            logs.extend(host.services.recent_logs(p.id, session_id, limit=200))
+        logs.sort(key=lambda line: line.ts)
+        await ws.send_text(json.dumps({"type": "snapshot", "data": {
+            "plugins": [p.model_dump(mode="json") for p in plugins],
+            "services": [s.model_dump(mode="json") for s in services],
+            "ui": [u.model_dump(mode="json") for u in ui],
+            "logs": [line.model_dump(mode="json") for line in logs],
+        }}))
 
-    runner = registry.get_or_create(instance_id, db)
-    queue, snapshot, status = await runner.subscribe()
-
-    async def _send_json(frame: dict) -> bool:
-        try:
-            await ws.send_text(json.dumps(frame))
-            return True
-        except (WebSocketDisconnect, RuntimeError):
-            return False
-
-    try:
-        if not await _send_json({
-            "type": "plugin_instance_state",
-            "data": instance.model_dump(mode="json"),
-        }):
-            return
-        for entry in snapshot:
-            if not await _send_json({
-                "type": "log",
-                "data": entry.model_dump(mode="json"),
-            }):
-                return
-        if not await _send_json({
-            "type": "status",
-            "data": {"status": status.value, "run_id": runner.run_id},
-        }):
-            return
-
-        async def _client_pinger() -> None:
+        async def client_reader() -> None:
+            # Clients may send pings; a closed socket ends the stream.
             while True:
                 await ws.receive_text()
 
-        pinger = asyncio.create_task(_client_pinger())
+        reader = asyncio.create_task(client_reader())
         try:
             while True:
-                frame = await queue.get()
-                if not await _send_json(frame):
+                getter = asyncio.create_task(sub.queue.get())
+                done, _ = await asyncio.wait({getter, reader}, return_when=asyncio.FIRST_COMPLETED)
+                if reader in done:
+                    getter.cancel()
                     return
+                await ws.send_text(json.dumps(getter.result()))
         finally:
-            pinger.cancel()
-    except WebSocketDisconnect:
+            reader.cancel()
+    except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception:
-        logger.exception("plugin WS error instance=%s", instance_id)
+        logger.exception("plugins stream failed")
     finally:
-        await runner.unsubscribe(queue)
+        host.services.unsubscribe(sub)
+
+
+@router.get("/{plugin_id}", response_model=PluginInfo)
+async def get_plugin(plugin_id: str, host: PluginHost = Depends(get_plugin_host)):
+    return host.info(_plugin_or_404(host, plugin_id))
+
+
+@router.put("/{plugin_id}/enabled", response_model=PluginInfo)
+async def set_plugin_enabled(
+    plugin_id: str,
+    body: SetPluginEnabledRequest,
+    host: PluginHost = Depends(get_plugin_host),
+):
+    _plugin_or_404(host, plugin_id)
+    record = await host.set_enabled(plugin_id, body.enabled)
+    return host.info(record)
+
+
+@router.get("/{plugin_id}/config")
+async def get_plugin_config(plugin_id: str, host: PluginHost = Depends(get_plugin_host)):
+    _plugin_or_404(host, plugin_id)
+    try:
+        return host.masked_global_config(plugin_id)
+    except PluginUnavailable as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.put("/{plugin_id}/config")
+async def set_plugin_config(
+    plugin_id: str,
+    body: SetPluginConfigRequest,
+    host: PluginHost = Depends(get_plugin_host),
+):
+    _plugin_or_404(host, plugin_id)
+    try:
+        return await host.set_global_config(plugin_id, body.config)
+    except PluginUnavailable as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except PluginConfigError as e:
+        raise HTTPException(status_code=400, detail={"message": "invalid plugin config", "errors": e.errors})
+
+
+class ActionRequest(BaseModel):
+    session_id: str | None = None
+    data: dict = Field(default_factory=dict)
+
+
+def _service_error(e: Exception) -> HTTPException:
+    if isinstance(e, PluginNotFound):
+        return HTTPException(status_code=404, detail=str(e.args[0]))
+    if isinstance(e, PluginNotLoaded):
+        return HTTPException(status_code=409, detail=str(e))
+    if isinstance(e, KeyError):
+        return HTTPException(status_code=404, detail=str(e.args[0]))
+    if isinstance(e, ValueError):
+        return HTTPException(status_code=400, detail=str(e))
+    raise e
+
+
+@router.get("/{plugin_id}/services", response_model=list[ServiceState])
+async def list_plugin_services(
+    plugin_id: str,
+    session_id: str | None = Query(default=None),
+    host: PluginHost = Depends(get_plugin_host),
+):
+    _plugin_or_404(host, plugin_id)
+    return host.services.states(plugin_id, session_id)
+
+
+@router.post("/{plugin_id}/services/{service}/{op}", response_model=ServiceState)
+async def control_plugin_service(
+    plugin_id: str,
+    service: str,
+    op: str,
+    session_id: str | None = Query(default=None),
+    host: PluginHost = Depends(get_plugin_host),
+):
+    """op: start / stop / restart. Session services need ?session_id=."""
+    _plugin_or_404(host, plugin_id)
+    if op not in ("start", "stop", "restart"):
+        raise HTTPException(status_code=404, detail=f"unknown operation '{op}'")
+    spec = host.service_spec(plugin_id, service)
+    if spec is None:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' has no service '{service}'")
+    if spec.scope == "global":
+        session_id = None
+    elif not session_id:
+        raise HTTPException(status_code=400, detail=f"service '{service}' is per session; pass ?session_id=")
+    try:
+        if op in ("stop", "restart"):
+            await host.services.stop(plugin_id, service, session_id)
+        if op in ("start", "restart"):
+            await host.start_service(plugin_id, service, session_id)
+    except Exception as e:
+        raise _service_error(e)
+    state = host.services.get(plugin_id, service, session_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="service was never started")
+    return state
+
+
+@router.get("/{plugin_id}/runs", response_model=list[PluginServiceRun])
+async def list_plugin_service_runs(
+    plugin_id: str,
+    service: str | None = Query(default=None),
+    session_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=1000),
+    host: PluginHost = Depends(get_plugin_host),
+    db: IAgentDatabase = Depends(get_db),
+):
+    _plugin_or_404(host, plugin_id)
+    return await db.list_service_runs(plugin_id, service=service, session_id=session_id, limit=limit)
+
+
+@router.get("/{plugin_id}/logs", response_model=list[PluginServiceLog])
+async def list_plugin_service_logs(
+    plugin_id: str,
+    session_id: str | None = Query(default=None),
+    run_id: str | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=5000),
+    host: PluginHost = Depends(get_plugin_host),
+    db: IAgentDatabase = Depends(get_db),
+):
+    _plugin_or_404(host, plugin_id)
+    return await db.list_service_logs(plugin_id, run_id=run_id, session_id=session_id, limit=limit)
+
+
+@router.get("/{plugin_id}/ui", response_model=UIState | None)
+async def get_plugin_ui(
+    plugin_id: str,
+    session_id: str | None = Query(default=None),
+    host: PluginHost = Depends(get_plugin_host),
+):
+    _plugin_or_404(host, plugin_id)
+    return host.services.ui_state(plugin_id, session_id)
+
+
+@router.post("/{plugin_id}/actions/{action_id}")
+async def run_plugin_action(
+    plugin_id: str,
+    action_id: str,
+    body: ActionRequest,
+    host: PluginHost = Depends(get_plugin_host),
+    db: IAgentDatabase = Depends(get_db),
+):
+    """Call a plugin action; returns {"result": <what the action returned>}."""
+    _plugin_or_404(host, plugin_id)
+    if body.session_id is not None:
+        try:
+            await db.get_session(body.session_id)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+    try:
+        result = await host.run_action(plugin_id, action_id, body.session_id, body.data)
+    except ActionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _service_error(e)
+    try:
+        json.dumps(result)
+    except (TypeError, ValueError):
+        result = repr(result)
+    return {"result": result}

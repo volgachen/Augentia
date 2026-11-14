@@ -23,6 +23,8 @@ class _InboxItem:
     images: list[dict] | None = None
     # Validated per-turn settings (max_steps, step_reminder_at, ...).
     turn_overrides: dict | None = None
+    # Extra metadata for the turn's user row (e.g. plugin_label from a plugin).
+    metadata: dict | None = None
     # Set for a manual compression job instead of a user turn: the loop runs
     # adapter.compress() and resolves this future with its result dict.
     compress_result: "asyncio.Future[dict] | None" = None
@@ -95,10 +97,11 @@ class SessionRunner:
         from_session_id: str | None = None,
         images: list[dict] | None = None,
         turn_overrides: dict | None = None,
+        metadata: dict | None = None,
     ) -> None:
         await self._inbox.put(_InboxItem(
             content=content, from_session_id=from_session_id, images=images or None,
-            turn_overrides=turn_overrides or None,
+            turn_overrides=turn_overrides or None, metadata=metadata or None,
         ))
 
     @property
@@ -242,11 +245,15 @@ class SessionRunner:
     async def _run_turn(self, item: _InboxItem) -> None:
         # The adapter (CAgentAdapter) persists every conversation row through
         # its Store and broadcasts the turn's USER event itself, carrying the
-        # saved row id; the runner relays its events and tracks status. The
-        # from-session prefix stays baked into the delivered text.
+        # saved row id; the runner relays its events and tracks status. A
+        # message from another session has the from-session prefix baked into
+        # the delivered text (the model reads who sent it). Plugins write
+        # their own text, so their source ("plugin:<id>") is passed alongside
+        # instead and only lands in the row's from_session_id.
+        from_plugin = bool(item.from_session_id and item.from_session_id.startswith("plugin:"))
         delivered = (
             f"[from-session:{item.from_session_id}] {item.content}"
-            if item.from_session_id
+            if item.from_session_id and not from_plugin
             else item.content
         )
         saw_native_messages = False
@@ -257,6 +264,10 @@ class SessionRunner:
             send_kwargs["images"] = item.images
         if item.turn_overrides:
             send_kwargs["turn_overrides"] = item.turn_overrides
+        if item.metadata:
+            send_kwargs["metadata"] = item.metadata
+        if from_plugin:
+            send_kwargs["source"] = item.from_session_id
         await self._adapter.send(delivered, **send_kwargs)
         async for event in self._adapter.stream():
             should_broadcast = True

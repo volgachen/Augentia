@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { CreateAgentPayload } from "../api/client";
-import type { AgentTemplate, AgentType } from "../api/types";
+import type { AgentTemplate, AgentType, ToolInfo } from "../api/types";
+import ToolPicker from "./ToolPicker";
+import AgentPluginDefaults from "./AgentPluginDefaults";
 
 interface Props {
   open: boolean;
@@ -59,7 +61,7 @@ const inputClass =
 export default function AgentDetailModal({ open, agent, onClose, onSaved }: Props) {
   const isEdit = agent !== null;
   const [form, setForm] = useState<CreateAgentPayload>(EMPTY);
-  const [availableTools, setAvailableTools] = useState<string[]>([]);
+  const [availableTools, setAvailableTools] = useState<ToolInfo[] | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [paramsText, setParamsText] = useState("");
@@ -82,6 +84,7 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
           }
         : EMPTY,
     );
+    setAvailableTools(null);
     api.tools.list().then(setAvailableTools).catch(() => setAvailableTools([]));
   }, [open, agent]);
 
@@ -188,20 +191,12 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
           <>
             <div className="flex flex-col gap-1 text-sm text-gray-300">
               Tools
-              <div className="flex flex-col gap-1 bg-gray-900 border border-gray-700 rounded-lg p-2">
-                {availableTools.length === 0 && (
-                  <span className="text-xs text-gray-500">No tools available.</span>
-                )}
-                {availableTools.map((t) => (
-                  <label key={t} className="flex items-center gap-2 text-sm text-gray-200">
-                    <input
-                      type="checkbox"
-                      checked={form.tool_names.includes(t)}
-                      onChange={() => toggleTool(t)}
-                    />
-                    <span className="font-mono">{t}</span>
-                  </label>
-                ))}
+              <div className="bg-gray-900 border border-gray-700 rounded-lg p-2">
+                <ToolPicker
+                  tools={availableTools}
+                  selected={form.tool_names}
+                  onToggle={toggleTool}
+                />
               </div>
             </div>
 
@@ -252,6 +247,24 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
               </label>
               <span className="text-xs text-gray-500">
                 The model above must support image input.
+              </span>
+            </div>
+
+            <div className="flex flex-col gap-1 text-sm text-gray-300">
+              Plugin defaults
+              <div className="bg-gray-900 border border-gray-700 rounded-lg p-2">
+                <AgentPluginDefaults
+                  value={form.config?.plugins}
+                  onChange={(plugins) => {
+                    const config = { ...(form.config ?? {}) };
+                    if (plugins) config.plugins = plugins;
+                    else delete config.plugins;
+                    patch({ config });
+                  }}
+                />
+              </div>
+              <span className="text-xs text-gray-500">
+                Copied into each new session of this agent. Existing sessions keep their settings.
               </span>
             </div>
 

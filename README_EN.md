@@ -46,7 +46,7 @@ Current capabilities include:
 - **Real-time streaming state**: Display agent replies, tool calls, tool results, and status changes. High-risk tool calls require human-in-the-loop confirmation, keeping people in control of critical actions.
 - **Task list tools**: Maintain an independent task list for each session, helping agents organize multi-step work.
 - **Cross-session collaboration**: Support child sessions and session-to-session messaging for multi-agent parallel workflows.
-- **Plugin system**: Run backend-hosted local background plugin processes to extend external integrations.
+- **Plugin system**: Plugins in `~/.augentia/plugins/` can give agents tools, add per-session settings, hook into messages and tool calls, and run long-lived background services (e.g. the WeChat bridge). See `backend/app/plugins/README.md`.
 
 More capabilities are under active development.
 

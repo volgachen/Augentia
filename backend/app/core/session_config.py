@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -43,7 +44,23 @@ def default_session_config(agent_config: dict[str, Any] | None = None) -> dict[s
     config: dict[str, Any] = {"version": 1}
     tool_permissions = (agent_config or {}).get("tool_permissions")
     config["tool_permissions"] = tool_permissions or _DEFAULT_TOOL_PERMISSIONS
+    # Agent-level plugin defaults are copied into a new session, like
+    # tool_permissions (app/plugins/README.md §9). Schema defaults and the
+    # manifest's default_enabled still apply at read time.
+    plugins = (agent_config or {}).get("plugins")
+    if isinstance(plugins, dict) and plugins:
+        config["plugins"] = copy.deepcopy(plugins)
     return config
+
+
+def peek_session_config(session_id: str) -> dict[str, Any] | None:
+    """The session's config.json if it exists and parses, without creating it."""
+    try:
+        with session_config_path(session_id).open("r", encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def ensure_session_config(

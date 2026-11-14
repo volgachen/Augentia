@@ -140,6 +140,8 @@ class AugentiaStore:
         # Injected by the adapter before each turn: the settings this turn
         # overrides, recorded on its first user row as metadata.turn_overrides.
         self.pending_turn_overrides: dict | None = None
+        # Extra metadata merged into the next turn input row (plugin_label, ...).
+        self.pending_user_metadata: dict | None = None
         # Set by the adapter's model wrapper after each agent-model call: that
         # response's details (usage, model, finish_reason, id, latency_ms).
         # CAgent saves the reply right after the call, so the next saved row
@@ -243,10 +245,14 @@ class AugentiaStore:
         metadata = dict(message.get("metadata") or {})
         if message.get("name"):
             metadata[_NAME_KEY] = message["name"]
-        elif self.pending_turn_overrides:
+        else:
             # The turn's own input row (summaries are user rows too, but named).
-            metadata[TURN_OVERRIDES_KEY] = self.pending_turn_overrides
-            self.pending_turn_overrides = None
+            if self.pending_turn_overrides:
+                metadata[TURN_OVERRIDES_KEY] = self.pending_turn_overrides
+                self.pending_turn_overrides = None
+            if self.pending_user_metadata:
+                metadata.update(self.pending_user_metadata)
+                self.pending_user_metadata = None
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,

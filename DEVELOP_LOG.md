@@ -1,3 +1,9 @@
+# 2026-11-14
+
+- **插件系统 v2**：插件改为放在 `~/.augentia/plugins/<id>/` 下的 Python 包，在后端进程内加载，可以提供四种能力：Agent 工具（`<插件id>__<工具名>`，出现在 Agent 面板的工具选择里）、会话级配置（会话侧栏新增 Plugins 页签，按 schema 自动生成表单）、Hook（收到消息、调用模型前、生成回复后、工具调用前后、一轮结束）、常驻服务（全局或每个会话一份，崩溃自动重启，运行记录和日志入库）。插件可以向界面推送状态卡片和按钮（action），插件页面 `/plugins` 已重写。设计与接口见 `backend/app/plugins/README.md`。
+- **微信桥接迁移到 v2**：`backend/plugins/wechat`（替代 `wechat-bridge`）。在会话的 Plugins 页签打开后点 “Scan to connect” 扫码，微信消息进入会话，Agent 的回复发回给最后发消息的人；Agent 还可以用 `wechat__send` 工具主动发消息。换模型或改提示词不会断开连接。
+- **移除插件系统 v1**：删除插件实例（`plugin_instances`）、stdio 子进程运行器、`/plugins/catalog` 和 `/plugins/instances/*` 接口、旧插件页面以及会话列表里的 More 菜单；数据库中的三张 v1 表在启动时删除。`GET /tools` 的返回值从字符串数组改为对象数组。
+
 # 2026-10-28
 
 - **修改已开始 session 的 System Prompt**：新增 `PUT /api/v1/sessions/{session_id}/system-prompt`（body：`{"system_prompt": "..."}`），整体替换该 session 的最终 system prompt（不会再拼接 agent 模板 prompt、additional prompt 或 runtime context）。新值写入 `sessions.system_prompt_snapshot`；若 runner 在线则通过 `adapter.set_system_prompt` 原地替换，下一次模型请求即生效，WS 连接不受影响，历史消息不变。回合进行中或等待工具确认时返回 409，空 prompt 返回 400。返回体中的 `applied` 为 `live_adapter` / `persisted`（无在线 runner）/ `runner_restarted`（adapter 不支持原地替换时重建 runner）。测试：`backend/scripts/test_session_system_prompt.py`。

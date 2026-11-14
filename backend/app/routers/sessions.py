@@ -13,6 +13,9 @@ from app.models.domain import Session, SessionStatus, MessageRole, AgentType
 from app.auth import is_websocket_authenticated
 from app.adapters.registry import AdapterRegistry, get_registry
 from app.core.session_config import ensure_session_config, write_session_config
+from app.plugins import session_settings
+from app.plugins.events import PluginEvent
+from app.plugins.host import PluginHost, SessionPluginInfo, get_plugin_host
 from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
@@ -88,6 +91,14 @@ class UpdateWorkingDirRequest(BaseModel):
 
 class UpdateSessionConfigRequest(BaseModel):
     config: dict
+
+
+class UpdateSessionPluginRequest(BaseModel):
+    # Omitted keys are left as they are.
+    enabled: bool | None = None
+    # Replaces the plugin's session config as a whole (secrets sent back
+    # masked keep their stored value).
+    config: dict | None = None
 
 
 class TestToolPermissionRequest(BaseModel):
@@ -178,7 +189,9 @@ async def _create_derived_session(
         await db.clone_messages(source.id, target.id, before_message_id=before_message_id)
         await build_runner(target, agent, db, registry)
         await db.update_session_status(target.id, SessionStatus.WAITING_USER)
-        return await db.get_session(target.id)
+        created = await db.get_session(target.id)
+        await _session_created(created)
+        return created
     except Exception:
         await registry.remove(target.id)
         await db.soft_delete_session(target.id)
@@ -264,7 +277,16 @@ async def create_session(
     # submitted. Mark the session as waiting for user input rather than RUNNING
     # so status consistently means turn execution state, not adapter liveness.
     await db.update_session_status(session.id, SessionStatus.WAITING_USER)
-    return await db.get_session(session.id)
+    session = await db.get_session(session.id)
+    await _session_created(session)
+    return session
+
+
+async def _session_created(session: Session) -> None:
+    host = get_plugin_host()
+    # Agent plugin defaults were copied into the new session's config.
+    await host.sync_session_services(session.id)
+    await host.event_bus.publish(PluginEvent(type="session.created", data=session.model_dump(mode="json")))
 
 
 @router.get("", response_model=list[Session])
@@ -568,6 +590,7 @@ async def get_session_system_prompt_history(
 async def get_session_config(
     session_id: str,
     db: IAgentDatabase = Depends(get_db),
+    host: PluginHost = Depends(get_plugin_host),
 ):
     try:
         session = await db.get_session(session_id)
@@ -575,9 +598,40 @@ async def get_session_config(
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
     try:
-        return ensure_session_config(session_id, agent.config)
+        # Plugin secrets are masked; PUT keeps a masked value as stored.
+        return session_settings.mask_config(host, ensure_session_config(session_id, agent.config))
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _save_session_config(
+    session_id: str,
+    config: dict,
+    stored: dict,
+    registry: AdapterRegistry,
+    host: PluginHost,
+) -> dict:
+    """Validate, write and hot-apply a whole session config; returns it masked."""
+    try:
+        validate_tool_permissions_config(config.get("tool_permissions"))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    config = dict(config)
+    if "plugins" in config:
+        try:
+            config["plugins"] = session_settings.prepare_for_write(
+                host, config["plugins"], session_settings.plugins_section(stored))
+        except session_settings.SessionPluginsError as e:
+            raise HTTPException(status_code=400, detail={"message": "invalid plugin config", "errors": e.errors})
+    config = write_session_config(session_id, config)
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        runner = None
+    if runner is not None:
+        await runner.reload_config(config)
+    await host.sync_session_services(session_id)
+    return session_settings.mask_config(host, config)
 
 
 @router.put("/{session_id}/config")
@@ -586,23 +640,63 @@ async def update_session_config(
     body: UpdateSessionConfigRequest,
     db: IAgentDatabase = Depends(get_db),
     registry: AdapterRegistry = Depends(get_registry),
+    host: PluginHost = Depends(get_plugin_host),
 ):
     try:
         session = await db.get_session(session_id)
+        agent = await db.get_agent(session.agent_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    stored = ensure_session_config(session_id, agent.config)
+    return await _save_session_config(session_id, body.config, stored, registry, host)
+
+
+@router.get("/{session_id}/plugins", response_model=list[SessionPluginInfo], response_model_by_alias=True)
+async def get_session_plugins(
+    session_id: str,
+    db: IAgentDatabase = Depends(get_db),
+    host: PluginHost = Depends(get_plugin_host),
+):
+    """Plugins configurable for this session, with effective (masked) config."""
     try:
-        validate_tool_permissions_config(body.config.get("tool_permissions"))
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    config = write_session_config(session_id, body.config)
+        session = await db.get_session(session_id)
+        agent = await db.get_agent(session.agent_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return host.session_plugins(ensure_session_config(session_id, agent.config), session_id)
+
+
+@router.put("/{session_id}/plugins/{plugin_id}", response_model=SessionPluginInfo, response_model_by_alias=True)
+async def update_session_plugin(
+    session_id: str,
+    plugin_id: str,
+    body: UpdateSessionPluginRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+    host: PluginHost = Depends(get_plugin_host),
+):
+    """Change one plugin's entry without touching the rest of the session config."""
     try:
-        runner = registry.get(session_id)
-    except KeyError:
-        runner = None
-    if runner is not None:
-        await runner.reload_config(config)
-    return config
+        session = await db.get_session(session_id)
+        agent = await db.get_agent(session.agent_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if host.manifest_of(plugin_id) is None:
+        raise HTTPException(status_code=404, detail=f"Plugin '{plugin_id}' not found or has an invalid manifest")
+    stored = ensure_session_config(session_id, agent.config)
+    plugins = dict(session_settings.plugins_section(stored))
+    old_entry = plugins.get(plugin_id)
+    old_enabled, old_rest = session_settings.split_entry(old_entry)
+    entry: dict = dict(old_rest if body.config is None else body.config)
+    enabled = body.enabled if body.enabled is not None else old_enabled
+    if enabled is not None:
+        entry[session_settings.ENABLED_KEY] = enabled
+    plugins[plugin_id] = entry
+    saved = await _save_session_config(session_id, {**stored, "plugins": plugins}, stored, registry, host)
+    view = next((p for p in host.session_plugins(saved, session_id) if p.id == plugin_id), None)
+    if view is None:  # pragma: no cover — the entry we just wrote makes it relevant
+        raise HTTPException(status_code=500, detail="plugin vanished after save")
+    return view
 
 
 @router.post("/{session_id}/tool-permissions/test")
@@ -1006,6 +1100,9 @@ async def delete_session(
 
     await registry.remove(session_id)
     await db.soft_delete_session(session_id)
+    host = get_plugin_host()
+    await host.session_deleted(session_id)
+    await host.event_bus.publish(PluginEvent(type="session.deleted", data={"session_id": session_id}))
 
 
 @router.websocket("/{session_id}/stream")

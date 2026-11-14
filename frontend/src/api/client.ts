@@ -7,14 +7,16 @@ import type {
   SessionCreateMode,
   SessionModelView,
   Message,
-  PluginDefinition,
-  PluginInstance,
-  PluginLogLine,
-  PluginRun,
   ShareState,
   SharedMessageLocation,
   SharedSession,
+  PluginInfo,
+  PluginLogEntry,
+  PluginServiceRun,
+  ServiceState,
+  SessionPluginInfo,
   Task,
+  ToolInfo,
 } from "./types";
 
 // Use the same host the browser connected to, so the app works on any machine in the LAN.
@@ -98,14 +100,6 @@ function browseQuery(path: string | null | undefined): string {
   return path ? `?path=${encodeURIComponent(path)}` : "";
 }
 
-function pluginLogsQuery(limit?: number, sessionId?: string | null): string {
-  const params = new URLSearchParams();
-  if (limit != null) params.set("limit", String(limit));
-  if (sessionId) params.set("session_id", sessionId);
-  const qs = params.toString();
-  return qs ? `?${qs}` : "";
-}
-
 export interface CreateAgentPayload {
   name: string;
   description: string;
@@ -118,25 +112,6 @@ export interface CreateAgentPayload {
 }
 
 export type UpdateAgentPayload = Partial<Omit<CreateAgentPayload, "agent_type">>;
-
-export interface CreatePluginInstancePayload {
-  plugin_id: string;
-  display_name: string;
-  config?: Record<string, unknown> | null;
-  auto_start?: boolean;
-}
-
-export interface UpdatePluginInstancePayload {
-  display_name?: string;
-  config?: Record<string, unknown> | null;
-  auto_start?: boolean;
-}
-
-export interface PluginCommandPayload {
-  command: string;
-  data?: Record<string, unknown>;
-  timeout_ms?: number;
-}
 
 export const api = {
   auth: {
@@ -165,7 +140,7 @@ export const api = {
       request<void>(`/agents/${id}`, { method: "DELETE" }),
   },
   tools: {
-    list: () => request<string[]>("/tools"),
+    list: () => request<ToolInfo[]>("/tools"),
   },
   attachments: {
     upload: uploadAttachment,
@@ -226,6 +201,16 @@ export const api = {
       request<Record<string, unknown>>(`/sessions/${id}/config`, {
         method: "PUT",
         body: JSON.stringify({ config }),
+      }),
+    plugins: (id: string) => request<SessionPluginInfo[]>(`/sessions/${id}/plugins`),
+    updatePlugin: (
+      id: string,
+      pluginId: string,
+      body: { enabled?: boolean; config?: Record<string, unknown> },
+    ) =>
+      request<SessionPluginInfo>(`/sessions/${id}/plugins/${pluginId}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
       }),
     testToolPermission: (id: string, body: { tool: string; path?: string | null; args?: Record<string, unknown> }) =>
       request<{
@@ -296,40 +281,42 @@ export const api = {
     home: () => request<{ home: string; templates_root: string }>("/fs/home"),
   },
   plugins: {
-    catalog: () => request<PluginDefinition[]>("/plugins/catalog"),
-    definition: (id: string) => request<PluginDefinition>(`/plugins/catalog/${id}`),
-    instances: () => request<PluginInstance[]>("/plugins/instances"),
-    instance: (id: string) => request<PluginInstance>(`/plugins/instances/${id}`),
-    createInstance: (body: CreatePluginInstancePayload) =>
-      request<PluginInstance>("/plugins/instances", {
-        method: "POST",
-        body: JSON.stringify(body),
-      }),
-    updateInstance: (id: string, body: UpdatePluginInstancePayload) =>
-      request<PluginInstance>(`/plugins/instances/${id}`, {
+    list: () => request<PluginInfo[]>("/plugins"),
+    get: (id: string) => request<PluginInfo>(`/plugins/${id}`),
+    reload: () => request<{ changed: string[]; plugins: PluginInfo[] }>("/plugins/reload", { method: "POST" }),
+    setEnabled: (id: string, enabled: boolean) =>
+      request<PluginInfo>(`/plugins/${id}/enabled`, {
         method: "PUT",
-        body: JSON.stringify(body),
+        body: JSON.stringify({ enabled }),
       }),
-    deleteInstance: (id: string) =>
-      request<void>(`/plugins/instances/${id}`, { method: "DELETE" }),
-    startInstance: (id: string) =>
-      request<PluginRun>(`/plugins/instances/${id}/start`, { method: "POST" }),
-    stopInstance: (id: string) =>
-      request<PluginInstance>(`/plugins/instances/${id}/stop`, { method: "POST" }),
-    restartInstance: (id: string) =>
-      request<PluginRun>(`/plugins/instances/${id}/restart`, { method: "POST" }),
-    command: (id: string, body: PluginCommandPayload) =>
-      request<Record<string, unknown>>(`/plugins/instances/${id}/commands`, {
+    globalConfig: (id: string) => request<Record<string, unknown>>(`/plugins/${id}/config`),
+    setGlobalConfig: (id: string, config: Record<string, unknown>) =>
+      request<Record<string, unknown>>(`/plugins/${id}/config`, {
+        method: "PUT",
+        body: JSON.stringify({ config }),
+      }),
+    service: (id: string, service: string, op: "start" | "stop" | "restart", sessionId?: string | null) =>
+      request<ServiceState>(
+        `/plugins/${id}/services/${service}/${op}${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""}`,
+        { method: "POST" },
+      ),
+    serviceRuns: (id: string, params: { service?: string; sessionId?: string | null; limit?: number } = {}) =>
+      request<PluginServiceRun[]>(`/plugins/${id}/runs${query({
+        service: params.service,
+        session_id: params.sessionId ?? undefined,
+        limit: params.limit,
+      })}`),
+    logs: (id: string, params: { sessionId?: string | null; runId?: string | null; limit?: number } = {}) =>
+      request<PluginLogEntry[]>(`/plugins/${id}/logs${query({
+        session_id: params.sessionId ?? undefined,
+        run_id: params.runId ?? undefined,
+        limit: params.limit,
+      })}`),
+    action: (id: string, action: string, sessionId: string | null, data: Record<string, unknown> = {}) =>
+      request<{ result: unknown }>(`/plugins/${id}/actions/${action}`, {
         method: "POST",
-        body: JSON.stringify(body),
+        body: JSON.stringify({ session_id: sessionId, data }),
       }),
-    runs: (instanceId: string) =>
-      request<PluginRun[]>(`/plugins/instances/${instanceId}/runs`),
-    run: (runId: string) => request<PluginRun>(`/plugins/runs/${runId}`),
-    runLogs: (runId: string, limit?: number, sessionId?: string | null) =>
-      request<PluginLogLine[]>(`/plugins/runs/${runId}/logs${pluginLogsQuery(limit, sessionId)}`),
-    instanceLogs: (instanceId: string, limit?: number, sessionId?: string | null) =>
-      request<PluginLogLine[]>(`/plugins/instances/${instanceId}/logs${pluginLogsQuery(limit, sessionId)}`),
   },
 };
 
@@ -337,6 +324,14 @@ export function createSessionSocket(sessionId: string): WebSocket {
   return new WebSocket(`${WS_BASE}/sessions/${sessionId}/stream`);
 }
 
-export function createPluginSocket(instanceId: string): WebSocket {
-  return new WebSocket(`${WS_BASE}/plugins/instances/${instanceId}/stream`);
+// WS /plugins/stream; sessionId limits it to one session's items (plus global ones).
+export function createPluginsStream(sessionId?: string | null): WebSocket {
+  const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return new WebSocket(`${WS_BASE}/plugins/stream${q}`);
+}
+
+function query(params: Record<string, string | number | undefined>): string {
+  const entries = Object.entries(params).filter(([, v]) => v !== undefined && v !== "");
+  if (entries.length === 0) return "";
+  return "?" + entries.map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`).join("&");
 }

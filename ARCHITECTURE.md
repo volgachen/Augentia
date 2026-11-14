@@ -17,7 +17,7 @@
 | 前端呈现层 | Management Dashboard | React 19, Vite, Tailwind CSS | 提供可视化控制台，包括智能体注册、活跃会话监控、实时日志流和插件管理。 |
 | 网关接入层 | API & WebSocket Gateway | FastAPI, Uvicorn | 暴露 RESTful API 与 WebSocket 长连接，处理跨域请求，承接前端与后端逻辑层之间的交互。 |
 | 后端逻辑层 | Session Manager & Adapter Runtime | 异步 Python, 依赖注入 | 负责会话状态流转、任务列表管理、工具调用确认、底层 Agent Adapter 调度，以及插件子进程管理。 |
-| 数据库管理层 | Agent Database | MySQL, In-memory Mock | 通过统一数据库接口保存智能体模板、会话、消息、任务和插件状态。 |
+| 数据库管理层 | Agent Database | MySQL, In-memory Mock | 通过统一数据库接口保存智能体模板、会话、消息、任务，以及插件服务的运行记录和日志。 |
 
 ### 项目文件结构总览
 
@@ -25,7 +25,7 @@
 backend/app/
 ├── main.py                 # FastAPI app entry point + lifespan (DB pool)
 ├── config.py               # Settings from env / .env
-├── models/domain.py        # AgentTemplate, Session, Message, Task, Plugin, enums
+├── models/domain.py        # AgentTemplate, Session, Message, Task, PluginServiceRun/Log, enums
 ├── core/runner.py          # SessionRunner — owns an adapter, fans out events
 ├── core/session_runtime.py # Adapter factory, runner startup, session rehydration
 ├── core/session_prompt.py  # Effective prompt and runtime-context construction
@@ -40,9 +40,10 @@ backend/app/
 │   ├── cagent_adapter.py   # CAgent-framework engine: event queue + confirm gate
 │   ├── cagent_agent.py     # Per-session dynamic BaseAgent subclass (hooks → adapter)
 │   ├── cagent_store.py     # CAgent Store protocol over IAgentDatabase (+history repair)
+│   ├── plugin_hooks.py     # Plugin hook payload conversion + return-value checks
 │   ├── registry.py         # session_id → SessionRunner registry
 │   └── tools/              # Decorator-registered tools
-├── plugins/                # Supervised plugin subprocess runner + log buffer
+├── plugins/                # Plugin host: loader, SDK, tools, hooks, services (see plugins/README.md)
 └── routers/
     ├── agents.py
     ├── sessions.py
@@ -56,7 +57,7 @@ frontend/src/
 ├── api/                    # Typed fetch + WebSocket client + wire types
 ├── store/                  # Zustand stores
 ├── components/             # AgentDetailModal, WorkingDirPicker, TaskListPanel, SubAgentListPanel
-└── pages/                  # AgentRegistry, SessionDashboard, LiveConsole, PluginRegistry, PluginConsole
+└── pages/                  # AgentRegistry, SessionDashboard, LiveConsole, Plugins
 ```
 
 ---
@@ -98,12 +99,13 @@ class IAgentDatabase(ABC):
     async def add_message(self, session_id: str, role: MessageRole, content: str, **kwargs) -> Message: ...
     async def get_messages(self, session_id: str) -> list[Message]: ...
 
-    async def list_plugins(self) -> list[Plugin]: ...
-    async def get_plugin(self, plugin_id: str) -> Plugin: ...
-    async def create_plugin(self, name: str, code: str) -> Plugin: ...
-    async def update_plugin(self, plugin_id: str, **kwargs) -> Plugin: ...
-    async def delete_plugin(self, plugin_id: str) -> None: ...
-    async def set_plugin_status(self, plugin_id: str, status: PluginStatus, **kwargs) -> Plugin: ...
+    # Plugin definitions and settings live in files under ~/.augentia; the
+    # database only keeps service runs and plugin log lines.
+    async def create_service_run(self, plugin_id: str, service: str, **kwargs) -> PluginServiceRun: ...
+    async def update_service_run(self, run_id: str, **kwargs) -> PluginServiceRun: ...
+    async def list_service_runs(self, plugin_id: str, **filters) -> list[PluginServiceRun]: ...
+    async def add_service_log(self, plugin_id: str, line: str, **kwargs) -> PluginServiceLog: ...
+    async def list_service_logs(self, plugin_id: str, **filters) -> list[PluginServiceLog]: ...
 
     async def create_task(self, task_list_id: str, subject: str, description: str, **kwargs) -> Task: ...
     async def get_task(self, task_list_id: str, task_id: str) -> Task | None: ...
@@ -124,7 +126,7 @@ class IAgentDatabase(ABC):
 | --- | --- | --- |
 | GET / POST | `/api/v1/agents` | List / create agent templates |
 | GET / PUT / DELETE | `/api/v1/agents/{agent_id}` | Get, update, or delete an agent template |
-| GET | `/api/v1/tools` | List registered tool names |
+| GET | `/api/v1/tools` | List selectable tools (built-in and plugin) with description, source and default approval |
 | POST | `/api/v1/sessions` | Create and start a session |
 | GET | `/api/v1/sessions` | List sessions |
 | GET | `/api/v1/sessions/{session_id}` | Get session status |
@@ -138,14 +140,11 @@ class IAgentDatabase(ABC):
 | GET | `/api/v1/sessions/{session_id}/tasks` | Get the session's task list |
 | DELETE | `/api/v1/sessions/{session_id}` | Terminate a session |
 | WS | `/api/v1/sessions/{session_id}/stream` | Real-time session event stream |
-| GET / POST | `/api/v1/plugins` | List / create plugins |
-| GET / PUT / DELETE | `/api/v1/plugins/{plugin_id}` | Get, update, or delete a plugin |
-| POST | `/api/v1/plugins/{plugin_id}/start` | Start a plugin subprocess |
-| POST | `/api/v1/plugins/{plugin_id}/stop` | Stop a plugin subprocess |
-| POST | `/api/v1/plugins/{plugin_id}/restart` | Restart a plugin subprocess |
-| GET | `/api/v1/plugins/{plugin_id}/logs` | Read buffered plugin logs |
-| POST | `/api/v1/plugins/{plugin_id}/logs/clear` | Clear buffered plugin logs |
-| WS | `/api/v1/plugins/{plugin_id}/stream` | Stream plugin status and logs |
+| GET / PUT | `/api/v1/sessions/{session_id}/config` | Session config file (tool permissions, `plugins` section; plugin secrets masked) |
+| GET | `/api/v1/sessions/{session_id}/plugins` | Plugins configurable for the session, with effective config, UI card and service state |
+| PUT | `/api/v1/sessions/{session_id}/plugins/{plugin_id}` | Switch a plugin on/off for the session or change its session config |
+| GET | `/api/v1/plugins` | Installed plugins (state, capabilities, services, UI card) — full plugin API in `backend/app/plugins/README.md` §12 |
+| WS | `/api/v1/plugins/stream` | Live plugin, service, UI and log updates |
 | GET | `/api/v1/fs/browse` | Browse directories for pickers |
 | GET | `/api/v1/fs/templates` | Browse template directories |
 | GET | `/api/v1/fs/home` | Get home, project root and templates root |

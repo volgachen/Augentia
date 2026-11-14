@@ -1,0 +1,40 @@
+{
+  "id": "wechat",
+  "name": "WeChat Bridge",
+  "version": "0.2.0",
+  "api_version": 1,
+  "description": "Connect a session to a WeChat account: WeChat messages go into the session, the agent's replies go back to the sender.",
+  "author": "augentia",
+  "entry": "plugin:WeChatPlugin",
+  "python_dependencies": ["wechatbot"],
+  "config": {
+    "session": {
+      "type": "object",
+      "properties": {
+        "command_prefix": {
+          "type": "string",
+          "title": "Command prefix",
+          "description": "WeChat messages starting with this are bridge commands (e.g. \\cmd status) and are not sent to the agent.",
+          "default": "\\cmd"
+        },
+        "message_prefix": {
+          "type": "string",
+          "title": "Message prefix",
+          "description": "Prepended to every WeChat message the agent receives.",
+          "default": "[send from wechat] "
+        },
+        "reply_mode": {
+          "type": "string",
+          "title": "Replies sent to WeChat",
+          "enum": ["final_only", "every_reply"],
+          "default": "final_only",
+          "description": "final_only: only the turn's final answer. every_reply: also the text the agent writes before tool calls."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "session": {
+    "default_enabled": false
+  }
+}

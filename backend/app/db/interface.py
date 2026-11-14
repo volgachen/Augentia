@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 from typing import Any, List
 from app.models.domain import (
     AgentTemplate, Session, SessionStatus, Message, MessageRole, SystemPrompt,
-    PluginInstance, PluginLog, PluginRun, PluginStatus, Task, TaskStatus,
+    Task, TaskStatus,
+    PluginServiceLog, PluginServiceRun,
 )
 
 # Sentinel for update_task(owner=...) so callers can distinguish "leave owner
@@ -150,86 +151,64 @@ class IAgentDatabase(ABC):
         {"deleted_by": "user"} for the delete button.
         """
 
-    # ------- Plugin instances/runs/logs -------
+    # ------- v2 plugin service runs / logs -------
     @abstractmethod
-    async def list_plugin_instances(self) -> List[PluginInstance]: pass
+    async def create_service_run(
+        self, plugin_id: str, service: str, *, session_id: str | None = None, restart_count: int = 0,
+    ) -> PluginServiceRun: pass
 
     @abstractmethod
-    async def get_plugin_instance(self, instance_id: str) -> PluginInstance: pass
-
-    @abstractmethod
-    async def create_plugin_instance(
-        self,
-        plugin_id: str,
-        display_name: str,
-        *,
-        config: dict | None = None,
-        auto_start: bool = False,
-    ) -> PluginInstance: pass
-
-    @abstractmethod
-    async def update_plugin_instance(
-        self,
-        instance_id: str,
-        *,
-        display_name: str | None = None,
-        config: dict | None = None,
-        auto_start: bool | None = None,
-        status: PluginStatus | None = None,
-        current_run_id: str | None = None,
-    ) -> PluginInstance: pass
-
-    @abstractmethod
-    async def delete_plugin_instance(self, instance_id: str) -> None: pass
-
-    @abstractmethod
-    async def create_plugin_run(
-        self,
-        plugin_instance_id: str,
-        plugin_id: str,
-        *,
-        config_snapshot: dict | None = None,
-    ) -> PluginRun: pass
-
-    @abstractmethod
-    async def get_plugin_run(self, run_id: str) -> PluginRun: pass
-
-    @abstractmethod
-    async def list_plugin_runs(self, plugin_instance_id: str) -> List[PluginRun]: pass
-
-    @abstractmethod
-    async def update_plugin_run(
+    async def update_service_run(
         self,
         run_id: str,
         *,
-        status: PluginStatus | None = None,
+        status: str | None = None,
         running_at: Any = _UNSET,
         exited_at: Any = _UNSET,
         exit_code: Any = _UNSET,
         error: Any = _UNSET,
-    ) -> PluginRun: pass
+    ) -> PluginServiceRun: pass
 
     @abstractmethod
-    async def add_plugin_log(
+    async def list_service_runs(
         self,
-        plugin_instance_id: str,
-        plugin_run_id: str,
-        stream: str,
+        plugin_id: str,
+        *,
+        service: str | None = None,
+        session_id: str | None = None,
+        limit: int = 100,
+    ) -> List[PluginServiceRun]:
+        """Newest first."""
+
+    @abstractmethod
+    async def interrupt_active_service_runs(self, error: str) -> int:
+        """Mark runs still starting / running / stopping as errored (backend restarted)."""
+
+    @abstractmethod
+    async def add_service_log(
+        self,
+        plugin_id: str,
         line: str,
         *,
-        level: str | None = None,
+        level: str = "info",
+        run_id: str | None = None,
         session_id: str | None = None,
-    ) -> PluginLog: pass
+    ) -> PluginServiceLog: pass
 
     @abstractmethod
-    async def list_plugin_logs(
+    async def list_service_logs(
         self,
+        plugin_id: str,
         *,
-        plugin_instance_id: str | None = None,
-        plugin_run_id: str | None = None,
+        run_id: str | None = None,
         session_id: str | None = None,
         limit: int = 500,
-    ) -> List[PluginLog]: pass
+    ) -> List[PluginServiceLog]:
+        """The newest `limit` lines, oldest first."""
+
+    @abstractmethod
+    async def prune_service_logs(self, plugin_id: str, keep: int) -> int:
+        """Delete all but the newest `keep` lines of a plugin; returns how many were deleted."""
 
     # ------- Tasks -------
     @abstractmethod

@@ -12,15 +12,8 @@ from fastapi.responses import JSONResponse
 from app.auth import is_request_authenticated, validate_auth_config
 from app.config import get_settings
 from app.db.deps import get_db, init_db, close_db
-from app.plugins.catalog import get_plugin_catalog
-from app.plugins.events import get_plugin_event_bus
-from app.plugins.registry import get_plugin_registry
-from app.plugins.service import (
-    auto_start_plugin_instances,
-    recover_interrupted_plugin_runs,
-    register_plugin_event_delivery,
-    stop_running_plugin_instances,
-)
+from app.adapters.registry import get_registry as get_session_registry
+from app.plugins.host import get_plugin_host
 from app.routers import agents, attachments, auth, sessions, share, fs, plugins, tools, tasks
 
 
@@ -29,16 +22,13 @@ async def lifespan(app: FastAPI):
     validate_auth_config(get_settings())
     await init_db()
     db = get_db()
-    registry = get_plugin_registry()
-    catalog = get_plugin_catalog()
-    event_bus = get_plugin_event_bus()
-    register_plugin_event_delivery(event_bus, db, registry, catalog)
-    await recover_interrupted_plugin_runs(db)
-    # await auto_start_plugin_instances(db, registry, catalog)
+    plugin_host = get_plugin_host()
+    plugin_host.bind(db, get_session_registry())
+    await plugin_host.load_all()
     try:
         yield
     finally:
-        await stop_running_plugin_instances(db, registry)
+        await plugin_host.shutdown()
         await close_db()
 
 
