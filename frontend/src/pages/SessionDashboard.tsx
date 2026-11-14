@@ -5,6 +5,7 @@ import { usePluginStore } from "../store/plugins";
 import { api } from "../api/client";
 import type { AgentTemplate, PluginDefinition, PluginInstance, Session, SessionStatus } from "../api/types";
 import PluginSessionConsoleDialog from "../components/plugins/PluginSessionConsoleDialog";
+import BranchIcon from "../components/BranchIcon";
 import NewSessionInDir from "../components/NewSessionInDir";
 
 function formatTimestamp(iso: string | null): string {
@@ -328,6 +329,18 @@ export default function SessionDashboard() {
     navigate(`/console/${sessionId}`);
   };
 
+  const branchSourceName = (session: Session) => {
+    const id = session.branched_from_session_id ?? "";
+    return sessions[id]?.session.title?.trim() || `${id.slice(0, 8)}…`;
+  };
+  const openBranchSource = (session: Session) => {
+    const id = session.branched_from_session_id;
+    if (!id) return;
+    const m = session.branched_from_message_id;
+    setActive(id);
+    navigate(`/console/${id}${m ? `?m=${encodeURIComponent(m)}` : ""}`);
+  };
+
   // Quick create from a directory header: straight into that folder, then
   // open the new session's console like a launch from the Agent Registry.
   const createInDir = async (agentId: string, dir: string | null) => {
@@ -483,6 +496,19 @@ export default function SessionDashboard() {
                     )}
                     {depth > 0 && (
                       <span className="text-gray-600 shrink-0">└─</span>
+                    )}
+                    {session.branched_from_session_id && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openBranchSource(session);
+                        }}
+                        title={`分支自 ${branchSourceName(session)}，点击打开分叉的那条消息`}
+                        className="shrink-0 rounded p-0.5 text-sky-500/80 hover:bg-gray-800 hover:text-sky-300 transition-colors"
+                      >
+                        <BranchIcon />
+                      </button>
                     )}
                     {editingId === session.id ? (
                       <input

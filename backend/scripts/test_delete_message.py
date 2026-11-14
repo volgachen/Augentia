@@ -235,6 +235,14 @@ async def main() -> int:
                 passed = False
             else:
                 ok("diverge from a summary keeps history through it as a plain message")
+            if (branch.parent_session_id is not None
+                    or branch.branched_from_session_id != session.id
+                    or branch.branched_from_message_id != mark.id):
+                fail(f"branch link: parent={branch.parent_session_id} "
+                     f"from={branch.branched_from_session_id}/{branch.branched_from_message_id}")
+                passed = False
+            else:
+                ok("a branch records branched_from_* (session + divergence point), not a parent")
             await registry.remove(branch.id)
 
             # 6. Deleting the summary removes the whole compressed span.

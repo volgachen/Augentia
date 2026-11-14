@@ -54,6 +54,8 @@ class IAgentDatabase(ABC):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        branched_from_session_id: str | None = None,
+        branched_from_message_id: str | None = None,
     ) -> Session:
         """system_prompt_snapshot stores a new first version; system_prompt_id
         instead shares an existing version (diverge). Neither: no prompt yet.

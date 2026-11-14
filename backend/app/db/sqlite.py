@@ -84,6 +84,8 @@ def _session(row: sqlite3.Row) -> Session:
     return Session(
         id=row["id"], agent_id=row["agent_id"], title=row["title"],
         working_dir=row["working_dir"], parent_session_id=row["parent_session_id"],
+        branched_from_session_id=row["branched_from_session_id"],
+        branched_from_message_id=row["branched_from_message_id"],
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
@@ -201,6 +203,8 @@ class SqliteDatabase(IAgentDatabase):
                 title TEXT DEFAULT NULL,
                 working_dir TEXT DEFAULT NULL,
                 parent_session_id TEXT DEFAULT NULL,
+                branched_from_session_id TEXT DEFAULT NULL,
+                branched_from_message_id TEXT DEFAULT NULL,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
                 system_prompt_id TEXT DEFAULT NULL,
@@ -314,7 +318,7 @@ class SqliteDatabase(IAgentDatabase):
             row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")
         }
         self._migrate_system_prompts(session_columns)
-        for column in ("model", "model_params"):
+        for column in ("model", "model_params", "branched_from_session_id", "branched_from_message_id"):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
 
@@ -478,6 +482,8 @@ class SqliteDatabase(IAgentDatabase):
             additional_prompt_path=kwargs.get("additional_prompt_path"),
             model=kwargs.get("model"),
             model_params=kwargs.get("model_params"),
+            branched_from_session_id=kwargs.get("branched_from_session_id"),
+            branched_from_message_id=kwargs.get("branched_from_message_id"),
         )
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
@@ -488,12 +494,15 @@ class SqliteDatabase(IAgentDatabase):
                     kwargs["system_prompt_snapshot"], None, _iso(session.created_at))
             self._conn.execute(
                 """INSERT INTO sessions
-                   (id, agent_id, title, working_dir, parent_session_id, additional_prompt,
+                   (id, agent_id, title, working_dir, parent_session_id,
+                    branched_from_session_id, branched_from_message_id, additional_prompt,
                     additional_prompt_path, system_prompt_id, model, model_params, status,
                     created_at, updated_at, last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session.id, session.agent_id, session.title, session.working_dir,
-                 session.parent_session_id, session.additional_prompt, session.additional_prompt_path,
+                 session.parent_session_id, session.branched_from_session_id,
+                 session.branched_from_message_id,
+                 session.additional_prompt, session.additional_prompt_path,
                  prompt_id, session.model, _dump(session.model_params), session.status.value, _iso(session.created_at),
                  _iso(session.updated_at), _iso(session.last_message_at)),
             )

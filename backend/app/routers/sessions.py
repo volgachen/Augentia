@@ -156,6 +156,7 @@ async def _create_derived_session(
     *,
     title: str | None,
     before_message_id: str | None = None,
+    branched_from_message_id: str | None = None,
 ) -> Session:
     agent = await db.get_agent(source.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
@@ -164,7 +165,11 @@ async def _create_derived_session(
         source.agent_id,
         working_dir=source.working_dir,
         title=title,
-        parent_session_id=source.id,
+        # A branch is not a sub-agent: it records where it came from instead
+        # of a parent (list_subagents and the Sub-agents panel only follow
+        # parent_session_id).
+        branched_from_session_id=source.id,
+        branched_from_message_id=branched_from_message_id,
         additional_prompt=source.additional_prompt,
         additional_prompt_path=source.additional_prompt_path,
         # Versions are immutable, so the branch shares the source's current
@@ -766,6 +771,7 @@ async def diverge_from_message(
             source, db, registry,
             title=body.title or f"{source.title or 'Session'} · Branch",
             before_message_id=before_message_id,
+            branched_from_message_id=message_id,
         )
     except HTTPException:
         raise

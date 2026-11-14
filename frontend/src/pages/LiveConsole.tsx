@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { messageToEvent, useStore } from "../store/sessions";
 import { CompressedLoaderContext } from "../components/console/compressedLoader";
 import { api } from "../api/client";
@@ -14,13 +14,24 @@ import SystemPromptPanel from "../components/SystemPromptPanel";
 import ShareButton from "../components/ShareButton";
 import WorkingDirEditor from "../components/WorkingDirEditor";
 import ModelEditor from "../components/ModelEditor";
+import BranchIcon from "../components/BranchIcon";
 import { AttachmentTray } from "../components/ImageAttachments";
 import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAttachments";
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
-import { buildConsoleItems, isToolCallView, itemMessageId } from "../components/console/items";
+import {
+  buildConsoleItems,
+  isToolCallView,
+  itemMessageId,
+  itemMessageIds,
+} from "../components/console/items";
 
 export default function LiveConsole() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  // ?m=<message id>: scroll to that message once it is loaded (the "branched
+  // from" link of a branch points at its divergence point this way).
+  const [searchParams] = useSearchParams();
+  const jumpTarget = searchParams.get("m");
+  const jumpedFor = useRef<string | null>(null);
   const navigate = useNavigate();
   const sessions = useStore((s) => s.sessions);
   const sendMessage = useStore((s) => s.sendMessage);
@@ -97,10 +108,28 @@ export default function LiveConsole() {
     if (sessionId) openSession(sessionId);
   }, [sessionId, openSession]);
 
+  // Scroll to ?m= once its row has rendered (history may still be loading).
+  const eventsLoaded = entry?.events.length ?? 0;
   useEffect(() => {
-    if (!autoScroll) return;
+    if (!sessionId || !jumpTarget) return;
+    const key = `${sessionId}/${jumpTarget}`;
+    if (jumpedFor.current === key) return;
+    const index = buildConsoleItems(entry?.events ?? []).findIndex((item) =>
+      itemMessageIds(item).includes(jumpTarget),
+    );
+    if (index < 0) return;
+    const node = itemRefs.current[index];
+    if (!node) return;
+    jumpedFor.current = key;
+    setFocusedItemIndex(index);
+    node.scrollIntoView({ block: "center" });
+  }, [sessionId, jumpTarget, eventsLoaded, entry?.events]);
+
+  useEffect(() => {
+    // Opened at a message (?m=): stay there instead of following the tail.
+    if (!autoScroll || jumpTarget) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entry?.events.length, entry?.session.status, autoScroll]);
+  }, [entry?.events.length, entry?.session.status, autoScroll, jumpTarget]);
 
   useEffect(() => {
     itemRefs.current = itemRefs.current.slice(0, entry?.events.length ?? 0);
@@ -168,8 +197,19 @@ export default function LiveConsole() {
   }
 
   const { session, events } = entry;
+  const branchSourceId = session.branched_from_session_id ?? "";
+  const branchSourceTitle =
+    sessions[branchSourceId]?.session.title?.trim() || `${branchSourceId.slice(0, 8)}…`;
   const generating = session.status === "RUNNING";
   const consoleItems = buildConsoleItems(events);
+
+  const jumpKey = sessionId && jumpTarget ? `${sessionId}/${jumpTarget}` : null;
+  const jumpIndex = jumpTarget
+    ? consoleItems.findIndex((item) => itemMessageIds(item).includes(jumpTarget))
+    : -1;
+  // Rows the transcript doesn't show (deleted, or compressed into a summary)
+  // can't be scrolled to; say so instead of jumping silently nowhere.
+  const jumpMissing = !!jumpTarget && jumpIndex < 0 && events.length > 0;
 
   const scrollToConsoleItem = (index: number) => {
     const nextIndex = Math.max(0, Math.min(index, consoleItems.length - 1));
@@ -320,6 +360,26 @@ export default function LiveConsole() {
           <p className="text-xs text-gray-500 font-mono select-all" title="会话 id">
             {session.id}
           </p>
+          {session.branched_from_session_id && (
+            <button
+              type="button"
+              onClick={() => {
+                const src = session.branched_from_session_id!;
+                const m = session.branched_from_message_id;
+                navigate(`/console/${src}${m ? `?m=${encodeURIComponent(m)}` : ""}`);
+              }}
+              className="mt-0.5 flex items-center gap-1 text-xs text-sky-400/80 hover:text-sky-300"
+              title="打开原会话并定位到分叉的那条消息"
+            >
+              <BranchIcon className="h-3 w-3" />
+              分支自 {branchSourceTitle}
+            </button>
+          )}
+          {jumpKey && jumpMissing && (
+            <p className="mt-0.5 text-xs text-amber-400/80">
+              要定位的消息不在当前显示的记录里（可能已被删除或压缩进摘要）
+            </p>
+          )}
         </div>
         <div className="text-left">
           <WorkingDirEditor session={session} />

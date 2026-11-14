@@ -83,6 +83,12 @@ class Session(BaseModel):
     # session was created directly by an operator. Used to render the agent
     # derivation tree and to let the child report results back to its parent.
     parent_session_id: Optional[str] = None
+    # Set on a branch made by diverge: the session it was branched from and
+    # the message it branched at (the divergence point the user picked; the
+    # branch holds a copy of the history before it, or through it for a
+    # summary). Separate from parent_session_id, which is for sub-agents.
+    branched_from_session_id: Optional[str] = None
+    branched_from_message_id: Optional[str] = None
     # Per-session add-ons to the AgentTemplate's base system_prompt. Persisted so
     # a session rehydrated after a backend restart sees the exact same effective
     # prompt it was launched with. The router applies them at adapter.start()

@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     title             VARCHAR(300)  DEFAULT NULL,
     working_dir       VARCHAR(1000) DEFAULT NULL,
     parent_session_id VARCHAR(36)   DEFAULT NULL,
+    branched_from_session_id VARCHAR(36) DEFAULT NULL,
+    branched_from_message_id VARCHAR(36) DEFAULT NULL,
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
     system_prompt_id  VARCHAR(36)   DEFAULT NULL,
@@ -208,6 +210,18 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "sessions",
+        "branched_from_session_id",
+        ["ALTER TABLE sessions ADD COLUMN branched_from_session_id VARCHAR(36) DEFAULT NULL "
+         "AFTER parent_session_id"],
+    ),
+    (
+        "sessions",
+        "branched_from_message_id",
+        ["ALTER TABLE sessions ADD COLUMN branched_from_message_id VARCHAR(36) DEFAULT NULL "
+         "AFTER branched_from_session_id"],
+    ),
+    (
+        "sessions",
         "model",
         ["ALTER TABLE sessions ADD COLUMN model VARCHAR(200) DEFAULT NULL AFTER system_prompt_id"],
     ),
@@ -272,6 +286,8 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         title=row.get("title"),
         working_dir=row["working_dir"],
         parent_session_id=row["parent_session_id"],
+        branched_from_session_id=row.get("branched_from_session_id"),
+        branched_from_message_id=row.get("branched_from_message_id"),
         # `.get` instead of `[]` so a database that hasn't had the additional_*
         # columns ALTER'd in yet still loads. Operators run that ALTER manually
         # (see CLAUDE.md / migration notes).
@@ -699,6 +715,8 @@ class MySqlDatabase(IAgentDatabase):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        branched_from_session_id: str | None = None,
+        branched_from_message_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)
         session = Session(
@@ -711,6 +729,8 @@ class MySqlDatabase(IAgentDatabase):
             additional_prompt_path=additional_prompt_path,
             model=model,
             model_params=model_params,
+            branched_from_session_id=branched_from_session_id,
+            branched_from_message_id=branched_from_message_id,
         )
         # Seed a friendly default so the UI never shows a blank title. Uses the
         # agent's name + creation time; a caller-supplied title (e.g. a spawning
@@ -727,16 +747,19 @@ class MySqlDatabase(IAgentDatabase):
                 await cur.execute(
                     """INSERT INTO sessions
                        (id, agent_id, title, working_dir, parent_session_id,
+                        branched_from_session_id, branched_from_message_id,
                         additional_prompt, additional_prompt_path,
                         system_prompt_id, model, model_params,
                         status, created_at, updated_at, last_message_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         session.id,
                         session.agent_id,
                         session.title,
                         session.working_dir,
                         session.parent_session_id,
+                        session.branched_from_session_id,
+                        session.branched_from_message_id,
                         session.additional_prompt,
                         session.additional_prompt_path,
                         prompt_id,

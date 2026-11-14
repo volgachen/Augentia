@@ -80,6 +80,10 @@ export interface Session {
   title: string | null;
   working_dir: string | null;
   parent_session_id: string | null;
+  // Set on a branch made by "diverge": the source session and the message the
+  // branch was made at. Unlike parent_session_id (sub-agents) it only links.
+  branched_from_session_id?: string | null;
+  branched_from_message_id?: string | null;
   additional_prompt: string | null;
   additional_prompt_path: string | null;
   // The session's own model / Chat Completions params; null = the agent's.

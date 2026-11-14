@@ -46,7 +46,9 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `agent_id` | VARCHAR(36) | NOT NULL |
 | `title` | VARCHAR(300) | nullable |
 | `working_dir` | VARCHAR(1000) | nullable |
-| `parent_session_id` | VARCHAR(36) | nullable |
+| `parent_session_id` | VARCHAR(36) | nullable; the session that spawned this one as a sub-agent (`subagent` tool / `POST /sessions`) |
+| `branched_from_session_id` | VARCHAR(36) | nullable; set on a branch made by diverge: the session it was branched from |
+| `branched_from_message_id` | VARCHAR(36) | nullable; the message the branch was made at (in the source session) |
 | `additional_prompt` | LONGTEXT | nullable |
 | `additional_prompt_path` | VARCHAR(1000) | nullable |
 | `system_prompt_id` | VARCHAR(36) | nullable; current `system_prompts` version of the effective prompt (agent prompt + additions + runtime context, frozen at first start). NULL until first start |
@@ -60,7 +62,9 @@ Live/past sessions; form a tree via `parent_session_id`.
 
 Indexes: `idx_sessions_agent (agent_id)`, `idx_sessions_parent (parent_session_id)`.
 
-`model` / `model_params` are added to existing databases on startup (both NULL).
+`model` / `model_params` and `branched_from_*` are added to existing databases
+on startup (NULL). Branches made before `branched_from_*` existed were linked
+through `parent_session_id`; they are not migrated.
 
 The API still returns the resolved text as `agents.system_prompt` /
 `sessions.system_prompt_snapshot` alongside `system_prompt_id`. Databases

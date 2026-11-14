@@ -112,6 +112,8 @@ class MockMemoryDatabase(IAgentDatabase):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        branched_from_session_id: str | None = None,
+        branched_from_message_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)  # validate agent exists
         session = Session(
@@ -124,6 +126,8 @@ class MockMemoryDatabase(IAgentDatabase):
             additional_prompt_path=additional_prompt_path,
             model=model,
             model_params=dict(model_params) if model_params is not None else None,
+            branched_from_session_id=branched_from_session_id,
+            branched_from_message_id=branched_from_message_id,
         )
         if system_prompt_snapshot is not None:
             self._point_at(session, system_prompt_snapshot, new_chain=True)

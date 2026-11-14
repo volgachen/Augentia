@@ -131,6 +131,7 @@ class IAgentDatabase(ABC):
 | PATCH | `/api/v1/sessions/{session_id}` | Rename a session |
 | GET / PUT | `/api/v1/sessions/{session_id}/model` | Get / set the session's own `model` and `model_params` (null: the agent's `openai_model` / `config.model_params`; params replace the agent's as a whole). PUT: 409 while a turn runs; the live runner is rebuilt, history kept. Branches (diverge) start with the source's values |
 | DELETE | `/api/v1/sessions/{session_id}/parent` | Unlink the session from its parent (it becomes top-level) |
+| POST | `/api/v1/sessions/{session_id}/messages/{message_id}/diverge` | Branch at a message: a new session with a copy of the history before it (through it for a summary). The branch records `branched_from_session_id` / `branched_from_message_id`, not `parent_session_id`, so it is not a sub-agent |
 | GET / PUT | `/api/v1/sessions/{session_id}/system-prompt` | Get / replace the session's effective system prompt (PUT: 409 while a turn runs) |
 | GET | `/api/v1/sessions/{session_id}/messages` | Get message history |
 | POST | `/api/v1/sessions/{session_id}/messages` | Send a message into a session. Optional `turn_overrides` sets `max_steps`, `step_reminder_at`, `step_reminder`, `tool_limit_at`, `tool_limit_message` for this turn only (`null` turns `step_reminder_at` / `tool_limit_at` off); recorded on the user row as `metadata.turn_overrides` |
