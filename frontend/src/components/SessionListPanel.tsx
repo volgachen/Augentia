@@ -8,6 +8,7 @@ const STATUS_DOT: Record<SessionStatus, string> = {
   WAITING_CONFIRM: "bg-orange-400",
   COMPLETED: "bg-gray-500",
   ERROR: "bg-red-400",
+  DISPATCHING: "bg-sky-400",
 };
 
 function isSocketLive(socket: WebSocket | null): boolean {

@@ -26,6 +26,7 @@ const STATUS_STYLE: Record<SessionStatus, string> = {
   WAITING_CONFIRM: "bg-orange-900 text-orange-300",
   COMPLETED: "bg-gray-700 text-gray-400",
   ERROR: "bg-red-900 text-red-300",
+  DISPATCHING: "bg-sky-900 text-sky-300",
 };
 
 interface Entry {

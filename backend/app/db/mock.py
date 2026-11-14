@@ -181,6 +181,13 @@ class MockMemoryDatabase(IAgentDatabase):
         session.updated_at = datetime.now(timezone.utc)
         return session
 
+    async def pending_joins(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for s in self._sessions.values():
+            if s.join_into_session_id and not s.joined_message_id and s.deleted_at is None:
+                counts[s.join_into_session_id] = counts.get(s.join_into_session_id, 0) + 1
+        return counts
+
     async def set_joined_message(self, session_id: str, message_id: str) -> Session:
         session = await self.get_session(session_id, include_deleted=True)
         session.joined_message_id = message_id

@@ -14,6 +14,9 @@ Covers:
   - a join waits for a running source turn (lands after it, never inside it)
   - expanding a branch_summary returns the branch's turn rows
   - joins are idempotent and redone for pending branches (restart)
+  - while results are pending the source reports DISPATCHING (stored status
+    untouched) and refuses new messages / another dispatch (409); deleting
+    a pending branch joins what it did and releases the source
 
 Run from backend/:  python scripts/test_branch_join.py
 """
@@ -30,7 +33,11 @@ from app.core.branch_join import BRANCH_SUMMARY, JOINED_FROM, is_branch_summary,
 from app.core.session_runtime import build_runner, join_pending_branches
 from app.db.mock import MockMemoryDatabase
 from app.models.domain import AgentTemplate, AgentType, MessageRole
-from app.routers.sessions import ForkDispatchRequest, compressed_messages, fork_dispatch
+from fastapi import HTTPException
+from app.routers.sessions import (
+    ForkDispatchRequest, PostMessageRequest, compressed_messages, delete_session, fork_dispatch,
+    get_session, list_sessions, post_message,
+)
 
 from _common import fail, ok, section
 
@@ -138,6 +145,27 @@ async def main() -> int:
                       for b in branches), "each branch borrows from and joins into the source")
             await wait_for(lambda: _gte(active, 3), timeout=3)
             check(active["max"] == 3, f"branch turns run concurrently (max {active['max']} at once)")
+
+            section("DISPATCHING while results are pending")
+            shown = await get_session("src", db=db)
+            check(shown.status.value == "DISPATCHING" and shown.pending_joins == 3,
+                  f"GET reports DISPATCHING with 3 pending ({shown.status.value}, {shown.pending_joins})")
+            listed = {s.id: s for s in await list_sessions(db=db)}
+            check(listed["src"].status.value == "DISPATCHING", "the session list reports it too")
+            check((await db.get_session("src")).status.value == "WAITING_USER",
+                  "the stored status is untouched")
+            for label, call in (
+                ("POST /messages", lambda: post_message(
+                    "src", PostMessageRequest(content="too early"), db=db, registry=registry)),
+                ("fork-dispatch", lambda: fork_dispatch(
+                    "src", ForkDispatchRequest(messages=["x"]), db=db, registry=registry)),
+            ):
+                try:
+                    await call()
+                except HTTPException as e:
+                    check(e.status_code == 409 and "fork-dispatch" in e.detail, f"{label} -> 409 while dispatching")
+                else:
+                    check(False, f"{label} accepted while dispatching")
             gate.set()
 
             async def all_joined():
@@ -164,6 +192,10 @@ async def main() -> int:
                 s = await db.get_session(b)
                 check(s.joined_message_id in {m.id for m in joined}, f"branch {b[:8]} records its joined row")
 
+            shown = await get_session("src", db=db)
+            check(shown.status.value == "WAITING_USER" and shown.pending_joins == 0,
+                  f"after the last join: WAITING_USER again ({shown.status.value})")
+
             section("the source's next turn sees the results")
             await turn("src", "next")
             sent = json.dumps(source_seen[-1], ensure_ascii=False)
@@ -185,8 +217,21 @@ async def main() -> int:
             runner = registry.get("src")
             await runner.submit("slow source turn")
             await asyncio.sleep(0.1)
-            r = await fork_dispatch("src", ForkDispatchRequest(messages=["task late"]), db=db, registry=registry)
-            late = r["branches"][0]["session_id"]
+            try:
+                await fork_dispatch("src", ForkDispatchRequest(messages=["x"]), db=db, registry=registry)
+            except HTTPException as e:
+                check(e.status_code == 409, "fork-dispatch over a running turn -> 409")
+            else:
+                check(False, "fork-dispatch over a running turn accepted")
+            # A branch made just before the source started a turn (here: its
+            # join is queued while that turn runs) still lands after it.
+            from app.routers.sessions import _create_derived_session
+            from datetime import datetime, timezone
+            late_branch = await _create_derived_session(
+                await db.get_session("src"), db, registry, title="late",
+                cutoff=datetime.now(timezone.utc), join_into=True)
+            late = late_branch.id
+            await registry.get(late).submit("task late")
 
             async def late_joined():
                 return (await db.get_session(late)).joined_message_id is not None
@@ -201,11 +246,29 @@ async def main() -> int:
             check(order[slow_i + 1] == "end" and order.index("join") > slow_i + 1,
                   f"the join landed after the running turn's turn_end ({order[slow_i:]})")
 
+            section("deleting a pending branch ends DISPATCHING")
+            gate.clear()
+            r = await fork_dispatch("src", ForkDispatchRequest(messages=["task stuck"]), db=db, registry=registry)
+            stuck = r["branches"][0]["session_id"]
+            await asyncio.sleep(0.1)
+            check((await get_session("src", db=db)).status.value == "DISPATCHING", "dispatching on a stuck branch")
+            await delete_session(stuck, db=db, registry=registry)
+            shown = await get_session("src", db=db)
+            check(shown.status.value == "WAITING_USER" and shown.pending_joins == 0,
+                  f"deleting the branch releases the source ({shown.status.value})")
+            rows = await db.get_own_messages("src")
+            stuck_row = next((m for m in rows if is_branch_summary(m)
+                              and m.metadata[JOINED_FROM]["session_id"] == stuck), None)
+            check(stuck_row is not None and stuck_row.metadata[JOINED_FROM]["ok"] is False,
+                  "the cancelled turn joined a note")
+            gate.set()
+
             section("idempotent; pending joins redone at startup")
             b = await db.get_session(ids[0])
+            before = sum(is_branch_summary(m) for m in await db.get_own_messages("src"))
             again = await write_join(db, b)
-            count = sum(is_branch_summary(m) for m in await db.get_own_messages("src"))
-            check(again.id == b.joined_message_id and count == 4, "writing the same join twice adds nothing")
+            after = sum(is_branch_summary(m) for m in await db.get_own_messages("src"))
+            check(again.id == b.joined_message_id and after == before, "writing the same join twice adds nothing")
             # Simulate a restart between turn end and join.
             r = await fork_dispatch("src", ForkDispatchRequest(messages=["task restart"]), db=db, registry=registry)
             rid = r["branches"][0]["session_id"]

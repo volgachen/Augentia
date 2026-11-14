@@ -92,6 +92,10 @@ row with `metadata.cagent_name = "branch_summary"` and
 `turn_end` mark. The branch's rows are not copied; expanding the summary
 reads them from the branch. Pending joins are redone at startup.
 
+While a session has live branches not joined back yet, API responses report
+its status as `DISPATCHING` with `pending_joins` (computed from
+`join_into_session_id` / `joined_message_id`, never stored in `status`).
+
 The API still returns the resolved text as `agents.system_prompt` /
 `sessions.system_prompt_snapshot` alongside `system_prompt_id`. Databases
 created before `system_prompts` are migrated on startup: each agent's

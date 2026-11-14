@@ -111,6 +111,9 @@ const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string 
 const HISTORY_COMPRESSED = "history_compressed";
 // STATUS payload sent when a fork-dispatch branch's result was appended.
 const HISTORY_JOINED = "history_joined";
+// STATUS payload: the reported status may have changed outside a turn
+// (fork-dispatch started or its last result joined); refetch the session.
+const SESSION_CHANGED = "session_changed";
 
 export function messageToEvent(m: Message): StreamEvent {
   let event = rowToEvent(m);
@@ -259,6 +262,10 @@ export const useStore = create<Store>((set, get) => {
 
     socket.onmessage = (e) => {
       const frame = JSON.parse(e.data);
+      if (frame.type === "status" && frame.data === SESSION_CHANGED) {
+        void get().refreshSession(sessionId).catch(() => {});
+        return;
+      }
       if (frame.type === "status" && (frame.data === HISTORY_COMPRESSED || frame.data === HISTORY_JOINED)) {
         // A summary just replaced rows this client still shows; they are now
         // soft-deleted server-side, so reload the transcript.
@@ -297,7 +304,10 @@ export const useStore = create<Store>((set, get) => {
           frame.type === "tool_confirm"
             ? "WAITING_CONFIRM"
             : frame.type === "done"
-              ? "WAITING_USER"
+              // A turn ending while results are pending: still dispatching.
+              ? (entry.session.pending_joins ?? 0) > 0
+                ? "DISPATCHING"
+                : "WAITING_USER"
               : frame.type === "error"
                 ? "ERROR"
                 : isUser || frame.type === "tool_result"

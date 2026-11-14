@@ -6,7 +6,10 @@ export type SessionStatus =
   | "WAITING_USER"
   | "WAITING_CONFIRM"
   | "COMPLETED"
-  | "ERROR";
+  | "ERROR"
+  // Reported (not stored) while fork-dispatch results are still to be joined
+  // into this session; it takes no new messages until they are.
+  | "DISPATCHING";
 
 export type MessageRole = "system" | "user" | "agent" | "tool_call" | "tool" | "mark";
 
@@ -89,6 +92,8 @@ export interface Session {
   // The session's own model / Chat Completions params; null = the agent's.
   model?: string | null;
   model_params?: Record<string, unknown> | null;
+  // Fork-dispatch branches of this session not joined back yet.
+  pending_joins?: number;
   status: SessionStatus;
   created_at: string;
   updated_at: string;

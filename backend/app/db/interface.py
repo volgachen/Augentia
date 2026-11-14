@@ -108,6 +108,14 @@ class IAgentDatabase(ABC):
         """Set both override fields (None clears one); KeyError if unknown."""
 
     @abstractmethod
+    async def pending_joins(self) -> dict[str, int]:
+        """{session id: live fork-dispatch branches not joined back into it yet}.
+
+        Deleted branches don't count: deleting one gives up on its result
+        (DELETE /sessions/{id} joins whatever it already finished first).
+        """
+
+    @abstractmethod
     async def set_joined_message(self, session_id: str, message_id: str) -> Session:
         """Record that this fork-dispatch branch was joined back (row id in its target)."""
 

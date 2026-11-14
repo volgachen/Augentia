@@ -568,6 +568,13 @@ class SqliteDatabase(IAgentDatabase):
             raise KeyError(f"Session '{session_id}' not found")
         return await self.get_session(session_id)
 
+    async def pending_joins(self) -> dict[str, int]:
+        rows = self._rows(
+            "SELECT join_into_session_id AS target, COUNT(*) AS n FROM sessions "
+            "WHERE join_into_session_id IS NOT NULL AND joined_message_id IS NULL "
+            "AND deleted_at IS NULL GROUP BY join_into_session_id")
+        return {r["target"]: r["n"] for r in rows}
+
     async def set_joined_message(self, session_id: str, message_id: str) -> Session:
         cur = self._execute(
             "UPDATE sessions SET joined_message_id = ? WHERE id = ?", (message_id, session_id))

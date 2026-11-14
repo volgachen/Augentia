@@ -202,6 +202,9 @@ export default function LiveConsole() {
   const branchSourceTitle =
     sessions[branchSourceId]?.session.title?.trim() || `${branchSourceId.slice(0, 8)}…`;
   const generating = session.status === "RUNNING";
+  // fork-dispatch results still to come: the backend refuses new messages.
+  const dispatching = session.status === "DISPATCHING";
+  const pendingJoins = session.pending_joins ?? 0;
   const consoleItems = buildConsoleItems(events);
   // In a branch: where its own messages start (after the borrowed ones);
   // -1 when it has none borrowed. Equal to the length when it has none yet.
@@ -244,7 +247,7 @@ export default function LiveConsole() {
 
   const handleSend = () => {
     const msg = input.trim();
-    if ((!msg && readyImages.length === 0) || !sessionId || generating || attachments.uploading) return;
+    if ((!msg && readyImages.length === 0) || !sessionId || generating || dispatching || attachments.uploading) return;
     sendMessage(sessionId, msg, readyImages);
     setInput("");
     attachments.clear();
@@ -415,10 +418,14 @@ export default function LiveConsole() {
                     ? "bg-orange-900 text-orange-300"
                     : session.status === "WAITING_USER"
                       ? "bg-blue-900 text-blue-300"
-                      : "bg-gray-700 text-gray-400"
+                      : session.status === "DISPATCHING"
+                        ? "bg-sky-900 text-sky-300"
+                        : "bg-gray-700 text-gray-400"
             }`}
+            title={dispatching ? `等待 ${pendingJoins} 个并行分支的结果拼回` : undefined}
           >
             {session.status}
+            {dispatching && ` · ${pendingJoins}`}
           </span>
         </div>
         {/* Two columns of toggles: tool display on the left; deleted
@@ -594,7 +601,7 @@ export default function LiveConsole() {
                   <button
                     type="button"
                     onClick={handleCompress}
-                    disabled={generating || compressing || events.length === 0}
+                    disabled={generating || dispatching || compressing || events.length === 0}
                     title="Summarize history through the last completed turn, in place (or only the last N hours, keeping earlier history). Original messages stay visible but the model sees only the summary."
                     className="w-full rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
                   >
@@ -710,6 +717,8 @@ export default function LiveConsole() {
             placeholder={
               generating
                 ? "Agent is generating… wait for it to finish"
+                : dispatching
+                  ? `并行分支还在处理（还有 ${pendingJoins} 个结果没拼回来），全部拼回后才能发消息`
                 : canAttachImages
                   ? "Send a message… (Enter to send, Shift+Enter for newline; paste or drop images)"
                   : "Send a message… (Enter to send, Shift+Enter for newline)"
@@ -718,7 +727,7 @@ export default function LiveConsole() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            disabled={generating}
+            disabled={generating || dispatching}
           />
           {generating ? (
             <button
@@ -732,7 +741,7 @@ export default function LiveConsole() {
             <button
               type="button"
               onClick={handleSend}
-              disabled={(!input.trim() && readyImages.length === 0) || attachments.uploading}
+              disabled={(!input.trim() && readyImages.length === 0) || attachments.uploading || dispatching}
               title={attachments.uploading ? "Waiting for images to finish uploading" : undefined}
               className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium transition-colors self-end"
             >

@@ -17,6 +17,7 @@ from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
 from app.core.branch_join import is_branch_summary, joined_turn_rows
+from app.core import dispatching
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
 from app.core.borrowed import BORROWED_FROM, is_borrowed
 from app.core.workspace import (
@@ -294,13 +295,15 @@ async def create_session(
 
 @router.get("", response_model=list[Session])
 async def list_sessions(db: IAgentDatabase = Depends(get_db)):
-    return await db.list_sessions()
+    # status is DISPATCHING while fork-dispatch results are pending (see
+    # app.core.dispatching); pending_joins says how many.
+    return await dispatching.view_all(db, await db.list_sessions())
 
 
 @router.get("/{session_id}", response_model=Session)
 async def get_session(session_id: str, db: IAgentDatabase = Depends(get_db)):
     try:
-        return await db.get_session(session_id)
+        return await dispatching.view(db, await db.get_session(session_id))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -787,6 +790,15 @@ async def fork_dispatch(
         source = await db.get_session(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # One dispatch at a time, and not over a running turn: the branches start
+    # from a settled history, and the results land on a session at rest.
+    await _refuse_while_dispatching(db, session_id)
+    try:
+        busy = registry.get(session_id).is_busy
+    except KeyError:
+        busy = False
+    if busy or source.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+        raise HTTPException(status_code=409, detail="session is running; dispatch after the turn finishes")
     # The cutoff is "now": each branch borrows everything persisted so far.
     # A turn running in the source keeps writing after it; those rows aren't
     # borrowed (the branches start from the history as of this call).
@@ -801,6 +813,7 @@ async def fork_dispatch(
         await runner.submit(content, turn_overrides=overrides)
         branches.append({"session_id": branch.id, "title": branch.title, "message": content})
     logger.info("fork-dispatch session=%s branches=%s", session_id, [b["session_id"] for b in branches])
+    _announce_state(registry, session_id)
     return {"branches": branches}
 
 
@@ -894,6 +907,18 @@ async def delete_message(
     return {"deleted_ids": ids}
 
 
+async def _refuse_while_dispatching(db: IAgentDatabase, session_id: str) -> None:
+    pending = await dispatching.pending_for(db, session_id)
+    if pending:
+        raise HTTPException(status_code=409, detail=dispatching.BUSY_DETAIL.format(n=pending))
+
+
+def _announce_state(registry: AdapterRegistry, session_id: str) -> None:
+    """Tell live clients the reported state changed (they refetch the session)."""
+    from app.core.session_runtime import announce_dispatch_state
+    announce_dispatch_state(registry, session_id)
+
+
 _BORROWED_READ_ONLY = (
     "this message belongs to the session this branch was made from; "
     "a branch cannot delete, rewrite or compress the history it borrows"
@@ -984,6 +1009,7 @@ async def compress_session(
         raise HTTPException(status_code=404, detail=str(e))
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="manual compression is only supported for tool_use sessions")
+    await _refuse_while_dispatching(db, session_id)
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -1012,6 +1038,7 @@ async def post_message(
     if not body.content.strip() and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
+    await _refuse_while_dispatching(db, session_id)
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -1061,6 +1088,7 @@ async def retry_from_message(
     if not content and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
+    await _refuse_while_dispatching(db, session_id)
     await db.soft_delete_messages_from(session_id, message_id)
 
     # Drop any in-memory context that still contains the deleted suffix, then
@@ -1084,12 +1112,23 @@ async def delete_session(
 ):
     logger.info("delete_session id=%s", session_id)
     try:
-        await db.get_session(session_id)
+        session = await db.get_session(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     await registry.remove(session_id)
+    if session.join_into_session_id and not session.joined_message_id:
+        # A fork-dispatch branch: join what it finished (stopping it above
+        # ends a running turn as cancelled); after the delete it no longer
+        # holds its target in DISPATCHING either way.
+        from app.core.session_runtime import join_branch
+        try:
+            await join_branch(session_id, db, registry)
+        except Exception:
+            logger.exception("join on delete failed branch=%s", session_id)
     await db.soft_delete_session(session_id)
+    if session.join_into_session_id:
+        _announce_state(registry, session.join_into_session_id)
 
 
 @router.websocket("/{session_id}/stream")
@@ -1115,7 +1154,7 @@ async def session_stream(
 
     runner = await get_or_rehydrate(session, db, registry)
     # Re-read after rehydrate: it may have reset a stale RUNNING/WAITING_CONFIRM.
-    session = await db.get_session(session_id)
+    session = await dispatching.view(db, await db.get_session(session_id))
     await ws.send_text(json.dumps({"type": "session_state", "data": session.model_dump(mode="json")}))
     if runner is None:
         logger.warning("WS session=%s has no live runner (post-restart, stub)", session_id)
@@ -1151,6 +1190,11 @@ async def session_stream(
                 await ws.send_text(json.dumps({"type": "error", "data": str(e)}))
                 continue
             if not content.strip() and not images:
+                continue
+            pending = await dispatching.pending_for(db, session_id)
+            if pending:
+                await ws.send_text(json.dumps({
+                    "type": "error", "data": dispatching.BUSY_DETAIL.format(n=pending)}))
                 continue
             logger.info("WS recv session=%s len=%d images=%d", session_id, len(content), len(images))
             await runner.submit(content, images=images)

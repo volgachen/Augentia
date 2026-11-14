@@ -98,6 +98,18 @@ async def build_runner(
 
 # Sent to the joined session's subscribers so clients reload its transcript.
 HISTORY_JOINED = "history_joined"
+# Sent when a session's reported status may have changed without a turn
+# (fork-dispatch started / its last result joined): clients refetch it.
+SESSION_CHANGED = "session_changed"
+
+
+def announce_dispatch_state(registry: AdapterRegistry, session_id: str) -> None:
+    from app.adapters.base import StreamEvent, StreamEventType
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        return
+    runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=SESSION_CHANGED))
 
 
 async def join_branch(branch_id: str, db: IAgentDatabase, registry: AdapterRegistry) -> None:
@@ -130,6 +142,8 @@ async def join_branch(branch_id: str, db: IAgentDatabase, registry: AdapterRegis
         row = await runner.run_between_turns(lambda: write_join(db, branch, template=template))
         if row is not None:
             runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=HISTORY_JOINED))
+            # Possibly the last pending result: DISPATCHING may have ended.
+            runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=SESSION_CHANGED))
     if row is not None:
         try:
             registry.get(branch_id).on_turn_finished = None

@@ -843,6 +843,16 @@ class MySqlDatabase(IAgentDatabase):
                 )
         return session
 
+    async def pending_joins(self) -> dict[str, int]:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute(
+                    "SELECT join_into_session_id AS target, COUNT(*) AS n FROM sessions "
+                    "WHERE join_into_session_id IS NOT NULL AND joined_message_id IS NULL "
+                    "AND deleted_at IS NULL GROUP BY join_into_session_id")
+                rows = await cur.fetchall()
+        return {r["target"]: int(r["n"]) for r in rows}
+
     async def set_joined_message(self, session_id: str, message_id: str) -> Session:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
