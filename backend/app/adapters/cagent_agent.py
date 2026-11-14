@@ -82,9 +82,16 @@ TURN_OVERRIDE_ATTRS = {
     "step_reminder": "STEP_REMINDER",
     "tool_limit_at": "TOOL_LIMIT_AT",
     "tool_limit_message": "TOOL_LIMIT_MESSAGE",
+    "turn_compression_tool_call_threshold": "TURN_COMPRESSION_TOOL_CALL_THRESHOLD",
+    "turn_compression_instruction": "TURN_COMPRESSION_INSTRUCTION",
+    "turn_compression_marker": "TURN_COMPRESSION_MARKER",
 }
-# Of those, the ones null may be given for: null switches it off for the turn.
-_NULLABLE_OVERRIDES = ("step_reminder_at", "tool_limit_at")
+# Of those, the ones null may be given for: null switches it off for the turn
+# (for turn_compression_marker: no marker message, same as "").
+_NULLABLE_OVERRIDES = ("step_reminder_at", "tool_limit_at",
+                       "turn_compression_tool_call_threshold", "turn_compression_marker")
+_NON_EMPTY_STRING_OVERRIDES = ("step_reminder", "tool_limit_message",
+                               "turn_compression_instruction")
 
 
 def _positive_int(value) -> bool:
@@ -94,9 +101,11 @@ def _positive_int(value) -> bool:
 def validate_turn_overrides(overrides) -> dict:
     """Checked copy of a turn's overrides; ValueError names the bad key.
 
-    Keys left out keep the session's value. max_steps is a positive integer,
-    step_reminder_at / tool_limit_at a positive integer or null (off for this
-    turn), step_reminder / tool_limit_message a non-empty string.
+    Keys left out keep the session's value. max_steps is a positive integer;
+    step_reminder_at / tool_limit_at / turn_compression_tool_call_threshold a
+    positive integer or null (off for this turn); step_reminder /
+    tool_limit_message / turn_compression_instruction a non-empty string;
+    turn_compression_marker a string or null ("" and null: no marker message).
     """
     if overrides is None:
         return {}
@@ -107,9 +116,12 @@ def validate_turn_overrides(overrides) -> dict:
         raise ValueError(f"turn_overrides: unknown key(s) {unknown}; "
                          f"allowed: {sorted(TURN_OVERRIDE_ATTRS)}")
     for key, value in overrides.items():
-        if key in ("step_reminder", "tool_limit_message"):
+        if key in _NON_EMPTY_STRING_OVERRIDES:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"turn_overrides.{key} must be a non-empty string")
+        elif key == "turn_compression_marker":
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"turn_overrides.{key} must be a string or null")
         elif value is None:
             if key not in _NULLABLE_OVERRIDES:
                 raise ValueError(f"turn_overrides.{key} must be a positive integer")
@@ -124,11 +136,27 @@ def with_turn_overrides(agent_cls: type[BaseAgent], overrides: dict) -> type[Bas
 
     CAgent reads these settings from the class at the start of run_turn, so a
     subclass applies them to one turn without touching the session's class.
+
+    The turn-compression marker and instruction go together: when a turn
+    changes only the marker and the session has no custom instruction, the
+    default instruction follows the effective marker (as in make_agent_class).
     """
     if not overrides:
         return agent_cls
     attrs = {TURN_OVERRIDE_ATTRS[key]: value for key, value in overrides.items()}
+    if "turn_compression_marker" in overrides:
+        attrs["TURN_COMPRESSION_MARKER"] = overrides["turn_compression_marker"] or None
+        if ("turn_compression_instruction" not in overrides
+                and getattr(agent_cls, "CUSTOM_TURN_COMPRESSION_INSTRUCTION", None) is None):
+            attrs["TURN_COMPRESSION_INSTRUCTION"] = default_turn_compression_instruction(
+                attrs["TURN_COMPRESSION_MARKER"])
     return type(agent_cls.__name__, (agent_cls,), attrs)
+
+
+def default_turn_compression_instruction(marker: str | None) -> str:
+    """CAgent's marker-based instruction with a marker, else the marker-free one."""
+    return (BaseAgent.TURN_COMPRESSION_INSTRUCTION if marker
+            else NO_MARKER_TURN_COMPRESSION_INSTRUCTION)
 
 
 def make_agent_class(
@@ -195,8 +223,10 @@ def make_agent_class(
         # the marker), else a marker-free default naming the latest turn.
         TURN_COMPRESSION_INSTRUCTION = (
             turn_compression_instruction
-            or (BaseAgent.TURN_COMPRESSION_INSTRUCTION if turn_compression_marker
-                else NO_MARKER_TURN_COMPRESSION_INSTRUCTION))
+            or default_turn_compression_instruction(turn_compression_marker))
+        # The configured instruction (None = default), so a turn that overrides
+        # only the marker knows whether to switch the default instruction.
+        CUSTOM_TURN_COMPRESSION_INSTRUCTION = turn_compression_instruction
         # Optional user message that, in the summarizer request only, replaces
         # the turn start mark (where compression begins). None or "" (the
         # default) inserts no message.
