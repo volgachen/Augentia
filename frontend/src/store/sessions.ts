@@ -111,10 +111,13 @@ const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string 
 const HISTORY_COMPRESSED = "history_compressed";
 
 export function messageToEvent(m: Message): StreamEvent {
-  const event = rowToEvent(m);
+  let event = rowToEvent(m);
   // Only the delete button counts: compressed originals also have deleted_at,
   // but they are ordinary content shown when their summary is expanded.
-  return m.metadata?.deleted_by === "user" ? { ...event, deleted: true } : event;
+  if (m.metadata?.deleted_by === "user") event = { ...event, deleted: true };
+  const owner = m.metadata?.borrowed_from;
+  if (typeof owner === "string" && owner) event = { ...event, borrowedFrom: owner };
+  return event;
 }
 
 function rowToEvent(m: Message): StreamEvent {

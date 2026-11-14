@@ -1,5 +1,7 @@
 from abc import ABC, abstractmethod
+from datetime import datetime
 from typing import Any, List
+from app.core.borrowed import BORROWED_FROM, as_of, aware
 from app.models.domain import (
     AgentTemplate, Session, SessionStatus, Message, MessageRole, SystemPrompt,
     PluginInstance, PluginLog, PluginRun, PluginStatus, Task, TaskStatus,
@@ -56,13 +58,16 @@ class IAgentDatabase(ABC):
         model_params: dict | None = None,
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
+        branched_cutoff_at: datetime | None = None,
     ) -> Session:
         """system_prompt_snapshot stores a new first version; system_prompt_id
         instead shares an existing version (diverge). Neither: no prompt yet.
         model / model_params: the session's model override (None: the agent's)."""
 
     @abstractmethod
-    async def get_session(self, session_id: str) -> Session: pass
+    async def get_session(self, session_id: str, *, include_deleted: bool = False) -> Session:
+        """KeyError when unknown; a soft-deleted session only with include_deleted
+        (a branch still reads the history it borrowed from a deleted source)."""
 
     @abstractmethod
     async def update_session_system_prompt_snapshot(
@@ -126,17 +131,54 @@ class IAgentDatabase(ABC):
     ) -> Message: pass
 
     @abstractmethod
-    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> List[Message]:
-        """Rows ordered by (created_at, id); soft-deleted ones only with include_deleted."""
+    async def get_own_messages(
+        self, session_id: str, *, include_deleted: bool = False,
+        before: datetime | None = None,
+    ) -> List[Message]:
+        """The session's own rows ordered by (created_at, id), without borrowed
+        history and without checking the session is live; only rows created
+        before `before` when given. Soft-deleted rows only with include_deleted."""
 
-    @abstractmethod
-    async def clone_messages(
-        self,
-        source_session_id: str,
-        target_session_id: str,
-        *,
-        before_message_id: str | None = None,
-    ) -> List[Message]: pass
+    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> List[Message]:
+        """The session's history ordered by (created_at, id): for a branch, the
+        rows it borrows from its source (recursively) first, then its own.
+
+        Borrowed rows are the source's rows created before the branch's
+        cutoff, as they were at the cutoff (as_of): a row the source deleted
+        or compressed afterwards is live here, one deleted before stays
+        deleted. They keep their ids and carry metadata.borrowed_from = the
+        session that owns them; they are read-only from the branch.
+        Soft-deleted rows only with include_deleted.
+        """
+        session = await self.get_session(session_id)
+        own = await self.get_own_messages(session_id, include_deleted=include_deleted)
+        borrowed = await self._borrowed_messages(session, include_deleted, seen={session_id})
+        return borrowed + own
+
+    async def _borrowed_messages(
+        self, session: Session, include_deleted: bool, *, seen: set[str],
+        cutoff: datetime | None = None,
+    ) -> List[Message]:
+        source_id = session.branched_from_session_id
+        own_cutoff = aware(session.branched_cutoff_at)
+        if not source_id or own_cutoff is None or source_id in seen:
+            return []
+        # Down a chain of branches, each level is cut at the tighter time; its
+        # rows are rebuilt as of when the session borrowing them was made.
+        cutoff = own_cutoff if cutoff is None else min(cutoff, own_cutoff)
+        try:
+            source = await self.get_session(source_id, include_deleted=True)
+        except KeyError:
+            return []
+        rows = as_of(await self.get_own_messages(source_id, include_deleted=True, before=cutoff),
+                     session.created_at)
+        if not include_deleted:
+            rows = [m for m in rows if m.deleted_at is None]
+        for m in rows:
+            m.metadata = {**(m.metadata or {}), BORROWED_FROM: source_id}
+        earlier = await self._borrowed_messages(
+            source, include_deleted, seen=seen | {source_id}, cutoff=cutoff)
+        return earlier + rows
 
     @abstractmethod
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message: pass

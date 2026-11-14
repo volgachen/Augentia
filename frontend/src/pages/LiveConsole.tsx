@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { messageToEvent, useStore } from "../store/sessions";
 import { CompressedLoaderContext } from "../components/console/compressedLoader";
@@ -21,6 +21,7 @@ import ConsoleItemLine from "../components/console/ConsoleItemLine";
 import {
   buildConsoleItems,
   isToolCallView,
+  itemBorrowedFrom,
   itemMessageId,
   itemMessageIds,
 } from "../components/console/items";
@@ -202,6 +203,12 @@ export default function LiveConsole() {
     sessions[branchSourceId]?.session.title?.trim() || `${branchSourceId.slice(0, 8)}…`;
   const generating = session.status === "RUNNING";
   const consoleItems = buildConsoleItems(events);
+  // In a branch: where its own messages start (after the borrowed ones);
+  // -1 when it has none borrowed. Equal to the length when it has none yet.
+  const lastBorrowed = consoleItems.reduce(
+    (last, item, i) => (itemBorrowedFrom(item) ? i : last), -1);
+  const ownHistoryStart = lastBorrowed >= 0 ? lastBorrowed + 1 : -1;
+  const borrowsHistory = lastBorrowed >= 0;
 
   const jumpKey = sessionId && jumpTarget ? `${sessionId}/${jumpTarget}` : null;
   const jumpIndex = jumpTarget
@@ -485,8 +492,18 @@ export default function LiveConsole() {
             <p className="text-gray-600 text-sm font-mono">Waiting for output…</p>
           )}
           {consoleItems.map((item, i) => (
+            <Fragment key={isToolCallView(item) ? item.callId : itemMessageId(item) ?? i}>
+            {i === ownHistoryStart && (
+              <div
+                className="my-1 flex items-center gap-2 text-[11px] text-sky-400/70"
+                title="以上的消息借用自原会话（不复制），在这个分支里只读：不能删除、重写或压缩"
+              >
+                <span className="flex-1 border-t border-dashed border-sky-900" />
+                <span className="shrink-0">以上借用自「{branchSourceTitle}」，只读 · 以下是这个分支自己的消息</span>
+                <span className="flex-1 border-t border-dashed border-sky-900" />
+              </div>
+            )}
             <div
-              key={isToolCallView(item) ? item.callId : itemMessageId(item) ?? i}
               ref={(node) => {
                 itemRefs.current[i] = node;
               }}
@@ -520,7 +537,15 @@ export default function LiveConsole() {
                 onDelete={handleDelete}
               />
             </div>
+            </Fragment>
           ))}
+          {borrowsHistory && ownHistoryStart === consoleItems.length && (
+            <div className="my-1 flex items-center gap-2 text-[11px] text-sky-400/70">
+              <span className="flex-1 border-t border-dashed border-sky-900" />
+              <span className="shrink-0">以上借用自「{branchSourceTitle}」，只读 · 这个分支还没有自己的消息</span>
+              <span className="flex-1 border-t border-dashed border-sky-900" />
+            </div>
+          )}
           {generating && (
             <div className="flex items-center gap-2 font-mono text-sm text-indigo-300">
               <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-indigo-400/40 border-t-indigo-300 animate-spin" />
@@ -599,6 +624,11 @@ export default function LiveConsole() {
                       className="w-full resize-y rounded border border-gray-700 bg-gray-900 px-1.5 py-1 text-[11px] text-gray-200 placeholder:text-gray-600"
                     />
                   </div>
+                  {borrowsHistory && (
+                    <p className="mt-1.5 text-[11px] text-gray-500">
+                      这是一个分支：借用的历史不能压缩，只能压缩分支自己的消息（填“只压缩最近 N 小时”）。
+                    </p>
+                  )}
                   {note && (
                     <p className={`mt-1.5 text-[11px] break-words ${note.ok ? "text-emerald-400" : "text-amber-400"}`}>
                       {note.text}

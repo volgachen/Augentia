@@ -7,7 +7,7 @@ sends to the model:
   - deleting a model output removes its text, tool calls and tool results;
   - compression soft-deletes the replaced rows (compressed_by), which the
     transcript hides and .../compressed returns;
-  - diverge copies a summary as a plain user message;
+  - diverge borrows history (no copies): a summary stays a summary;
   - deleting a summary removes it together with what it replaced;
   - deleting is rejected while the session is running.
 
@@ -209,19 +209,26 @@ async def main() -> int:
             else:
                 ok("include_deleted lists only button-deleted rows (not rewritten or compressed)")
 
-            # 5. Diverge after compression: the summary is copied as plain text.
+            # 5. Diverge after compression: the branch borrows the history
+            # (nothing copied), summary included, ids unchanged, read-only.
+            last_user = [m for m in await db.get_messages(session.id)
+                         if m.role == MessageRole.USER and not is_summary(m)][-1]
             branch = await _create_derived_session(
-                await db.get_session(session.id), db, registry, title="branch")
+                await db.get_session(session.id), db, registry, title="branch",
+                cutoff=last_user.created_at, branched_from_message_id=last_user.id)
             branch_rows = await db.get_messages(branch.id)
-            if any(is_summary(m) for m in branch_rows) or not any(
-                    m.role == MessageRole.USER and m.content == "SUMMARY" for m in branch_rows):
-                fail(f"branch rows: {[(m.role, m.content[:30]) for m in branch_rows]}")
+            source_ids = {m.id for m in await db.get_messages(session.id)}
+            if (await db.get_own_messages(branch.id)
+                    or not any(is_summary(m) for m in branch_rows)
+                    or not {m.id for m in branch_rows} <= source_ids
+                    or not all(m.metadata.get("borrowed_from") == session.id for m in branch_rows)):
+                fail(f"branch rows: {[(m.role, m.content[:30], m.metadata) for m in branch_rows]}")
                 passed = False
             else:
-                ok("diverge copies the summary as a plain user message")
+                ok("diverge borrows the history (no copies): same ids, summary kept, borrowed_from set")
             await registry.remove(branch.id)
 
-            # Diverging *from* the summary keeps history through it, as text.
+            # Diverging *from* the summary keeps history through it.
             cagent_adapter_module._make_model = lambda client, name: model
             try:
                 branch = await diverge_from_message(
@@ -229,12 +236,12 @@ async def main() -> int:
             finally:
                 cagent_adapter_module._make_model = original
             branch_rows = await db.get_messages(branch.id)
-            contents = [m.content for m in branch_rows if m.role != MessageRole.MARK]
-            if contents != ["SUMMARY"] or any(is_summary(m) for m in branch_rows):
-                fail(f"diverge from summary: {contents}")
+            visible = [m for m in branch_rows if m.role != MessageRole.MARK or is_summary(m)]
+            if [m.id for m in visible] != [mark.id]:
+                fail(f"diverge from summary: {[(m.role, m.content[:30]) for m in visible]}")
                 passed = False
             else:
-                ok("diverge from a summary keeps history through it as a plain message")
+                ok("diverge from a summary keeps history through it (the summary itself)")
             if (branch.parent_session_id is not None
                     or branch.branched_from_session_id != session.id
                     or branch.branched_from_message_id != mark.id):

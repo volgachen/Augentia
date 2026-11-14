@@ -176,6 +176,9 @@ export interface StreamEvent {
   // Client-only: set on history rows the user deleted, shown only when
   // "显示已删除消息" is on.
   deleted?: boolean;
+  // Client-only: in a branch, the id of the session that owns this row (the
+  // branch borrows it, read-only: no delete, rewrite or compression there).
+  borrowedFrom?: string;
   // Client-only, on "compression" events loaded from history.
   compression?: CompressionInfo;
 }

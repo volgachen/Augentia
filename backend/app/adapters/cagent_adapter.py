@@ -308,6 +308,7 @@ class CAgentAdapter(BaseAgentAdapter):
             tool_limit_message=self._config.get("tool_limit_message"),
             compression_model=(
                 self._compression_model if self._compression_model is not self._model else None),
+            borrowed_ids=lambda: self._store.borrowed_ids if self._store is not None else set(),
         )
         self._alive = True
         logger.info(

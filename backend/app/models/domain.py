@@ -89,6 +89,10 @@ class Session(BaseModel):
     # summary). Separate from parent_session_id, which is for sub-agents.
     branched_from_session_id: Optional[str] = None
     branched_from_message_id: Optional[str] = None
+    # When the branch was made. The branch does not copy the source's history:
+    # it borrows the source's rows created before this time, as they were at
+    # this time (rows the source deletes or compresses later still show).
+    branched_cutoff_at: Optional[datetime] = None
     # Per-session add-ons to the AgentTemplate's base system_prompt. Persisted so
     # a session rehydrated after a backend restart sees the exact same effective
     # prompt it was launched with. The router applies them at adapter.start()

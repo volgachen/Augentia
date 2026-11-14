@@ -10,6 +10,7 @@ import {
   interleaveResult,
   isCompressionGroup,
   isToolCallView,
+  itemBorrowedFrom,
   itemMessageId,
   itemMessageIds,
   resultToText,
@@ -132,8 +133,11 @@ function EventLine({
   onDiverge = () => {},
   onDelete,
   readOnly = false,
+  noEdit = false,
 }: {
   event: StreamEvent;
+  // Borrowed (branch) rows: diverge allowed, rewrite not.
+  noEdit?: boolean;
   editing?: boolean;
   editValue?: string;
   generating?: boolean;
@@ -205,7 +209,7 @@ function EventLine({
       </div>
     );
   }
-  const editable = !readOnly && event.type === "user" && !!event.message_id;
+  const editable = !readOnly && !noEdit && event.type === "user" && !!event.message_id;
   const canDiverge =
     !readOnly && (event.type === "user" || event.type === "assistant_message") && !!event.message_id;
   return (
@@ -576,8 +580,10 @@ function ConsoleItemLineInner(props: ConsoleItemLineProps) {
     onDelete,
     compressionDepth = 0,
   } = props;
+  // Borrowed history (in a branch) belongs to the source: no delete there.
+  const borrowed = !!itemBorrowedFrom(item);
   const deleteHandler = (messageId: string | undefined) =>
-    !readOnly && onDelete && messageId ? () => onDelete(messageId) : undefined;
+    !readOnly && !borrowed && onDelete && messageId ? () => onDelete(messageId) : undefined;
   if (isToolCallView(item)) {
     return (
       <ToolCallLine
@@ -622,7 +628,8 @@ function ConsoleItemLineInner(props: ConsoleItemLineProps) {
     <EventLine
       event={item}
       readOnly={readOnly}
-      editing={!readOnly && !!item.message_id && editingMessageId === item.message_id}
+      noEdit={borrowed}
+      editing={!readOnly && !borrowed && !!item.message_id && editingMessageId === item.message_id}
       editValue={editingContent}
       generating={generating}
       deriving={deriving}

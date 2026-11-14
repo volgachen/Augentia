@@ -17,6 +17,7 @@ from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
+from app.core.borrowed import BORROWED_FROM, is_borrowed
 from app.core.workspace import (
     copy_workspace,
     create_git_worktree,
@@ -155,9 +156,15 @@ async def _create_derived_session(
     registry: AdapterRegistry,
     *,
     title: str | None,
-    before_message_id: str | None = None,
+    cutoff: datetime | None = None,
     branched_from_message_id: str | None = None,
 ) -> Session:
+    """A session continuing `source`'s history.
+
+    With a cutoff (diverge) the branch copies nothing: it borrows the source's
+    rows created before the cutoff, as they are now (see app.core.borrowed).
+    Without one (sub-sessions that only share settings) it starts empty.
+    """
     agent = await db.get_agent(source.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="derived sessions currently support only tool_use sessions")
@@ -170,6 +177,7 @@ async def _create_derived_session(
         # parent_session_id).
         branched_from_session_id=source.id,
         branched_from_message_id=branched_from_message_id,
+        branched_cutoff_at=cutoff,
         additional_prompt=source.additional_prompt,
         additional_prompt_path=source.additional_prompt_path,
         # Versions are immutable, so the branch shares the source's current
@@ -180,7 +188,6 @@ async def _create_derived_session(
         model_params=source.model_params,
     )
     try:
-        await db.clone_messages(source.id, target.id, before_message_id=before_message_id)
         await build_runner(target, agent, db, registry)
         await db.update_session_status(target.id, SessionStatus.WAITING_USER)
         return await db.get_session(target.id)
@@ -751,26 +758,25 @@ async def diverge_from_message(
     target = next((message for message in messages if message.id == message_id), None)
     if target is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
-    # The branch keeps only the history *before* the target, so the target
-    # message itself (user input or agent reply) is not carried over.
-    # A summary is the exception: the branch keeps history *through* it (it is
-    # copied as a plain user message, see plain_copy_fields), plus the marks
-    # right after it (its turn's turn_end), so the branch restarts from that
-    # summary. Allowed while the source is RUNNING: it only reads
-    # already-persisted rows.
+    # The branch borrows the history *before* the target (nothing is copied),
+    # so the target message itself (user input or agent reply) is not part of
+    # it. A summary is the exception: the branch keeps history *through* it
+    # plus the marks right after it (its turn's turn_end), so it restarts from
+    # that summary. Borrowed rows keep their ids, so a summary stays a summary.
+    # Allowed while the source is RUNNING: it only reads persisted rows.
     if is_summary(target):
         index = messages.index(target)
-        before_message_id = next(
-            (m.id for m in messages[index + 1:] if m.role != MessageRole.MARK), None)
+        first_out = next((m for m in messages[index + 1:] if m.role != MessageRole.MARK), None)
+        cutoff = first_out.created_at if first_out else datetime.now(timezone.utc)
     elif target.role in (MessageRole.USER, MessageRole.AGENT):
-        before_message_id = message_id
+        cutoff = target.created_at
     else:
         raise HTTPException(status_code=400, detail="only user or agent messages or summaries can be used as a divergence point")
     try:
         return await _create_derived_session(
             source, db, registry,
             title=body.title or f"{source.title or 'Session'} · Branch",
-            before_message_id=before_message_id,
+            cutoff=cutoff,
             branched_from_message_id=message_id,
         )
     except HTTPException:
@@ -815,6 +821,8 @@ async def delete_message(
     index = next((i for i, m in enumerate(messages) if m.id == message_id), None)
     if index is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
+    if is_borrowed(messages[index]):
+        raise HTTPException(status_code=400, detail=_BORROWED_READ_ONLY)
     ids = _deletion_group(messages, index)
     deleted = await db.soft_delete_messages(session_id, ids, metadata={DELETED_BY: "user"})
     logger.info("delete message session=%s message=%s rows=%d", session_id, message_id, deleted)
@@ -822,6 +830,12 @@ async def delete_message(
         await registry.remove(session_id)
         await get_or_rehydrate(session, db, registry)
     return {"deleted_ids": ids}
+
+
+_BORROWED_READ_ONLY = (
+    "this message belongs to the session this branch was made from; "
+    "a branch cannot delete, rewrite or compress the history it borrows"
+)
 
 
 def _deletion_group(messages: list, index: int) -> list[str]:
@@ -965,6 +979,8 @@ async def retry_from_message(
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
     if target.role != MessageRole.USER:
         raise HTTPException(status_code=400, detail="only user messages can be retried")
+    if is_borrowed(target):
+        raise HTTPException(status_code=400, detail=_BORROWED_READ_ONLY)
     agent = await db.get_agent(session.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(

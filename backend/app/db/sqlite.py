@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.core.compressed import plain_copy_fields
+from app.core.borrowed import aware
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import SEED_AGENT_ROWS
 from app.models.domain import (
@@ -86,6 +86,7 @@ def _session(row: sqlite3.Row) -> Session:
         working_dir=row["working_dir"], parent_session_id=row["parent_session_id"],
         branched_from_session_id=row["branched_from_session_id"],
         branched_from_message_id=row["branched_from_message_id"],
+        branched_cutoff_at=_dt(row["branched_cutoff_at"]),
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
@@ -205,6 +206,7 @@ class SqliteDatabase(IAgentDatabase):
                 parent_session_id TEXT DEFAULT NULL,
                 branched_from_session_id TEXT DEFAULT NULL,
                 branched_from_message_id TEXT DEFAULT NULL,
+                branched_cutoff_at TEXT DEFAULT NULL,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
                 system_prompt_id TEXT DEFAULT NULL,
@@ -318,7 +320,8 @@ class SqliteDatabase(IAgentDatabase):
             row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")
         }
         self._migrate_system_prompts(session_columns)
-        for column in ("model", "model_params", "branched_from_session_id", "branched_from_message_id"):
+        for column in ("model", "model_params", "branched_from_session_id",
+                       "branched_from_message_id", "branched_cutoff_at"):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
 
@@ -484,6 +487,7 @@ class SqliteDatabase(IAgentDatabase):
             model_params=kwargs.get("model_params"),
             branched_from_session_id=kwargs.get("branched_from_session_id"),
             branched_from_message_id=kwargs.get("branched_from_message_id"),
+            branched_cutoff_at=kwargs.get("branched_cutoff_at"),
         )
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
@@ -495,21 +499,22 @@ class SqliteDatabase(IAgentDatabase):
             self._conn.execute(
                 """INSERT INTO sessions
                    (id, agent_id, title, working_dir, parent_session_id,
-                    branched_from_session_id, branched_from_message_id, additional_prompt,
-                    additional_prompt_path, system_prompt_id, model, model_params, status,
-                    created_at, updated_at, last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    branched_from_session_id, branched_from_message_id, branched_cutoff_at,
+                    additional_prompt, additional_prompt_path, system_prompt_id, model,
+                    model_params, status, created_at, updated_at, last_message_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session.id, session.agent_id, session.title, session.working_dir,
                  session.parent_session_id, session.branched_from_session_id,
-                 session.branched_from_message_id,
+                 session.branched_from_message_id, _iso(session.branched_cutoff_at),
                  session.additional_prompt, session.additional_prompt_path,
                  prompt_id, session.model, _dump(session.model_params), session.status.value, _iso(session.created_at),
                  _iso(session.updated_at), _iso(session.last_message_at)),
             )
         return await self.get_session(session.id)
 
-    async def get_session(self, session_id: str) -> Session:
-        row = self._row(f"{_SESSION_SELECT} WHERE s.id = ? AND s.deleted_at IS NULL", (session_id,))
+    async def get_session(self, session_id: str, *, include_deleted: bool = False) -> Session:
+        live = "" if include_deleted else " AND s.deleted_at IS NULL"
+        row = self._row(f"{_SESSION_SELECT} WHERE s.id = ?{live}", (session_id,))
         if row is None:
             raise KeyError(f"Session '{session_id}' not found")
         return _session(row)
@@ -614,56 +619,21 @@ class SqliteDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> list[Message]:
-        await self.get_session(session_id)
-        live = "" if include_deleted else " AND deleted_at IS NULL"
+    async def get_own_messages(
+        self, session_id: str, *, include_deleted: bool = False,
+        before: datetime | None = None,
+    ) -> list[Message]:
+        where = "" if include_deleted else " AND deleted_at IS NULL"
+        params: list[Any] = [session_id]
+        if before is not None:
+            # Stored as UTC ISO strings of one shape, so they compare as text.
+            where += " AND created_at < ?"
+            params.append(_iso(aware(before).astimezone(timezone.utc)))
         rows = self._rows(
-            f"SELECT * FROM messages WHERE session_id = ?{live} ORDER BY created_at, id",
-            (session_id,),
+            f"SELECT * FROM messages WHERE session_id = ?{where} ORDER BY created_at, id",
+            params,
         )
         return [_message(r) for r in rows]
-
-    async def clone_messages(
-        self,
-        source_session_id: str,
-        target_session_id: str,
-        *,
-        before_message_id: str | None = None,
-    ) -> list[Message]:
-        await self.get_session(source_session_id)
-        await self.get_session(target_session_id)
-        source = await self.get_messages(source_session_id)
-        if before_message_id is not None:
-            index = next((i for i, message in enumerate(source) if message.id == before_message_id), None)
-            if index is None:
-                raise KeyError(f"Message '{before_message_id}' not found")
-            source = source[:index]
-        cloned: list[Message] = []
-        with self._conn:
-            for original in source:
-                role, content, metadata = plain_copy_fields(original)
-                message = Message(
-                    session_id=target_session_id,
-                    role=role,
-                    content=content,
-                    from_session_id=original.from_session_id,
-                    metadata=metadata,
-                    created_at=original.created_at,
-                )
-                self._execute(
-                    """INSERT INTO messages
-                       (id, session_id, role, content, from_session_id, metadata, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (message.id, message.session_id, message.role.value, message.content,
-                     message.from_session_id, _metadata_json(message.metadata),
-                     _iso(message.created_at)),
-                )
-                cloned.append(message)
-            self._execute(
-                "UPDATE sessions SET last_message_at = ? WHERE id = ?",
-                (_iso(cloned[-1].created_at) if cloned else None, target_session_id),
-            )
-        return cloned
 
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)

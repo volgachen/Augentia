@@ -136,8 +136,15 @@ def make_agent_class(
     step_reminder: str | None = None,
     tool_limit_at: int | None = None,
     tool_limit_message: str | None = None,
+    borrowed_ids=None,
 ) -> type[BaseAgent]:
-    """Build the per-session BaseAgent subclass bound to one adapter instance."""
+    """Build the per-session BaseAgent subclass bound to one adapter instance.
+
+    borrowed_ids: a callable returning the ids of the rows this session (a
+    branch) borrows from its source. Compression never covers them: a whole-
+    history summary is skipped altogether and a range starts at the branch's
+    own turns. Turn compression only covers the running turn, so it is fine.
+    """
     for key, value in (("turn_compression_instruction", turn_compression_instruction),
                        ("compression_instruction", compression_instruction)):
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -213,6 +220,36 @@ def make_agent_class(
         @classmethod
         async def approve_tool_call(cls, store, ctx, tool_call, tool):
             return await adapter.gate_tool_call(store, ctx, tool_call)
+
+        @classmethod
+        async def launch_compression_task(cls, store, ctx, model, **kwargs):
+            # Whole-history compression summarizes everything up to a turn
+            # boundary, borrowed rows included; a branch can't replace those.
+            # Skipped (threshold-triggered or manual); range compression of
+            # the branch's own turns still works.
+            if borrowed_ids is not None and borrowed_ids():
+                ctx.compression_skip_reason = (
+                    "this branch borrows its earlier history, which it cannot compress; "
+                    "compress only recent turns (since / hours) instead")
+                return
+            return await super().launch_compression_task(store, ctx, model, **kwargs)
+
+        @classmethod
+        def select_compression_range(cls, ctx, since):
+            borrowed = borrowed_ids() if borrowed_ids is not None else set()
+            if borrowed:
+                # Never start inside the borrowed history: from the branch's
+                # first own row on (turns are whole, so it starts a turn).
+                first_own = next((m for m in ctx.messages if m["id"] not in borrowed
+                                  and m["role"] != "mark"), None)
+                if first_own is None:
+                    ctx.compression_skip_reason = (
+                        "nothing to compress: this branch has no turns of its own yet")
+                    return None
+                own_start = cls._created_at(first_own)
+                if own_start is not None and (since is None or since < own_start):
+                    since = own_start
+            return super().select_compression_range(ctx, since)
 
         @classmethod
         async def resolve_image(cls, store, ctx, image):
