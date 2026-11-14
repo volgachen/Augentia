@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.core.attachments import ATTACHMENT_PREFIX, get_attachment
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark
+from app.core.branch_join import is_branch_summary, joined_turn_rows
 from app.core.session_share import is_shared
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
@@ -149,7 +150,14 @@ async def get_shared_attachment(
         or (m.metadata or {}).get("compressed_by")
         or (m.metadata or {}).get("deleted_by") == "user"
     ]
-    if attachment_id not in _referenced_attachments(messages):
+    referenced = _referenced_attachments(messages)
+    if attachment_id not in referenced:
+        # Images inside a joined fork-dispatch turn show when its summary is
+        # expanded; they live in the branch, so look there too.
+        for m in messages:
+            if is_branch_summary(m) and m.deleted_at is None:
+                referenced |= _referenced_attachments(await joined_turn_rows(db, m))
+    if attachment_id not in referenced:
         raise HTTPException(status_code=404, detail="attachment not found")
     try:
         attachment = get_attachment(attachment_id)

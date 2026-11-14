@@ -189,9 +189,13 @@ export interface CompressionInfo {
   // compress_session(since=...) (a range_summary user row). The rows a summary
   // replaced are soft-deleted with metadata.compressed_by = its id and are
   // fetched on demand (GET .../messages/{id}/compressed).
-  kind: "session" | "turn" | "range";
+  // "branch": the result of a fork-dispatch branch joined back (a
+  // branch_summary user row); expanding it shows that branch's turn.
+  kind: "session" | "turn" | "range" | "branch";
   // How many rows a turn/range summary lists as replaced (a hint only).
   replacedCount?: number;
+  // kind "branch": the branch it came from and the task it ran.
+  branch?: { sessionId: string; task: string; ok: boolean };
 }
 
 export type TaskStatus = "pending" | "in_progress" | "completed";

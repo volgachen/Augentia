@@ -1,3 +1,4 @@
+import logging
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -34,6 +35,14 @@ async def lifespan(app: FastAPI):
     event_bus = get_plugin_event_bus()
     register_plugin_event_delivery(event_bus, db, registry, catalog)
     await recover_interrupted_plugin_runs(db)
+    # fork-dispatch branches whose turn ended while the backend was down (or
+    # whose join was cut short) get their result appended now.
+    from app.adapters.registry import get_registry as get_adapter_registry
+    from app.core.session_runtime import join_pending_branches
+    try:
+        await join_pending_branches(db, get_adapter_registry())
+    except Exception:
+        logging.getLogger("augentia").exception("joining pending branches failed")
     # await auto_start_plugin_instances(db, registry, catalog)
     try:
         yield

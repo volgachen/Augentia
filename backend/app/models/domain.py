@@ -93,6 +93,12 @@ class Session(BaseModel):
     # it borrows the source's rows created before this time, as they were at
     # this time (rows the source deletes or compresses later still show).
     branched_cutoff_at: Optional[datetime] = None
+    # Set on a branch made by fork-dispatch: when its first turn ends, a
+    # summary of that turn is appended to this session (the one it was
+    # branched from). joined_message_id is that appended row once it exists;
+    # until then the join is pending (and is retried after a restart).
+    join_into_session_id: Optional[str] = None
+    joined_message_id: Optional[str] = None
     # Per-session add-ons to the AgentTemplate's base system_prompt. Persisted so
     # a session rehydrated after a backend restart sees the exact same effective
     # prompt it was launched with. The router applies them at adapter.start()

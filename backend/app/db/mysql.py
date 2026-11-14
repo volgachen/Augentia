@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     branched_from_session_id VARCHAR(36) DEFAULT NULL,
     branched_from_message_id VARCHAR(36) DEFAULT NULL,
     branched_cutoff_at DATETIME(3)  DEFAULT NULL,
+    join_into_session_id VARCHAR(36) DEFAULT NULL,
+    joined_message_id VARCHAR(36)   DEFAULT NULL,
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
     system_prompt_id  VARCHAR(36)   DEFAULT NULL,
@@ -228,6 +230,18 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "sessions",
+        "join_into_session_id",
+        ["ALTER TABLE sessions ADD COLUMN join_into_session_id VARCHAR(36) DEFAULT NULL "
+         "AFTER branched_cutoff_at"],
+    ),
+    (
+        "sessions",
+        "joined_message_id",
+        ["ALTER TABLE sessions ADD COLUMN joined_message_id VARCHAR(36) DEFAULT NULL "
+         "AFTER join_into_session_id"],
+    ),
+    (
+        "sessions",
         "model",
         ["ALTER TABLE sessions ADD COLUMN model VARCHAR(200) DEFAULT NULL AFTER system_prompt_id"],
     ),
@@ -295,6 +309,8 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         branched_from_session_id=row.get("branched_from_session_id"),
         branched_from_message_id=row.get("branched_from_message_id"),
         branched_cutoff_at=row.get("branched_cutoff_at"),
+        join_into_session_id=row.get("join_into_session_id"),
+        joined_message_id=row.get("joined_message_id"),
         # `.get` instead of `[]` so a database that hasn't had the additional_*
         # columns ALTER'd in yet still loads. Operators run that ALTER manually
         # (see CLAUDE.md / migration notes).
@@ -725,6 +741,7 @@ class MySqlDatabase(IAgentDatabase):
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
         branched_cutoff_at: datetime | None = None,
+        join_into_session_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)
         session = Session(
@@ -740,6 +757,7 @@ class MySqlDatabase(IAgentDatabase):
             branched_from_session_id=branched_from_session_id,
             branched_from_message_id=branched_from_message_id,
             branched_cutoff_at=branched_cutoff_at,
+            join_into_session_id=join_into_session_id,
         )
         # Seed a friendly default so the UI never shows a blank title. Uses the
         # agent's name + creation time; a caller-supplied title (e.g. a spawning
@@ -757,10 +775,11 @@ class MySqlDatabase(IAgentDatabase):
                     """INSERT INTO sessions
                        (id, agent_id, title, working_dir, parent_session_id,
                         branched_from_session_id, branched_from_message_id, branched_cutoff_at,
+                        join_into_session_id,
                         additional_prompt, additional_prompt_path,
                         system_prompt_id, model, model_params,
                         status, created_at, updated_at, last_message_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         session.id,
                         session.agent_id,
@@ -770,6 +789,7 @@ class MySqlDatabase(IAgentDatabase):
                         session.branched_from_session_id,
                         session.branched_from_message_id,
                         session.branched_cutoff_at,
+                        session.join_into_session_id,
                         session.additional_prompt,
                         session.additional_prompt_path,
                         prompt_id,
@@ -822,6 +842,17 @@ class MySqlDatabase(IAgentDatabase):
                     (model, _json_dump(model_params), session.updated_at, session_id),
                 )
         return session
+
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                changed = await cur.execute(
+                    "UPDATE sessions SET joined_message_id = %s WHERE id = %s",
+                    (message_id, session_id),
+                )
+        if changed == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id, include_deleted=True)
 
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         session = await self.get_session(session_id)

@@ -114,6 +114,7 @@ class MockMemoryDatabase(IAgentDatabase):
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
         branched_cutoff_at: datetime | None = None,
+        join_into_session_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)  # validate agent exists
         session = Session(
@@ -129,6 +130,7 @@ class MockMemoryDatabase(IAgentDatabase):
             branched_from_session_id=branched_from_session_id,
             branched_from_message_id=branched_from_message_id,
             branched_cutoff_at=branched_cutoff_at,
+            join_into_session_id=join_into_session_id,
         )
         if system_prompt_snapshot is not None:
             self._point_at(session, system_prompt_snapshot, new_chain=True)
@@ -177,6 +179,11 @@ class MockMemoryDatabase(IAgentDatabase):
         session.model = model
         session.model_params = dict(model_params) if model_params is not None else None
         session.updated_at = datetime.now(timezone.utc)
+        return session
+
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        session = await self.get_session(session_id, include_deleted=True)
+        session.joined_message_id = message_id
         return session
 
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:

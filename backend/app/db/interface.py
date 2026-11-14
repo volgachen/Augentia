@@ -59,6 +59,7 @@ class IAgentDatabase(ABC):
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
         branched_cutoff_at: datetime | None = None,
+        join_into_session_id: str | None = None,
     ) -> Session:
         """system_prompt_snapshot stores a new first version; system_prompt_id
         instead shares an existing version (diverge). Neither: no prompt yet.
@@ -105,6 +106,10 @@ class IAgentDatabase(ABC):
         self, session_id: str, model: str | None, model_params: dict | None,
     ) -> Session:
         """Set both override fields (None clears one); KeyError if unknown."""
+
+    @abstractmethod
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        """Record that this fork-dispatch branch was joined back (row id in its target)."""
 
     @abstractmethod
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:

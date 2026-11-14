@@ -31,6 +31,7 @@ Each exits 0 on success, nonzero on failure — so they compose in CI or a shell
 | `test_turn_overrides.py` | `turn_overrides` on POST /messages and /retry: validation, one-turn scope, null switches off, recorded on the user row | none (TestClient + temp SQLite, scripted model) |
 | `test_session_model.py` | Per-session `model` / `model_params`: next turn uses them, null falls back to the agent, validation, 409 while busy, kept on rehydrate and diverge | none (TestClient + temp SQLite, recorded model calls) |
 | `test_branch_borrow.py` | Branches borrow history (no copies): same ids, unaffected by later changes in the source, read-only (delete / retry 400), compression only of the branch's own turns, branch of a branch, deleted source | none (mock DB, scripted model) |
+| `test_branch_join.py` | fork-dispatch: one branch per message run concurrently, results joined back (turn summary / last reply / failure note) between the source's turns, expand, idempotent, pending joins redone | none (mock DB, scripted model) |
 | `test_unlink_parent.py` | `DELETE /sessions/{id}/parent`: unlink, no-op without a parent, 404 | none (TestClient + temp SQLite) |
 
 In-process scripts (TestClient / ASGITransport) call `_common.use_isolated_state()`

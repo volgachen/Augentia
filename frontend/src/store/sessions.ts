@@ -109,6 +109,8 @@ const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string 
 
 // STATUS payload the backend sends after a turn that compressed history.
 const HISTORY_COMPRESSED = "history_compressed";
+// STATUS payload sent when a fork-dispatch branch's result was appended.
+const HISTORY_JOINED = "history_joined";
 
 export function messageToEvent(m: Message): StreamEvent {
   let event = rowToEvent(m);
@@ -123,6 +125,20 @@ export function messageToEvent(m: Message): StreamEvent {
 function rowToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user": {
+      const joined = m.metadata?.joined_from as
+        | { session_id?: string; task?: string; ok?: boolean }
+        | undefined;
+      if (m.metadata?.cagent_name === "branch_summary" && joined?.session_id) {
+        return {
+          type: "compression",
+          data: m.content,
+          message_id: m.id,
+          compression: {
+            kind: "branch",
+            branch: { sessionId: joined.session_id, task: joined.task ?? "", ok: joined.ok !== false },
+          },
+        };
+      }
       const summaryKind = SUMMARY_PREFIXES[String(m.metadata?.cagent_name ?? "")];
       if (summaryKind) {
         return {
@@ -243,7 +259,7 @@ export const useStore = create<Store>((set, get) => {
 
     socket.onmessage = (e) => {
       const frame = JSON.parse(e.data);
-      if (frame.type === "status" && frame.data === HISTORY_COMPRESSED) {
+      if (frame.type === "status" && (frame.data === HISTORY_COMPRESSED || frame.data === HISTORY_JOINED)) {
         // A summary just replaced rows this client still shows; they are now
         // soft-deleted server-side, so reload the transcript.
         void reloadHistory(sessionId);

@@ -357,8 +357,15 @@ function CompressionBlock({
   const collapsedFromStickyRef = useRef(false);
   const compressionKind = group.event.compression?.kind;
   const summary = String(group.event.data ?? "");
+  const branch = group.event.compression?.branch;
   const label =
-    compressionKind === "turn" ? "本轮已压缩" : compressionKind === "range" ? "区间已压缩" : "已压缩";
+    compressionKind === "branch"
+      ? `并行分支${branch?.ok === false ? "（失败）" : ""}：${toOneLine(branch?.task ?? "", 60)}`
+      : compressionKind === "turn"
+        ? "本轮已压缩"
+        : compressionKind === "range"
+          ? "区间已压缩"
+          : "已压缩";
   const canExpand = !!summaryId && !!loadCompressed;
   const count =
     load.status === "loaded" ? load.count : group.event.compression?.replacedCount;
@@ -429,9 +436,13 @@ function CompressionBlock({
           {load.status === "loaded" && (
             <>
               <div className="mb-1 mt-1 text-[11px] text-slate-400">
-                {load.count > 0
-                  ? `以下 ${load.count} 条为被压缩的原始消息，模型已看不到它们，只看到下方摘要`
-                  : "没有保存被压缩的原始消息"}
+                {compressionKind === "branch"
+                  ? load.count > 0
+                    ? `以下 ${load.count} 条是并行分支里这项任务的处理过程（在分支会话里），这里的模型只看到下方结果`
+                    : "分支里没有找到这项任务的记录"
+                  : load.count > 0
+                    ? `以下 ${load.count} 条为被压缩的原始消息，模型已看不到它们，只看到下方摘要`
+                    : "没有保存被压缩的原始消息"}
               </div>
               <div className="flex flex-col gap-1 opacity-60 saturate-50">
                 {load.items.map((item, i) =>
@@ -453,14 +464,36 @@ function CompressionBlock({
         <span className="shrink-0">
           {canExpand ? (expanded ? "▾ " : "▸ ") : ""}
           {label}
-          {count ? ` ${count} 条消息` : ""}，模型从这里开始只看到摘要
-          {canExpand ? (expanded ? "（点击收起）" : "（点击展开原始消息）") : ""}
+          {compressionKind === "branch"
+            ? canExpand ? (expanded ? "（点击收起）" : "（点击展开分支里的处理过程）") : ""
+            : <>
+                {count ? ` ${count} 条消息` : ""}，模型从这里开始只看到摘要
+                {canExpand ? (expanded ? "（点击收起）" : "（点击展开原始消息）") : ""}
+              </>}
         </span>
         <span className="flex-1 border-t border-dashed border-emerald-800" />
       </button>
       <div className="group mt-1 flex items-start gap-1">
-        <div className="flex-1 min-w-0 rounded border border-emerald-900 bg-emerald-950/20 px-2 py-1.5 font-mono text-xs text-emerald-200/90 whitespace-pre-wrap break-words">
+        <div
+          className={`flex-1 min-w-0 rounded border px-2 py-1.5 font-mono text-xs whitespace-pre-wrap break-words ${
+            compressionKind === "branch"
+              ? branch?.ok === false
+                ? "border-amber-900 bg-amber-950/20 text-amber-200/90"
+                : "border-sky-900 bg-sky-950/20 text-sky-100/90"
+              : "border-emerald-900 bg-emerald-950/20 text-emerald-200/90"
+          }`}
+        >
           {summary || "(empty summary)"}
+          {branch && (
+            <a
+              href={`/console/${branch.sessionId}`}
+              onClick={(e) => e.stopPropagation()}
+              className="mt-1 block text-[11px] text-sky-400/80 hover:text-sky-300 no-underline"
+              title="打开处理这项任务的分支会话"
+            >
+              ⑂ 打开分支会话 {branch.sessionId.slice(0, 8)}…
+            </a>
+          )}
         </div>
         {onDiverge && (
           <DivergeButton

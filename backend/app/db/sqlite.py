@@ -87,6 +87,8 @@ def _session(row: sqlite3.Row) -> Session:
         branched_from_session_id=row["branched_from_session_id"],
         branched_from_message_id=row["branched_from_message_id"],
         branched_cutoff_at=_dt(row["branched_cutoff_at"]),
+        join_into_session_id=row["join_into_session_id"],
+        joined_message_id=row["joined_message_id"],
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
@@ -207,6 +209,8 @@ class SqliteDatabase(IAgentDatabase):
                 branched_from_session_id TEXT DEFAULT NULL,
                 branched_from_message_id TEXT DEFAULT NULL,
                 branched_cutoff_at TEXT DEFAULT NULL,
+                join_into_session_id TEXT DEFAULT NULL,
+                joined_message_id TEXT DEFAULT NULL,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
                 system_prompt_id TEXT DEFAULT NULL,
@@ -321,7 +325,8 @@ class SqliteDatabase(IAgentDatabase):
         }
         self._migrate_system_prompts(session_columns)
         for column in ("model", "model_params", "branched_from_session_id",
-                       "branched_from_message_id", "branched_cutoff_at"):
+                       "branched_from_message_id", "branched_cutoff_at",
+                       "join_into_session_id", "joined_message_id"):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
 
@@ -488,6 +493,7 @@ class SqliteDatabase(IAgentDatabase):
             branched_from_session_id=kwargs.get("branched_from_session_id"),
             branched_from_message_id=kwargs.get("branched_from_message_id"),
             branched_cutoff_at=kwargs.get("branched_cutoff_at"),
+            join_into_session_id=kwargs.get("join_into_session_id"),
         )
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
@@ -500,12 +506,14 @@ class SqliteDatabase(IAgentDatabase):
                 """INSERT INTO sessions
                    (id, agent_id, title, working_dir, parent_session_id,
                     branched_from_session_id, branched_from_message_id, branched_cutoff_at,
-                    additional_prompt, additional_prompt_path, system_prompt_id, model,
-                    model_params, status, created_at, updated_at, last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    join_into_session_id, additional_prompt, additional_prompt_path,
+                    system_prompt_id, model, model_params, status, created_at, updated_at,
+                    last_message_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session.id, session.agent_id, session.title, session.working_dir,
                  session.parent_session_id, session.branched_from_session_id,
                  session.branched_from_message_id, _iso(session.branched_cutoff_at),
+                 session.join_into_session_id,
                  session.additional_prompt, session.additional_prompt_path,
                  prompt_id, session.model, _dump(session.model_params), session.status.value, _iso(session.created_at),
                  _iso(session.updated_at), _iso(session.last_message_at)),
@@ -559,6 +567,13 @@ class SqliteDatabase(IAgentDatabase):
         if cur.rowcount == 0:
             raise KeyError(f"Session '{session_id}' not found")
         return await self.get_session(session_id)
+
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        cur = self._execute(
+            "UPDATE sessions SET joined_message_id = ? WHERE id = ?", (message_id, session_id))
+        if cur.rowcount == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id, include_deleted=True)
 
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         now = datetime.now(timezone.utc)

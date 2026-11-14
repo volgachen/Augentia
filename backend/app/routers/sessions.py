@@ -16,6 +16,7 @@ from app.core.session_config import ensure_session_config, write_session_config
 from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
+from app.core.branch_join import is_branch_summary, joined_turn_rows
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
 from app.core.borrowed import BORROWED_FROM, is_borrowed
 from app.core.workspace import (
@@ -132,6 +133,15 @@ class DeriveSessionRequest(BaseModel):
     title: str | None = None
 
 
+class ForkDispatchRequest(BaseModel):
+    # One branch per message, each running that message as its turn.
+    messages: list[str]
+    # Optional titles, one per message (default: "<title> · 并行 i").
+    titles: list[str] | None = None
+    # As PostMessageRequest.turn_overrides, applied to every branch's turn.
+    turn_overrides: dict | None = None
+
+
 async def _turn_images(db: IAgentDatabase, session: Session, images) -> list[dict]:
     """Validate a turn's images against the session's agent; AttachmentError on rejection."""
     if not images:
@@ -158,6 +168,7 @@ async def _create_derived_session(
     title: str | None,
     cutoff: datetime | None = None,
     branched_from_message_id: str | None = None,
+    join_into: bool = False,
 ) -> Session:
     """A session continuing `source`'s history.
 
@@ -178,6 +189,8 @@ async def _create_derived_session(
         branched_from_session_id=source.id,
         branched_from_message_id=branched_from_message_id,
         branched_cutoff_at=cutoff,
+        # fork-dispatch: append the branch's first turn back to the source.
+        join_into_session_id=source.id if join_into else None,
         additional_prompt=source.additional_prompt,
         additional_prompt_path=source.additional_prompt_path,
         # Versions are immutable, so the branch shares the source's current
@@ -722,6 +735,10 @@ def transcript_messages(messages: list, *, include_compression: bool) -> list:
 async def compressed_messages(db: IAgentDatabase, session_id: str, summary_id: str) -> list:
     """Rows the summary `summary_id` replaced, in order (raises KeyError)."""
     rows = await db.get_messages(session_id, include_deleted=True)
+    joined = next((m for m in rows if m.id == summary_id and is_branch_summary(m)), None)
+    if joined is not None:
+        # A fork-dispatch result: the branch's turn, read from the branch.
+        return transcript_messages(await joined_turn_rows(db, joined), include_compression=True)
     if not any(m.id == summary_id and is_summary(m) for m in rows):
         raise KeyError(f"Summary '{summary_id}' not found")
     return transcript_messages(
@@ -740,6 +757,51 @@ async def get_compressed_messages(
         return await compressed_messages(db, session_id, summary_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/{session_id}/fork-dispatch", status_code=202)
+async def fork_dispatch(
+    session_id: str,
+    body: ForkDispatchRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Run several messages concurrently, each in its own branch, and join the
+    results back.
+
+    Each message gets a branch borrowing this session's whole current history
+    (see app.core.borrowed); its turn runs in parallel with the others. When
+    a branch's turn ends, its result (the turn summary when turn compression
+    ran, else its last reply; a note if it failed) is appended to this
+    session as a branch_summary row plus a turn_end mark, on this session's
+    queue, in completion order. Expanding that row shows the branch's turn.
+    Branches share this session's working directory.
+    """
+    messages = [m.strip() for m in body.messages]
+    if not messages or any(not m for m in messages):
+        raise HTTPException(status_code=400, detail="messages must be non-empty strings")
+    if body.titles is not None and len(body.titles) != len(messages):
+        raise HTTPException(status_code=400, detail="titles must match messages one to one")
+    overrides = _turn_overrides(body.turn_overrides)
+    try:
+        source = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    # The cutoff is "now": each branch borrows everything persisted so far.
+    # A turn running in the source keeps writing after it; those rows aren't
+    # borrowed (the branches start from the history as of this call).
+    cutoff = datetime.now(timezone.utc)
+    branches = []
+    for i, content in enumerate(messages):
+        title = (body.titles[i].strip() if body.titles and body.titles[i].strip()
+                 else f"{source.title or 'Session'} · 并行 {i + 1}")
+        branch = await _create_derived_session(
+            source, db, registry, title=title, cutoff=cutoff, join_into=True)
+        runner = registry.get(branch.id)
+        await runner.submit(content, turn_overrides=overrides)
+        branches.append({"session_id": branch.id, "title": branch.title, "message": content})
+    logger.info("fork-dispatch session=%s branches=%s", session_id, [b["session_id"] for b in branches])
+    return {"branches": branches}
 
 
 @router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)

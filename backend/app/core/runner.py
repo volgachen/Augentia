@@ -3,7 +3,7 @@ import json
 import logging
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import AsyncIterator, Awaitable, Callable
 
 from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.db.interface import IAgentDatabase
@@ -28,6 +28,10 @@ class _InboxItem:
     compress_result: "asyncio.Future[dict] | None" = None
     # Manual compression options, passed to adapter.compress(**compress_options).
     compress_options: dict | None = None
+    # Work that must run between turns (e.g. appending a joined branch's
+    # result): the loop awaits job() and resolves job_result with its value.
+    job: "Callable[[], Awaitable[object]] | None" = None
+    job_result: "asyncio.Future | None" = None
 
 
 class SessionRunner:
@@ -59,6 +63,10 @@ class SessionRunner:
         # (keyed by call_id) and replay them to each new subscriber; cleared once
         # the human decides or the turn moves past the gate.
         self._pending_confirms: dict[str, StreamEvent] = {}
+        # Called (no arguments, awaited in a task) after each turn ends,
+        # whatever its outcome; build_runner sets it for fork-dispatch
+        # branches so their result is joined back. Errors are only logged.
+        self.on_turn_finished: "Callable[[], Awaitable[None]] | None" = None
 
     async def start(self) -> None:
         if self._task is not None:
@@ -100,6 +108,20 @@ class SessionRunner:
             content=content, from_session_id=from_session_id, images=images or None,
             turn_overrides=turn_overrides or None,
         ))
+
+    async def run_between_turns(self, job: "Callable[[], Awaitable[object]]") -> object:
+        """Queue `job` behind any pending turns and await its result.
+
+        It runs on the session's loop, so never during a turn: rows it writes
+        can't land between a turn's tool calls and their results.
+        """
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+        await self._inbox.put(_InboxItem(content="", job=job, job_result=future))
+        return await future
+
+    def broadcast(self, event: StreamEvent) -> None:
+        """Send an event to this session's subscribers (not persisted)."""
+        self._broadcast(event)
 
     @property
     def is_busy(self) -> bool:
@@ -216,6 +238,9 @@ class SessionRunner:
             if item.compress_result is not None:
                 await self._run_compress(item.compress_result, item.compress_options or {})
                 continue
+            if item.job is not None:
+                await self._run_job(item)
+                continue
             await self._db.update_session_status(self._session_id, SessionStatus.RUNNING)
             self._turn_task = asyncio.create_task(
                 self._run_turn(item), name=f"turn:{self._session_id}"
@@ -238,6 +263,36 @@ class SessionRunner:
                     logger.exception("failed to mark session ERROR session=%s", self._session_id)
             finally:
                 self._turn_task = None
+                self._after_turn()
+
+    def _after_turn(self) -> None:
+        callback = self.on_turn_finished
+        if callback is None:
+            return
+
+        async def run() -> None:
+            try:
+                await callback()
+            except Exception:
+                logger.exception("on_turn_finished failed session=%s", self._session_id)
+
+        asyncio.get_running_loop().create_task(run(), name=f"after-turn:{self._session_id}")
+
+    async def _run_job(self, item: _InboxItem) -> None:
+        future = item.job_result
+        try:
+            result = await item.job()
+        except asyncio.CancelledError:
+            if future is not None and not future.done():
+                future.cancel()
+            raise
+        except Exception as e:
+            logger.exception("between-turns job failed session=%s", self._session_id)
+            if future is not None and not future.done():
+                future.set_exception(e)
+            return
+        if future is not None and not future.done():
+            future.set_result(result)
 
     async def _run_turn(self, item: _InboxItem) -> None:
         # The adapter (CAgentAdapter) persists every conversation row through
