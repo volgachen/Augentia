@@ -5,6 +5,7 @@ import { usePluginStore } from "../store/plugins";
 import { api } from "../api/client";
 import type { AgentTemplate, PluginDefinition, PluginInstance, Session, SessionStatus } from "../api/types";
 import PluginSessionConsoleDialog from "../components/plugins/PluginSessionConsoleDialog";
+import NewSessionInDir from "../components/NewSessionInDir";
 
 function formatTimestamp(iso: string | null): string {
   // The backend stores timestamps as UTC but the DATETIME column serializes
@@ -135,6 +136,8 @@ interface DirGroup {
   rows: Row[];
   count: number;
   activeCount: number;
+  // Agent of the most recently created session here: the quick-create default.
+  lastAgentId: string;
 }
 
 // Windows paths compare case-insensitively and with either slash.
@@ -162,6 +165,8 @@ function buildDirGroups(entries: Entry[]): DirGroup[] {
     rows: buildForest(members, byActiveThenUpdated),
     count: members.length,
     activeCount: members.filter(isActive).length,
+    lastAgentId: members.reduce((x, y) => (y.session.created_at > x.session.created_at ? y : x))
+      .session.agent_id,
     latest: members.map(lastActivity).reduce((x, y) => (y > x ? y : x)),
   }));
   groups.sort((a, b) => {
@@ -193,6 +198,7 @@ export default function SessionDashboard() {
   const closeSession = useStore((s) => s.closeSession);
   const renameSession = useStore((s) => s.renameSession);
   const unlinkParent = useStore((s) => s.unlinkParent);
+  const launchSession = useStore((s) => s.launchSession);
   const hydrateSessions = useStore((s) => s.hydrateSessions);
   const pluginCatalog = usePluginStore((s) => s.catalog);
   const pluginInstances = usePluginStore((s) => s.instances);
@@ -201,7 +207,11 @@ export default function SessionDashboard() {
 
   // agent_id -> display name. Sessions only carry the agent UUID, so we fetch
   // the registry once to render human-readable names in the Agent column.
-  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
+  const [agents, setAgents] = useState<AgentTemplate[]>([]);
+  const agentNames = useMemo(
+    () => Object.fromEntries(agents.map((a) => [a.id, a.name])) as Record<string, string>,
+    [agents],
+  );
 
   // Which session's title is being edited inline, and the draft text.
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -254,9 +264,7 @@ export default function SessionDashboard() {
     );
     api.agents
       .list()
-      .then((agents: AgentTemplate[]) =>
-        setAgentNames(Object.fromEntries(agents.map((a) => [a.id, a.name]))),
-      )
+      .then((list: AgentTemplate[]) => setAgents(list))
       .catch((err) => console.error("failed to load agents", err));
   }, [hydrateSessions, loadPlugins]);
 
@@ -318,6 +326,13 @@ export default function SessionDashboard() {
   const openSession = (sessionId: string) => {
     setActive(sessionId);
     navigate(`/console/${sessionId}`);
+  };
+
+  // Quick create from a directory header: straight into that folder, then
+  // open the new session's console like a launch from the Agent Registry.
+  const createInDir = async (agentId: string, dir: string | null) => {
+    const sessionId = await launchSession(agentId, dir ?? "", "use_existing_directory");
+    openSession(sessionId);
   };
 
   return (
@@ -414,6 +429,12 @@ export default function SessionDashboard() {
                           {group.count} 个会话
                           {group.activeCount > 0 && `，${group.activeCount} 个 active`}
                         </span>
+                        <NewSessionInDir
+                          dir={group.dir}
+                          agents={agents}
+                          defaultAgentId={group.lastAgentId}
+                          onCreate={(agentId) => createInDir(agentId, group.dir)}
+                        />
                       </span>
                     </td>
                   </tr>
