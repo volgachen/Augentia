@@ -5,6 +5,8 @@ export type SessionStatus =
   | "RUNNING"
   | "WAITING_USER"
   | "WAITING_CONFIRM"
+  // Waiting on the summarizer (turn / threshold / manual compression).
+  | "COMPRESSING"
   | "COMPLETED"
   | "ERROR"
   // Reported (not stored) for an idle session in dispatch mode: each message

@@ -21,6 +21,7 @@ it onto Augentia's adapter/stream contract:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -42,6 +43,7 @@ from app.adapters.tools.base import (  # noqa: F401 — BaseTool for type hints
 from app.adapters.tools.permissions import decide_tool_permission
 from app.adapters.tools.registry import load_tools
 from app.core import attachments
+from app.models.domain import SessionStatus
 
 logger = logging.getLogger("augentia.adapter.cagent")
 
@@ -51,6 +53,10 @@ _FROM_SESSION_RE = re.compile(r"^\[from-session:([^\]]+)\]\s")
 _DEFAULT_MAX_STEPS = 50
 # STATUS payload after a turn that compressed history (clients reload it).
 HISTORY_COMPRESSED = "history_compressed"
+# STATUS events around a summarizer call (the stored status is COMPRESSING
+# in between); clients show it instead of RUNNING.
+COMPRESSING_STARTED = "compressing"
+COMPRESSING_ENDED = "compressing_done"
 # Screenshots arrive every step in browser sessions; only the newest few are
 # worth re-sending each turn. config.tool_image_limit overrides (null = all).
 _DEFAULT_TOOL_IMAGE_LIMIT = 3
@@ -211,6 +217,9 @@ class CAgentAdapter(BaseAgentAdapter):
         self._pending_overrides: dict | None = None
         self._pending_confirms: dict[str, tuple[asyncio.Future, str]] = {}
         self._events: asyncio.Queue | None = None
+        # Broadcasts a STATUS event outside a turn (manual compression); set
+        # by the SessionRunner that owns this adapter.
+        self.on_status = None
         self._turn_task: asyncio.Task | None = None
         self._announced_assistant_id: str | None = None
         self._call_info: dict[str, dict] = {}
@@ -456,6 +465,40 @@ class CAgentAdapter(BaseAgentAdapter):
         self._system_prompt = system_prompt
         if self._agent_cls is not None:
             self._agent_cls.SYSTEM_PROMPT = system_prompt or "You are a helpful assistant."
+
+    @contextlib.asynccontextmanager
+    async def compressing(self):
+        """Report COMPRESSING while the summarizer runs, then the prior status.
+
+        Clients hear a STATUS event at both ends: on the turn's event queue
+        during a turn, else through on_status (set by the runner, for a
+        manual compression).
+        """
+        db = self._db
+        session_id = self.session_id
+        prior = None
+        if db is not None and session_id:
+            try:
+                prior = (await db.get_session(session_id)).status
+                await db.update_session_status(session_id, SessionStatus.COMPRESSING)
+            except KeyError:
+                prior = None
+        await self._status_event(COMPRESSING_STARTED)
+        try:
+            yield
+        finally:
+            if prior is not None:
+                try:
+                    await db.update_session_status(session_id, prior)
+                except KeyError:
+                    pass
+            await self._status_event(COMPRESSING_ENDED)
+
+    async def _status_event(self, data: str) -> None:
+        if self._turn_task is not None and self._events is not None:
+            await self._emit(StreamEventType.STATUS, data)
+        elif self.on_status is not None:
+            self.on_status(StreamEvent(type=StreamEventType.STATUS, data=data))
 
     async def compress(self, *, since: datetime | None = None,
                        instruction: str | None = None) -> dict:

@@ -204,7 +204,9 @@ export default function LiveConsole() {
   const branchSourceId = session.branched_from_session_id ?? "";
   const branchSourceTitle =
     sessions[branchSourceId]?.session.title?.trim() || `${branchSourceId.slice(0, 8)}…`;
-  const generating = session.status === "RUNNING";
+  // Busy: a turn runs or the summarizer does (COMPRESSING); both block input.
+  const compressingNow = session.status === "COMPRESSING";
+  const generating = session.status === "RUNNING" || compressingNow;
   // Dispatch mode: messages (POST /messages) run in new branches whose
   // results are joined back; the session runs no turns of its own, so typing
   // here, rewrite and compression are off. Outside it, results still to
@@ -408,7 +410,7 @@ export default function LiveConsole() {
           {generating ? (
             <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-900/60 text-indigo-200">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-300 animate-pulse" />
-              generating…
+              {compressingNow ? "compressing…" : "generating…"}
             </span>
           ) : (
             <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400">
@@ -423,6 +425,8 @@ export default function LiveConsole() {
                   ? "bg-red-900 text-red-300"
                   : session.status === "WAITING_CONFIRM"
                     ? "bg-orange-900 text-orange-300"
+                    : session.status === "COMPRESSING"
+                      ? "bg-purple-900 text-purple-300"
                     : session.status === "WAITING_USER"
                       ? "bg-blue-900 text-blue-300"
                       : session.status === "DISPATCHING"

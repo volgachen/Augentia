@@ -64,6 +64,8 @@ _STATUS_TO_FRAMEWORK = {
     SessionStatus.RUNNING: "RUNNING",
     SessionStatus.WAITING_USER: "IDLE",
     SessionStatus.WAITING_CONFIRM: "RUNNING",
+    # The framework has no "compressing": to it a summary in progress is running.
+    SessionStatus.COMPRESSING: "RUNNING",
     SessionStatus.COMPLETED: "IDLE",
     SessionStatus.ERROR: "FAILED",
 }

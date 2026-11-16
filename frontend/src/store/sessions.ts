@@ -114,6 +114,10 @@ const HISTORY_JOINED = "history_joined";
 // STATUS payload: the reported status may have changed outside a turn
 // (fork-dispatch started or its last result joined); refetch the session.
 const SESSION_CHANGED = "session_changed";
+// STATUS payloads around a summarizer call: the session is COMPRESSING in
+// between (the backend stores it; these keep the live view in step).
+const COMPRESSING_STARTED = "compressing";
+const COMPRESSING_ENDED = "compressing_done";
 
 export function messageToEvent(m: Message): StreamEvent {
   let event = rowToEvent(m);
@@ -265,6 +269,25 @@ export const useStore = create<Store>((set, get) => {
       const frame = JSON.parse(e.data);
       if (frame.type === "status" && frame.data === SESSION_CHANGED) {
         void get().refreshSession(sessionId).catch(() => {});
+        return;
+      }
+      if (frame.type === "status" && (frame.data === COMPRESSING_STARTED || frame.data === COMPRESSING_ENDED)) {
+        if (frame.data === COMPRESSING_STARTED) {
+          set((s) => {
+            const entry = s.sessions[sessionId];
+            if (!entry) return s;
+            return {
+              sessions: {
+                ...s.sessions,
+                [sessionId]: { ...entry, session: { ...entry.session, status: "COMPRESSING" } },
+              },
+            };
+          });
+        } else {
+          // Back to whatever it was (still RUNNING inside a turn, idle after a
+          // manual compression): ask the backend.
+          void get().refreshSession(sessionId).catch(() => {});
+        }
         return;
       }
       if (frame.type === "status" && (frame.data === HISTORY_COMPRESSED || frame.data === HISTORY_JOINED)) {

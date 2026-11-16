@@ -67,6 +67,10 @@ class SessionRunner:
         # whatever its outcome; build_runner sets it for fork-dispatch
         # branches so their result is joined back. Errors are only logged.
         self.on_turn_finished: "Callable[[], Awaitable[None]] | None" = None
+        # Status events the adapter raises outside a turn (e.g. compressing
+        # during a manual compression) go to this session's subscribers.
+        if hasattr(adapter, "on_status"):
+            adapter.on_status = self._broadcast
 
     async def start(self) -> None:
         if self._task is not None:

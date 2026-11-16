@@ -391,7 +391,7 @@ async def update_session_model(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(
             status_code=409,
@@ -490,7 +490,7 @@ async def update_session_system_prompt(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(
             status_code=409,
@@ -547,7 +547,7 @@ async def update_session_working_dir(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(
             status_code=409,
@@ -917,7 +917,7 @@ async def delete_message(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(status_code=409, detail="session is running; delete after the turn finishes")
     index = next((i for i, m in enumerate(messages) if m.id == message_id), None)
@@ -950,7 +950,8 @@ def _refuse_while_running(registry: AdapterRegistry, session: Session, action: s
         busy = registry.get(session.id).is_busy
     except KeyError:
         busy = False
-    if busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+    if busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                                  SessionStatus.COMPRESSING):
         raise HTTPException(status_code=409, detail=f"session is running; {action} after the turn finishes")
 
 
@@ -1075,7 +1076,8 @@ async def compress_session(
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    if runner.is_busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+    if runner.is_busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                                            SessionStatus.COMPRESSING):
         raise HTTPException(status_code=409, detail="session is running; compress after the turn finishes")
     result = await runner.compress(**options)
     logger.info("manual compression session=%s result=%s", session_id, result.get("status"))

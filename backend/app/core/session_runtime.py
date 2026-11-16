@@ -183,7 +183,8 @@ async def get_or_rehydrate(
     # tool confirm died with the old process (its Future is gone, so an approve
     # frame would be silently dropped). Reset the stale busy status so the
     # session is usable again instead of stuck in WAITING_CONFIRM/RUNNING.
-    if session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+    if session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                          SessionStatus.COMPRESSING):
         logger.warning("resetting stale status=%s session=%s", session.status, session.id)
         session = await db.update_session_status(session.id, SessionStatus.WAITING_USER)
     try:

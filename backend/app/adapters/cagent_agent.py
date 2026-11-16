@@ -267,6 +267,13 @@ def make_agent_class(
             return await adapter.gate_tool_call(store, ctx, tool_call)
 
         @classmethod
+        async def call_summarizer(cls, model, ctx, messages, instruction):
+            # Every compression (turn, threshold, manual) asks the summarizer
+            # here; the session reports COMPRESSING for that time.
+            async with adapter.compressing():
+                return await super().call_summarizer(model, ctx, messages, instruction)
+
+        @classmethod
         async def launch_compression_task(cls, store, ctx, model, **kwargs):
             # Whole-history compression summarizes everything up to a turn
             # boundary, borrowed rows included; a branch can't replace those.

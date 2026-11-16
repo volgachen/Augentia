@@ -13,6 +13,10 @@ class SessionStatus(str, Enum):
     # StreamEventType.TOOL_CONFIRM). Distinct from WAITING_USER, which means the
     # turn finished and the agent is idle.
     WAITING_CONFIRM = "WAITING_CONFIRM"
+    # Waiting on the summarizer: turn compression at the end of a turn, a
+    # threshold-triggered whole-history compression, or POST /compress.
+    # Busy like RUNNING (stored, reset after a restart like RUNNING).
+    COMPRESSING = "COMPRESSING"
     COMPLETED = "COMPLETED"
     ERROR = "ERROR"
     # Never stored: reported (Session.status in API responses) for a session

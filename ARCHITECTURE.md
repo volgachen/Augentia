@@ -73,7 +73,7 @@ frontend/src/
 - **Task（任务项）**：记录单个会话内的任务列表、任务状态、依赖关系、负责人和元数据。
 - **Plugin（插件）**：记录插件代码、运行状态、退出码和错误信息。
 
-常见会话状态包括：`INITIALIZING`、`RUNNING`、`WAITING_USER`、`WAITING_CONFIRM`、`COMPLETED`、`ERROR`。
+常见会话状态包括：`INITIALIZING`、`RUNNING`、`WAITING_USER`、`WAITING_CONFIRM`、`COMPRESSING`、`COMPLETED`、`ERROR`。`COMPRESSING` 表示正在等摘要模型（轮次压缩、按阈值的整段压缩或手动压缩），和 `RUNNING` 一样算忙碌、重启后重置；进入和离开时会推送 `compressing` / `compressing_done` 两个 STATUS 事件。另有只在接口返回里出现、不存库的 `DISPATCHING`（派发模式下空闲）。
 
 ### 2. 数据库接口定义
 

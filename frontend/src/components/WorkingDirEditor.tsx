@@ -4,7 +4,7 @@ import { useStore } from "../store/sessions";
 import PathList from "./PathList";
 import { useBrowser } from "./useDirBrowser";
 
-const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM"]);
+const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM", "COMPRESSING"]);
 
 /** Header cwd display that opens a dialog to move the session to another directory. */
 export default function WorkingDirEditor({ session }: { session: Session }) {

@@ -107,7 +107,7 @@ export default function SharePage() {
 
   const shared = data?.scope === sessionId ? data.value : null;
   const err = error?.scope === sessionId ? error.text : null;
-  const running = shared?.session.status === "RUNNING";
+  const running = shared?.session.status === "RUNNING" || shared?.session.status === "COMPRESSING";
 
   // A running session keeps growing; poll while it does.
   useEffect(() => {
