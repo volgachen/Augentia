@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useStore } from "../store/sessions";
 import type { SessionStatus } from "../api/types";
+import { statusLabel, statusTitle } from "./statusLabel";
 
 const STATUS_STYLE: Record<SessionStatus, string> = {
   INITIALIZING: "bg-yellow-900 text-yellow-300",
@@ -131,8 +132,9 @@ export default function ActiveSessionsMenu({
                     </span>
                     <span
                       className={`shrink-0 px-2 py-0.5 rounded-full text-[10px] font-medium ${STATUS_STYLE[s.status]}`}
+                      title={statusTitle(s)}
                     >
-                      {s.status}
+                      {statusLabel(s)}
                     </span>
                   </button>
                   <button

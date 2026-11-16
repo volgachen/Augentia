@@ -25,6 +25,7 @@ import {
   itemMessageId,
   itemMessageIds,
 } from "../components/console/items";
+import { statusLabel, statusTitle } from "../components/statusLabel";
 
 export default function LiveConsole() {
   const { sessionId } = useParams<{ sessionId: string }>();
@@ -428,10 +429,13 @@ export default function LiveConsole() {
                         ? "bg-sky-900 text-sky-300"
                         : "bg-gray-700 text-gray-400"
             }`}
-            title={pendingJoins > 0 ? `${pendingJoins} 个并行分支的结果还没拼回` : undefined}
+            title={
+              statusTitle(session) ??
+              (pendingJoins > 0 ? `${pendingJoins} 个并行分支的结果还没拼回` : undefined)
+            }
           >
-            {session.status}
-            {pendingJoins > 0 && ` · ${pendingJoins}`}
+            {statusLabel(session)}
+            {session.status !== "DISPATCHING" && pendingJoins > 0 && ` · ${pendingJoins}`}
           </span>
           <button
             type="button"

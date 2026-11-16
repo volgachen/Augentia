@@ -7,6 +7,7 @@ import type { AgentTemplate, PluginDefinition, PluginInstance, Session, SessionS
 import PluginSessionConsoleDialog from "../components/plugins/PluginSessionConsoleDialog";
 import BranchIcon from "../components/BranchIcon";
 import NewSessionInDir from "../components/NewSessionInDir";
+import { statusLabel, statusTitle } from "../components/statusLabel";
 
 function formatTimestamp(iso: string | null): string {
   // The backend stores timestamps as UTC but the DATETIME column serializes
@@ -641,8 +642,9 @@ export default function SessionDashboard() {
                 <td className="py-3 pr-4">
                   <span
                     className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[session.status]}`}
+                    title={statusTitle(session)}
                   >
-                    {session.status}
+                    {statusLabel(session)}
                   </span>
                 </td>
                 <td className="py-3 pr-4 text-gray-400 text-xs whitespace-nowrap">
