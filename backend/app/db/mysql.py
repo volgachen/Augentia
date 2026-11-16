@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     branched_cutoff_at DATETIME(3)  DEFAULT NULL,
     join_into_session_id VARCHAR(36) DEFAULT NULL,
     joined_message_id VARCHAR(36)   DEFAULT NULL,
+    dispatch_mode     TINYINT(1)    NOT NULL DEFAULT 0,
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
     system_prompt_id  VARCHAR(36)   DEFAULT NULL,
@@ -242,6 +243,12 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "sessions",
+        "dispatch_mode",
+        ["ALTER TABLE sessions ADD COLUMN dispatch_mode TINYINT(1) NOT NULL DEFAULT 0 "
+         "AFTER joined_message_id"],
+    ),
+    (
+        "sessions",
         "model",
         ["ALTER TABLE sessions ADD COLUMN model VARCHAR(200) DEFAULT NULL AFTER system_prompt_id"],
     ),
@@ -311,6 +318,7 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         branched_cutoff_at=row.get("branched_cutoff_at"),
         join_into_session_id=row.get("join_into_session_id"),
         joined_message_id=row.get("joined_message_id"),
+        dispatch_mode=bool(row.get("dispatch_mode") or 0),
         # `.get` instead of `[]` so a database that hasn't had the additional_*
         # columns ALTER'd in yet still loads. Operators run that ALTER manually
         # (see CLAUDE.md / migration notes).
@@ -841,6 +849,19 @@ class MySqlDatabase(IAgentDatabase):
                     "UPDATE sessions SET model = %s, model_params = %s, updated_at = %s WHERE id = %s",
                     (model, _json_dump(model_params), session.updated_at, session_id),
                 )
+        return session
+
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        session = await self.get_session(session_id)
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE sessions SET dispatch_mode = %s, updated_at = %s WHERE id = %s",
+                    (1 if enabled else 0, now, session_id),
+                )
+        session.dispatch_mode = enabled
+        session.updated_at = now
         return session
 
     async def pending_joins(self) -> dict[str, int]:

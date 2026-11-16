@@ -108,6 +108,10 @@ class IAgentDatabase(ABC):
         """Set both override fields (None clears one); KeyError if unknown."""
 
     @abstractmethod
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        """Turn dispatch mode on or off; KeyError if the session is unknown."""
+
+    @abstractmethod
     async def pending_joins(self) -> dict[str, int]:
         """{session id: live fork-dispatch branches not joined back into it yet}.
 
@@ -152,7 +156,10 @@ class IAgentDatabase(ABC):
         history and without checking the session is live; only rows created
         before `before` when given. Soft-deleted rows only with include_deleted."""
 
-    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> List[Message]:
+    async def get_messages(
+        self, session_id: str, *, include_deleted: bool = False,
+        include_deleted_session: bool = False,
+    ) -> List[Message]:
         """The session's history ordered by (created_at, id): for a branch, the
         rows it borrows from its source (recursively) first, then its own.
 
@@ -161,9 +168,11 @@ class IAgentDatabase(ABC):
         or compressed afterwards is live here, one deleted before stays
         deleted. They keep their ids and carry metadata.borrowed_from = the
         session that owns them; they are read-only from the branch.
-        Soft-deleted rows only with include_deleted.
+        Soft-deleted rows only with include_deleted; a soft-deleted session
+        only with include_deleted_session (e.g. expanding a joined result of
+        a branch deleted since), else KeyError like an unknown one.
         """
-        session = await self.get_session(session_id)
+        session = await self.get_session(session_id, include_deleted=include_deleted_session)
         own = await self.get_own_messages(session_id, include_deleted=include_deleted)
         borrowed = await self._borrowed_messages(session, include_deleted, seen={session_id})
         return borrowed + own

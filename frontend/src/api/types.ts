@@ -7,8 +7,8 @@ export type SessionStatus =
   | "WAITING_CONFIRM"
   | "COMPLETED"
   | "ERROR"
-  // Reported (not stored) while fork-dispatch results are still to be joined
-  // into this session; it takes no new messages until they are.
+  // Reported (not stored) for an idle session in dispatch mode: each message
+  // sent to it runs in a new branch whose result is joined back.
   | "DISPATCHING";
 
 export type MessageRole = "system" | "user" | "agent" | "tool_call" | "tool" | "mark";
@@ -92,7 +92,13 @@ export interface Session {
   // The session's own model / Chat Completions params; null = the agent's.
   model?: string | null;
   model_params?: Record<string, unknown> | null;
-  // Fork-dispatch branches of this session not joined back yet.
+  // Dispatch mode switch (PUT /sessions/{id}/dispatching).
+  dispatch_mode?: boolean;
+  // On a dispatched branch: the session its result is joined into, and the
+  // joined row once it is (null while it still runs).
+  join_into_session_id?: string | null;
+  joined_message_id?: string | null;
+  // Dispatched branches of this session not joined back yet.
   pending_joins?: number;
   status: SessionStatus;
   created_at: string;

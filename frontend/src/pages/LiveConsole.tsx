@@ -41,6 +41,8 @@ export default function LiveConsole() {
   const divergeFromMessage = useStore((s) => s.divergeFromMessage);
   const deleteMessage = useStore((s) => s.deleteMessage);
   const setShowDeleted = useStore((s) => s.setShowDeleted);
+  const setDispatchMode = useStore((s) => s.setDispatchMode);
+  const [modeError, setModeError] = useState<{ scope: string; text: string } | null>(null);
   const compressSession = useStore((s) => s.compressSession);
   const resolveConfirm = useStore((s) => s.resolveConfirm);
   const openSession = useStore((s) => s.openSession);
@@ -202,9 +204,13 @@ export default function LiveConsole() {
   const branchSourceTitle =
     sessions[branchSourceId]?.session.title?.trim() || `${branchSourceId.slice(0, 8)}…`;
   const generating = session.status === "RUNNING";
-  // fork-dispatch results still to come: the backend refuses new messages.
-  const dispatching = session.status === "DISPATCHING";
+  // Dispatch mode: messages (POST /messages) run in new branches whose
+  // results are joined back; the session runs no turns of its own, so typing
+  // here, rewrite and compression are off. Outside it, results still to
+  // come from a dispatch also hold new messages back (the backend 409s).
+  const dispatchMode = !!session.dispatch_mode;
   const pendingJoins = session.pending_joins ?? 0;
+  const dispatching = dispatchMode || pendingJoins > 0;
   const consoleItems = buildConsoleItems(events);
   // In a branch: where its own messages start (after the borrowed ones);
   // -1 when it has none borrowed. Equal to the length when it has none yet.
@@ -422,12 +428,40 @@ export default function LiveConsole() {
                         ? "bg-sky-900 text-sky-300"
                         : "bg-gray-700 text-gray-400"
             }`}
-            title={dispatching ? `等待 ${pendingJoins} 个并行分支的结果拼回` : undefined}
+            title={pendingJoins > 0 ? `${pendingJoins} 个并行分支的结果还没拼回` : undefined}
           >
             {session.status}
-            {dispatching && ` · ${pendingJoins}`}
+            {pendingJoins > 0 && ` · ${pendingJoins}`}
           </span>
+          <button
+            type="button"
+            onClick={() => {
+              setModeError(null);
+              void setDispatchMode(session.id, !dispatchMode).catch((e: unknown) =>
+                setModeError({
+                  scope: session.id,
+                  text: e instanceof Error ? e.message : String(e),
+                }),
+              );
+            }}
+            disabled={!dispatchMode && generating}
+            className={`px-2 py-0.5 rounded-full text-xs font-medium border transition-colors disabled:opacity-40 ${
+              dispatchMode
+                ? "border-sky-600 bg-sky-900/60 text-sky-200 hover:bg-sky-800"
+                : "border-gray-700 text-gray-400 hover:border-sky-700 hover:text-sky-300"
+            }`}
+            title={
+              dispatchMode
+                ? "派发模式开启中：发到这个会话的每条消息（POST /messages）都在新分支里处理，结果摘要拼回这里。点击关闭"
+                : "开启派发模式：之后每条消息都开一个新分支处理，结果摘要拼回这里（会话空闲时才能开启）"
+            }
+          >
+            派发模式{dispatchMode ? "：开" : "：关"}
+          </button>
         </div>
+        {modeError?.scope === session.id && (
+          <p className="text-xs text-red-400 break-all">{modeError.text}</p>
+        )}
         {/* Two columns of toggles: tool display on the left; deleted
             messages with auto-scroll (while running) below it on the right. */}
         <div className="flex items-start gap-4">
@@ -717,8 +751,10 @@ export default function LiveConsole() {
             placeholder={
               generating
                 ? "Agent is generating… wait for it to finish"
-                : dispatching
-                  ? `并行分支还在处理（还有 ${pendingJoins} 个结果没拼回来），全部拼回后才能发消息`
+                : dispatchMode
+                  ? "派发模式：消息通过 POST /messages 发来，每条在新分支里处理；这里不能直接输入"
+                  : dispatching
+                    ? `并行分支还在处理（还有 ${pendingJoins} 个结果没拼回来），全部拼回后才能发消息`
                 : canAttachImages
                   ? "Send a message… (Enter to send, Shift+Enter for newline; paste or drop images)"
                   : "Send a message… (Enter to send, Shift+Enter for newline)"

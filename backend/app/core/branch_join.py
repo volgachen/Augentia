@@ -125,7 +125,7 @@ async def write_join(db: IAgentDatabase, branch: Session, *, template: str | Non
     if not target_id:
         return None
     target_rows = await db.get_own_messages(target_id, include_deleted=True)
-    rows = await db.get_messages(branch.id, include_deleted=True)
+    rows = await db.get_messages(branch.id, include_deleted=True, include_deleted_session=True)
     turn, end = first_turn(rows)
     if end is None:
         return None
@@ -181,9 +181,16 @@ async def joined_turn_rows(db: IAgentDatabase, summary: Message) -> list[Message
     if not branch_id:
         return []
     try:
-        rows = await db.get_messages(branch_id, include_deleted=True)
+        # A deleted branch's rows are still there (soft delete): keep the
+        # joined result expandable after the branch is cleaned up.
+        branch = await db.get_session(branch_id, include_deleted=True)
+        rows = await db.get_messages(branch_id, include_deleted=True, include_deleted_session=True)
     except KeyError:
         return []
+    if branch.deleted_at is not None:
+        # Deleting a session soft-deletes its live rows at the same instant;
+        # show those as they were (rows deleted earlier keep their reason).
+        rows = [_undeleted(m) if m.deleted_at == branch.deleted_at else m for m in rows]
     summary_id = joined.get("summary_id")
     if summary_id:
         covered = [m for m in rows if (m.metadata or {}).get("compressed_by") == summary_id]
@@ -192,3 +199,7 @@ async def joined_turn_rows(db: IAgentDatabase, summary: Message) -> list[Message
     turn, _ = first_turn(rows)
     return [m for m in turn if m.role != MessageRole.MARK
             and (m.deleted_at is None or (m.metadata or {}).get("compressed_by"))]
+
+
+def _undeleted(message: Message) -> Message:
+    return message.model_copy(update={"deleted_at": None})

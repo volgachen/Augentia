@@ -52,6 +52,7 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `branched_cutoff_at` | DATETIME(3) | nullable; the branch borrows the source's rows created before this time (see below) |
 | `join_into_session_id` | VARCHAR(36) | nullable; fork-dispatch branches: the session its first turn's result is appended to |
 | `joined_message_id` | VARCHAR(36) | nullable; the `branch_summary` row that result became (NULL while the join is pending) |
+| `dispatch_mode` | TINYINT(1) | NOT NULL, default 0; dispatch mode on: each `POST /messages` runs in a new branch whose result is joined back |
 | `additional_prompt` | LONGTEXT | nullable |
 | `additional_prompt_path` | VARCHAR(1000) | nullable |
 | `system_prompt_id` | VARCHAR(36) | nullable; current `system_prompts` version of the effective prompt (agent prompt + additions + runtime context, frozen at first start). NULL until first start |
@@ -92,9 +93,10 @@ row with `metadata.cagent_name = "branch_summary"` and
 `turn_end` mark. The branch's rows are not copied; expanding the summary
 reads them from the branch. Pending joins are redone at startup.
 
-While a session has live branches not joined back yet, API responses report
-its status as `DISPATCHING` with `pending_joins` (computed from
-`join_into_session_id` / `joined_message_id`, never stored in `status`).
+API responses add `pending_joins` (live branches not joined back yet,
+computed from `join_into_session_id` / `joined_message_id`) and report
+`status` as `DISPATCHING` for an idle session with `dispatch_mode` on; that
+value is never stored in `status`.
 
 The API still returns the resolved text as `agents.system_prompt` /
 `sessions.system_prompt_snapshot` alongside `system_prompt_id`. Databases

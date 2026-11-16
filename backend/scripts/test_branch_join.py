@@ -14,8 +14,8 @@ Covers:
   - a join waits for a running source turn (lands after it, never inside it)
   - expanding a branch_summary returns the branch's turn rows
   - joins are idempotent and redone for pending branches (restart)
-  - while results are pending the source reports DISPATCHING (stored status
-    untouched) and refuses new messages / another dispatch (409); deleting
+  - while results are pending the source reports pending_joins and refuses
+    new messages / another dispatch (409); deleting
     a pending branch joins what it did and releases the source
 
 Run from backend/:  python scripts/test_branch_join.py
@@ -146,14 +146,12 @@ async def main() -> int:
             await wait_for(lambda: _gte(active, 3), timeout=3)
             check(active["max"] == 3, f"branch turns run concurrently (max {active['max']} at once)")
 
-            section("DISPATCHING while results are pending")
+            section("while results are pending (dispatch mode off)")
             shown = await get_session("src", db=db)
-            check(shown.status.value == "DISPATCHING" and shown.pending_joins == 3,
-                  f"GET reports DISPATCHING with 3 pending ({shown.status.value}, {shown.pending_joins})")
+            check(shown.status.value == "WAITING_USER" and shown.pending_joins == 3,
+                  f"GET reports 3 pending joins; status stays WAITING_USER ({shown.status.value}, {shown.pending_joins})")
             listed = {s.id: s for s in await list_sessions(db=db)}
-            check(listed["src"].status.value == "DISPATCHING", "the session list reports it too")
-            check((await db.get_session("src")).status.value == "WAITING_USER",
-                  "the stored status is untouched")
+            check(listed["src"].pending_joins == 3, "the session list reports them too")
             for label, call in (
                 ("POST /messages", lambda: post_message(
                     "src", PostMessageRequest(content="too early"), db=db, registry=registry)),
@@ -163,9 +161,9 @@ async def main() -> int:
                 try:
                     await call()
                 except HTTPException as e:
-                    check(e.status_code == 409 and "fork-dispatch" in e.detail, f"{label} -> 409 while dispatching")
+                    check(e.status_code == 409 and "joined back" in e.detail, f"{label} -> 409 while results are pending")
                 else:
-                    check(False, f"{label} accepted while dispatching")
+                    check(False, f"{label} accepted while results are pending")
             gate.set()
 
             async def all_joined():
@@ -246,12 +244,12 @@ async def main() -> int:
             check(order[slow_i + 1] == "end" and order.index("join") > slow_i + 1,
                   f"the join landed after the running turn's turn_end ({order[slow_i:]})")
 
-            section("deleting a pending branch ends DISPATCHING")
+            section("deleting a pending branch releases the source")
             gate.clear()
             r = await fork_dispatch("src", ForkDispatchRequest(messages=["task stuck"]), db=db, registry=registry)
             stuck = r["branches"][0]["session_id"]
             await asyncio.sleep(0.1)
-            check((await get_session("src", db=db)).status.value == "DISPATCHING", "dispatching on a stuck branch")
+            check((await get_session("src", db=db)).pending_joins == 1, "one join pending on a stuck branch")
             await delete_session(stuck, db=db, registry=registry)
             shown = await get_session("src", db=db)
             check(shown.status.value == "WAITING_USER" and shown.pending_joins == 0,

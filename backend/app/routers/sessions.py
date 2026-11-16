@@ -134,6 +134,10 @@ class DeriveSessionRequest(BaseModel):
     title: str | None = None
 
 
+class DispatchModeRequest(BaseModel):
+    enabled: bool
+
+
 class ForkDispatchRequest(BaseModel):
     # One branch per message, each running that message as its turn.
     messages: list[str]
@@ -762,6 +766,36 @@ async def get_compressed_messages(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.put("/{session_id}/dispatching", response_model=Session)
+async def set_dispatch_mode(
+    session_id: str,
+    body: DispatchModeRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Turn dispatch mode on or off.
+
+    On: every POST /messages runs in a new branch of this session (borrowing
+    its history as of then) and that branch's result is joined back; the
+    session reports status DISPATCHING while idle and runs no turns of its
+    own (typing into it, rewrite and compression are refused). Turning it on
+    needs an idle session. Off: back to ordinary turns; branches still
+    running keep joining their results, and the session takes new messages
+    once they are all in (pending_joins == 0).
+    """
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if body.enabled and not session.dispatch_mode:
+        _refuse_while_running(registry, session, "turn dispatch mode on")
+    if body.enabled != session.dispatch_mode:
+        session = await db.update_session_dispatch_mode(session_id, body.enabled)
+        logger.info("dispatch mode session=%s enabled=%s", session_id, body.enabled)
+        _announce_state(registry, session_id)
+    return await dispatching.view(db, session)
+
+
 @router.post("/{session_id}/fork-dispatch", status_code=202)
 async def fork_dispatch(
     session_id: str,
@@ -770,7 +804,7 @@ async def fork_dispatch(
     registry: AdapterRegistry = Depends(get_registry),
 ):
     """Run several messages concurrently, each in its own branch, and join the
-    results back.
+    results back (a batch of what POST /messages does in dispatch mode).
 
     Each message gets a branch borrowing this session's whole current history
     (see app.core.borrowed); its turn runs in parallel with the others. When
@@ -778,7 +812,8 @@ async def fork_dispatch(
     ran, else its last reply; a note if it failed) is appended to this
     session as a branch_summary row plus a turn_end mark, on this session's
     queue, in completion order. Expanding that row shows the branch's turn.
-    Branches share this session's working directory.
+    Branches share this session's working directory. Outside dispatch mode
+    it is one batch at a time (409 while a previous one is being joined).
     """
     messages = [m.strip() for m in body.messages]
     if not messages or any(not m for m in messages):
@@ -790,27 +825,19 @@ async def fork_dispatch(
         source = await db.get_session(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    # One dispatch at a time, and not over a running turn: the branches start
-    # from a settled history, and the results land on a session at rest.
-    await _refuse_while_dispatching(db, session_id)
-    try:
-        busy = registry.get(session_id).is_busy
-    except KeyError:
-        busy = False
-    if busy or source.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
-        raise HTTPException(status_code=409, detail="session is running; dispatch after the turn finishes")
-    # The cutoff is "now": each branch borrows everything persisted so far.
-    # A turn running in the source keeps writing after it; those rows aren't
-    # borrowed (the branches start from the history as of this call).
-    cutoff = datetime.now(timezone.utc)
+    # Not over a running turn: the branches start from a settled history. In
+    # dispatch mode it adds to whatever runs already (the session itself runs
+    # no turns then); otherwise one batch at a time.
+    _refuse_while_running(registry, source, "dispatch")
+    if not source.dispatch_mode:
+        pending = await dispatching.pending_for(db, session_id)
+        if pending:
+            raise HTTPException(status_code=409, detail=dispatching.PENDING_DETAIL.format(n=pending))
     branches = []
     for i, content in enumerate(messages):
         title = (body.titles[i].strip() if body.titles and body.titles[i].strip()
                  else f"{source.title or 'Session'} · 并行 {i + 1}")
-        branch = await _create_derived_session(
-            source, db, registry, title=title, cutoff=cutoff, join_into=True)
-        runner = registry.get(branch.id)
-        await runner.submit(content, turn_overrides=overrides)
+        branch = await _dispatch(source, db, registry, content, title=title, turn_overrides=overrides)
         branches.append({"session_id": branch.id, "title": branch.title, "message": content})
     logger.info("fork-dispatch session=%s branches=%s", session_id, [b["session_id"] for b in branches])
     _announce_state(registry, session_id)
@@ -907,10 +934,45 @@ async def delete_message(
     return {"deleted_ids": ids}
 
 
-async def _refuse_while_dispatching(db: IAgentDatabase, session_id: str) -> None:
-    pending = await dispatching.pending_for(db, session_id)
+async def _refuse_while_dispatching(db: IAgentDatabase, session: Session, action: str) -> None:
+    """409 for work that would run a turn (or rewrite history) in the session
+    itself: not in dispatch mode (it runs no turns of its own), and not while
+    dispatched results are still to be joined back."""
+    if session.dispatch_mode:
+        raise HTTPException(status_code=409, detail=dispatching.MODE_DETAIL.format(action=action))
+    pending = await dispatching.pending_for(db, session.id)
     if pending:
-        raise HTTPException(status_code=409, detail=dispatching.BUSY_DETAIL.format(n=pending))
+        raise HTTPException(status_code=409, detail=dispatching.PENDING_DETAIL.format(n=pending))
+
+
+def _refuse_while_running(registry: AdapterRegistry, session: Session, action: str) -> None:
+    try:
+        busy = registry.get(session.id).is_busy
+    except KeyError:
+        busy = False
+    if busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+        raise HTTPException(status_code=409, detail=f"session is running; {action} after the turn finishes")
+
+
+async def _dispatch(
+    source: Session,
+    db: IAgentDatabase,
+    registry: AdapterRegistry,
+    content: str,
+    *,
+    title: str,
+    images: list[dict] | None = None,
+    from_session_id: str | None = None,
+    turn_overrides: dict | None = None,
+) -> Session:
+    """Run `content` as the first turn of a new branch of `source` (borrowing
+    its history as of now); the result is joined back when the turn ends."""
+    branch = await _create_derived_session(
+        source, db, registry, title=title, cutoff=datetime.now(timezone.utc), join_into=True)
+    await registry.get(branch.id).submit(
+        content, from_session_id=from_session_id, images=images or None,
+        turn_overrides=turn_overrides)
+    return branch
 
 
 def _announce_state(registry: AdapterRegistry, session_id: str) -> None:
@@ -1009,7 +1071,7 @@ async def compress_session(
         raise HTTPException(status_code=404, detail=str(e))
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="manual compression is only supported for tool_use sessions")
-    await _refuse_while_dispatching(db, session_id)
+    await _refuse_while_dispatching(db, session, "compress it")
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -1038,7 +1100,18 @@ async def post_message(
     if not body.content.strip() and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
-    await _refuse_while_dispatching(db, session_id)
+    if session.dispatch_mode:
+        # Dispatch mode: this message runs in a new branch of the session and
+        # its result is joined back (app.core.dispatching).
+        stamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
+        branch = await _dispatch(
+            session, db, registry, body.content,
+            title=f"{session.title or 'Session'} · 并行 {stamp}",
+            images=images, from_session_id=body.from_session_id, turn_overrides=overrides)
+        logger.info("HTTP dispatch session=%s branch=%s len=%d", session_id, branch.id, len(body.content))
+        _announce_state(registry, session_id)
+        return {"status": "dispatched", "branch_session_id": branch.id}
+    await _refuse_while_dispatching(db, session, "send it messages")
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -1088,7 +1161,7 @@ async def retry_from_message(
     if not content and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
-    await _refuse_while_dispatching(db, session_id)
+    await _refuse_while_dispatching(db, session, "rewrite from a message")
     await db.soft_delete_messages_from(session_id, message_id)
 
     # Drop any in-memory context that still contains the deleted suffix, then
@@ -1191,10 +1264,11 @@ async def session_stream(
                 continue
             if not content.strip() and not images:
                 continue
-            pending = await dispatching.pending_for(db, session_id)
-            if pending:
-                await ws.send_text(json.dumps({
-                    "type": "error", "data": dispatching.BUSY_DETAIL.format(n=pending)}))
+            current = await db.get_session(session_id)
+            try:
+                await _refuse_while_dispatching(db, current, "type into it")
+            except HTTPException as e:
+                await ws.send_text(json.dumps({"type": "error", "data": e.detail}))
                 continue
             logger.info("WS recv session=%s len=%d images=%d", session_id, len(content), len(images))
             await runner.submit(content, images=images)

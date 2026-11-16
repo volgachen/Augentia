@@ -89,6 +89,7 @@ def _session(row: sqlite3.Row) -> Session:
         branched_cutoff_at=_dt(row["branched_cutoff_at"]),
         join_into_session_id=row["join_into_session_id"],
         joined_message_id=row["joined_message_id"],
+        dispatch_mode=bool(row["dispatch_mode"]),
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
@@ -211,6 +212,7 @@ class SqliteDatabase(IAgentDatabase):
                 branched_cutoff_at TEXT DEFAULT NULL,
                 join_into_session_id TEXT DEFAULT NULL,
                 joined_message_id TEXT DEFAULT NULL,
+                dispatch_mode INTEGER NOT NULL DEFAULT 0,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
                 system_prompt_id TEXT DEFAULT NULL,
@@ -329,6 +331,9 @@ class SqliteDatabase(IAgentDatabase):
                        "join_into_session_id", "joined_message_id"):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
+        if "dispatch_mode" not in session_columns:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN dispatch_mode INTEGER NOT NULL DEFAULT 0")
 
         plugin_log_columns = {
             row["name"] for row in self._conn.execute("PRAGMA table_info(plugin_logs)")
@@ -563,6 +568,16 @@ class SqliteDatabase(IAgentDatabase):
             "UPDATE sessions SET model = ?, model_params = ?, updated_at = ? "
             "WHERE id = ? AND deleted_at IS NULL",
             (model, _dump(model_params), _iso(now), session_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id)
+
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        now = datetime.now(timezone.utc)
+        cur = self._execute(
+            "UPDATE sessions SET dispatch_mode = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (1 if enabled else 0, _iso(now), session_id),
         )
         if cur.rowcount == 0:
             raise KeyError(f"Session '{session_id}' not found")

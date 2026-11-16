@@ -142,7 +142,7 @@ async def join_branch(branch_id: str, db: IAgentDatabase, registry: AdapterRegis
         row = await runner.run_between_turns(lambda: write_join(db, branch, template=template))
         if row is not None:
             runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=HISTORY_JOINED))
-            # Possibly the last pending result: DISPATCHING may have ended.
+            # Possibly the last pending result: pending_joins changed.
             runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=SESSION_CHANGED))
     if row is not None:
         try:

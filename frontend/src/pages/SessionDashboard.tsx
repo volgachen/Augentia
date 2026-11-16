@@ -48,6 +48,31 @@ interface Row {
   // Set when this session has a parent that isn't currently loaded in the
   // store; it's rendered as a root but we still hint at the missing parent.
   orphanParent: string | null;
+  // Branches dispatched from this session (results joined back into it),
+  // folded under its row; dispatched: this row is one of them.
+  dispatched?: Entry[];
+  dispatchedRow?: boolean;
+}
+
+// Branches made by dispatch (join_into_session_id) don't get rows of their
+// own: they are many and short-lived. They fold under the session they
+// join into; only those whose session isn't listed stay top-level.
+function splitDispatched(entries: Entry[]): { listed: Entry[]; byTarget: Map<string, Entry[]> } {
+  const ids = new Set(entries.map((e) => e.session.id));
+  const byTarget = new Map<string, Entry[]>();
+  const listed: Entry[] = [];
+  for (const e of entries) {
+    const target = e.session.join_into_session_id;
+    if (target && ids.has(target)) {
+      const arr = byTarget.get(target) ?? [];
+      arr.push(e);
+      byTarget.set(target, arr);
+    } else {
+      listed.push(e);
+    }
+  }
+  for (const arr of byTarget.values()) arr.sort(byUpdated);
+  return { listed, byTarget };
 }
 
 interface SessionDialogPlugin {
@@ -94,7 +119,8 @@ const byActiveThenUpdated = (a: Entry, b: Entry) =>
 // forest, `compare` ordering the roots and each sibling group. Children whose
 // parent is not among `entries` (closed, owned by another client, or in
 // another directory group) become roots so nothing is ever hidden.
-function buildForest(entries: Entry[], compare: (a: Entry, b: Entry) => number): Row[] {
+function buildForest(all: Entry[], compare: (a: Entry, b: Entry) => number): Row[] {
+  const { listed: entries, byTarget } = splitDispatched(all);
   const byId = new Map(entries.map((e) => [e.session.id, e]));
   const childrenOf = new Map<string, Entry[]>();
   for (const e of entries) {
@@ -123,6 +149,7 @@ function buildForest(entries: Entry[], compare: (a: Entry, b: Entry) => number):
       entry,
       depth,
       orphanParent: pid && !byId.has(pid) ? pid : null,
+      dispatched: byTarget.get(entry.session.id),
     });
     const kids = (childrenOf.get(entry.session.id) ?? []).slice().sort(compare);
     for (const kid of kids) walk(kid, depth + 1);
@@ -239,6 +266,16 @@ export default function SessionDashboard() {
       // Not remembered; still applies for this visit.
     }
   };
+  // Sessions whose dispatched branches are unfolded (folded by default).
+  const [openDispatched, setOpenDispatched] = useState<Set<string>>(() => new Set());
+  const toggleDispatched = (id: string) =>
+    setOpenDispatched((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   const toggleDir = (key: string) => {
     const next = new Set(collapsedDirs);
     if (next.has(key)) next.delete(key);
@@ -313,16 +350,23 @@ export default function SessionDashboard() {
   // Table body: plain rows by time, or rows under one header per directory.
   // A collapsed group keeps its header row and hides its sessions.
   type Item = { kind: "group"; group: DirGroup } | { kind: "row"; row: Row };
+  const withDispatched = (row: Row): Item[] => [
+    { kind: "row", row },
+    ...(row.dispatched && openDispatched.has(row.entry.session.id)
+      ? row.dispatched.map((entry): Item => ({
+          kind: "row",
+          row: { entry, depth: row.depth + 1, orphanParent: null, dispatchedRow: true },
+        }))
+      : []),
+  ];
   const dirGroups = sortMode === "dir" ? buildDirGroups(entries) : [];
   const items: Item[] =
     sortMode === "dir"
       ? dirGroups.flatMap((group): Item[] => [
           { kind: "group", group },
-          ...(collapsedDirs.has(group.key)
-            ? []
-            : group.rows.map((row): Item => ({ kind: "row", row }))),
+          ...(collapsedDirs.has(group.key) ? [] : group.rows.flatMap(withDispatched)),
         ])
-      : buildForest(entries, byUpdated).map((row): Item => ({ kind: "row", row }));
+      : buildForest(entries, byUpdated).flatMap(withDispatched);
   const allCollapsed = dirGroups.length > 0 && dirGroups.every((g) => collapsedDirs.has(g.key));
 
   const openSession = (sessionId: string) => {
@@ -454,7 +498,7 @@ export default function SessionDashboard() {
                   </tr>
                 );
               }
-              const { entry, depth, orphanParent } = item.row;
+              const { entry, depth, orphanParent, dispatched, dispatchedRow } = item.row;
               const { session } = entry;
               const active = isActive(entry);
               return (
@@ -543,6 +587,32 @@ export default function SessionDashboard() {
                       <span className="ml-1 text-[10px] text-gray-600 shrink-0">
                         ↳ from {orphanParent.slice(0, 8)}…
                       </span>
+                    )}
+                    {dispatchedRow && (
+                      <span
+                        className={`ml-1 text-[10px] shrink-0 ${
+                          session.joined_message_id ? "text-gray-600" : "text-sky-400"
+                        }`}
+                      >
+                        {session.joined_message_id ? "已拼回" : "处理中"}
+                      </span>
+                    )}
+                    {dispatched && dispatched.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleDispatched(session.id);
+                        }}
+                        className="ml-1 shrink-0 rounded border border-sky-900 px-1.5 py-0.5 text-[10px] text-sky-400/90 hover:border-sky-600 hover:text-sky-300"
+                        title="派发出去的分支（结果拼回这个会话）"
+                      >
+                        {openDispatched.has(session.id) ? "▾" : "▸"} 派发分支 {dispatched.length}
+                        {(() => {
+                          const running = dispatched.filter((d) => !d.session.joined_message_id).length;
+                          return running > 0 ? `（${running} 处理中）` : "";
+                        })()}
+                      </button>
                     )}
                   </span>
                 </td>

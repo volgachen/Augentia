@@ -15,10 +15,11 @@ class SessionStatus(str, Enum):
     WAITING_CONFIRM = "WAITING_CONFIRM"
     COMPLETED = "COMPLETED"
     ERROR = "ERROR"
-    # Never stored: reported (Session.status in API responses) while results
-    # of a fork-dispatch are still to be joined into this session, which then
-    # takes no new messages (409). The stored status is what the session
-    # itself is doing; see Session.pending_joins.
+    # Never stored: reported (Session.status in API responses) for a session
+    # whose dispatch mode is on (Session.dispatch_mode) while it is idle.
+    # Each message sent to it runs in a new branch whose result is joined
+    # back; Session.pending_joins says how many are still running. The
+    # stored status keeps saying what the session itself is doing.
     DISPATCHING = "DISPATCHING"
 
 
@@ -104,9 +105,12 @@ class Session(BaseModel):
     # until then the join is pending (and is retried after a restart).
     join_into_session_id: Optional[str] = None
     joined_message_id: Optional[str] = None
-    # Not stored: how many fork-dispatch branches of this session haven't been
-    # joined back yet (filled in by the API). While > 0, the reported status
-    # is DISPATCHING unless the session is itself busy (RUNNING / WAITING_CONFIRM).
+    # Dispatch mode (PUT /sessions/{id}/dispatching): every message sent to
+    # the session (POST /messages) runs in a new branch of it, and the
+    # branch's result is joined back. The session runs no turns of its own.
+    dispatch_mode: bool = False
+    # Not stored: how many branches dispatched from this session haven't been
+    # joined back yet (filled in by the API; 0 = all results are in).
     pending_joins: int = 0
     # Per-session add-ons to the AgentTemplate's base system_prompt. Persisted so
     # a session rehydrated after a backend restart sees the exact same effective

@@ -225,6 +225,7 @@ interface Store {
   closeSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   unlinkParent: (sessionId: string) => Promise<void>;
+  setDispatchMode: (sessionId: string, enabled: boolean) => Promise<void>;
   updateWorkingDir: (
     sessionId: string,
     workingDir: string,
@@ -304,8 +305,8 @@ export const useStore = create<Store>((set, get) => {
           frame.type === "tool_confirm"
             ? "WAITING_CONFIRM"
             : frame.type === "done"
-              // A turn ending while results are pending: still dispatching.
-              ? (entry.session.pending_joins ?? 0) > 0
+              // An idle session in dispatch mode reports DISPATCHING.
+              ? entry.session.dispatch_mode
                 ? "DISPATCHING"
                 : "WAITING_USER"
               : frame.type === "error"
@@ -640,6 +641,15 @@ export const useStore = create<Store>((set, get) => {
             [sessionId]: { ...entry, session: updated },
           },
         };
+      });
+    },
+
+    setDispatchMode: async (sessionId, enabled) => {
+      const updated = await api.sessions.setDispatchMode(sessionId, enabled);
+      set((s) => {
+        const entry = s.sessions[sessionId];
+        if (!entry) return s;
+        return { sessions: { ...s.sessions, [sessionId]: { ...entry, session: updated } } };
       });
     },
 

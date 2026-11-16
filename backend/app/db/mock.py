@@ -181,6 +181,12 @@ class MockMemoryDatabase(IAgentDatabase):
         session.updated_at = datetime.now(timezone.utc)
         return session
 
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        session = await self.get_session(session_id)
+        session.dispatch_mode = enabled
+        session.updated_at = datetime.now(timezone.utc)
+        return session
+
     async def pending_joins(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for s in self._sessions.values():
