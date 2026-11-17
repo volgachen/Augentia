@@ -136,6 +136,11 @@ class RetryMessageRequest(BaseModel):
 
 class DeriveSessionRequest(BaseModel):
     title: str | None = None
+    # The branch's own model / model_params, as in PUT /sessions/{id}/model.
+    # Each field independently: omitted keeps the source's value, null (or a
+    # blank model) uses the agent's, a value sets it.
+    model: str | None = None
+    model_params: dict | None = None
 
 
 class DispatchModeRequest(BaseModel):
@@ -178,13 +183,17 @@ async def _create_derived_session(
     cutoff: datetime | None = None,
     branched_from_message_id: str | None = None,
     join_into: bool = False,
+    model_override: tuple[str | None, dict | None] | None = None,
 ) -> Session:
     """A session continuing `source`'s history.
 
     With a cutoff (diverge) the branch copies nothing: it borrows the source's
     rows created before the cutoff, as they are now (see app.core.borrowed).
     Without one (sub-sessions that only share settings) it starts empty.
+    model_override: (model, model_params) for the branch instead of the
+    source's (see _derive_model).
     """
+    model, model_params = model_override or (source.model, source.model_params)
     agent = await db.get_agent(source.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="derived sessions currently support only tool_use sessions")
@@ -205,9 +214,10 @@ async def _create_derived_session(
         # Versions are immutable, so the branch shares the source's current
         # one; editing the branch's prompt later chains a version of its own.
         system_prompt_id=source.system_prompt_id,
-        # Same model as the source; the branch can change it on its own.
-        model=source.model,
-        model_params=source.model_params,
+        # The source's model unless the request picked one; the branch can
+        # change it on its own later.
+        model=model,
+        model_params=model_params,
     )
     try:
         await build_runner(target, agent, db, registry)
@@ -217,6 +227,23 @@ async def _create_derived_session(
         await registry.remove(target.id)
         await db.soft_delete_session(target.id)
         raise
+
+
+def _derive_model(body: DeriveSessionRequest, source: Session) -> tuple[str | None, dict | None]:
+    """The branch's (model, model_params): the source's for fields the request
+    omitted, else the request's (null: the agent's); 400 on bad params."""
+    sent = body.model_fields_set
+    model = source.model
+    if "model" in sent:
+        model = (body.model.strip() if body.model is not None else None) or None
+    params = source.model_params
+    if "model_params" in sent:
+        try:
+            params = (validate_model_params(body.model_params)
+                      if body.model_params is not None else None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return model, params
 
 
 @router.post("", response_model=Session, status_code=201)
@@ -888,12 +915,14 @@ async def diverge_from_message(
         cutoff = target.created_at
     else:
         raise HTTPException(status_code=400, detail="only user or agent messages or summaries can be used as a divergence point")
+    model_override = _derive_model(body, source)
     try:
         return await _create_derived_session(
             source, db, registry,
             title=body.title or f"{source.title or 'Session'} · Branch",
             cutoff=cutoff,
             branched_from_message_id=message_id,
+            model_override=model_override,
         )
     except HTTPException:
         raise
