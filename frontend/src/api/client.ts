@@ -19,10 +19,12 @@ import type {
   ToolInfo,
 } from "./types";
 
-// Use the same host the browser connected to, so the app works on any machine in the LAN.
-const API_HOST = `${window.location.hostname}:12598`;
-const BASE = `http://${API_HOST}/api/v1`;
-const WS_BASE = `ws://${API_HOST}/api/v1`;
+import { API_BASE, WS_API_BASE } from "./backend";
+
+// Backend address: see ./backend (default: this host, port 12598; changeable
+// in the settings dialog behind the "Augentia" title).
+const BASE = API_BASE;
+const WS_BASE = WS_API_BASE;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
