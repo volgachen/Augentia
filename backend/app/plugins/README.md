@@ -636,12 +636,13 @@ Agent 模板的 `agent.config.plugins.<id>` 是**新建会话时的初始值**�
 
 ## 13. 示例：微信插件
 
-> 已实现：`backend/plugins/wechat/`（`plugin.py`、`plugin.json`、`README.md`），下面是设计时的草图，实际代码在它的基础上有这些调整：
-> - 新增 `on_session_enabled` 推送初始的 “Scan to connect” 卡片；`on_session_disabled` 清掉联系人（见 §4）。
-> - 微信回调可能不在事件循环线程上，状态更新用 `loop.call_soon_threadsafe` 转回事件循环。
-> - 会话配置为 `command_prefix`、`message_prefix`、`reply_mode`；`reply_mode: every_reply` 时，由 `message.generated` Hook 额外转发工具调用前的文字。
-> - `\cmd status` / `\cmd help` 在微信里直接回复，不进入会话。
-> - 测试：`scripts/test_plugin_wechat.py`（用假的 `wechatbot` 模拟扫码、收发消息）。
+> 已实现：`backend/plugins/wechat/`（`plugin.py`、`plugin.json`、`README.md`）。下面是最初的草图（0.2 的每会话一个登录）；0.3 已改为：
+> - 一个账号级登录：`bridge` 改为全局服务（`autostart=True`，但只有 `state.json` 中 `auto_connect` 为真时才登录，所以连过一次后重启会自动重连），凭据放在 `ctx.data_dir`。
+> - 两个会话角色：**收件会话**（微信消息发进去，在会话卡片上设置，持久化）和**镜像会话**（该会话的每条 assistant 消息都转发到微信，默认没有）。镜像通过订阅 `message.created` 事件实现，不用 Hook，所以不依赖会话开关。
+> - 不再自动转发回复：去掉 `turn.end` / `message.generated` Hook 和 `reply_mode`，Agent 用 `wechat__send` 回复。
+> - 微信命令 `\cmd bind <会话>` 临时把收件和镜像都设为该会话，`\cmd unbind` 恢复原收件会话、取消镜像（只在内存中）。没有收件会话时，在微信里回复提示。
+> - `command_prefix`、`message_prefix` 改为全局配置；会话 schema 为空，只用开关决定卡片是否出现。
+> - 测试：`scripts/test_plugin_wechat.py`（用假的 `wechatbot` 模拟扫码、收发消息、重启重连）。
 
 ```python
 # ~/.augentia/plugins/wechat/plugin.py
