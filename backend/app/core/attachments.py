@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -24,7 +26,15 @@ from app.models.domain import AgentTemplate
 
 ATTACHMENT_PREFIX = "att:"
 _ID_RE = re.compile(r"^[0-9a-f]{64}$")
+logger = logging.getLogger(__name__)
+
 _DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+# Limits for images sent to the model (originals on disk are not modified).
+# Anthropic caps each image at 5 MB (5242880 bytes, base64 length) and
+# downscales anything over ~1568px anyway, so 2000px loses nothing useful.
+# We cap at 1 MB (base64 length) to keep requests with many images small.
+_MODEL_IMAGE_MAX_BYTES = 1_000_000
+_MODEL_IMAGE_MAX_SIDE = 2000
 _DETAILS = ("auto", "low", "high")
 # Upper bound on images per user turn; keeps one message from fanning out
 # into an enormous model request.
@@ -126,11 +136,114 @@ def attachment_from_ref(ref: str) -> Attachment:
         raise AttachmentError(f"image not found: {ref}") from None
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+def model_image_max_bytes() -> int:
+    """Max size of one image *as sent to the model* (base64-encoded length).
+
+    Default 1 MB; Anthropic (incl. Bedrock) hard-rejects images over 5 MB.
+    """
+    return _env_int("AUGENTIA_MODEL_IMAGE_MAX_BYTES", _MODEL_IMAGE_MAX_BYTES)
+
+
+def model_image_max_side() -> int:
+    """Longest edge (px) of an image sent to the model; 0 disables resizing."""
+    return _env_int("AUGENTIA_MODEL_IMAGE_MAX_SIDE", _MODEL_IMAGE_MAX_SIDE)
+
+
+def _b64_len(n: int) -> int:
+    return 4 * ((n + 2) // 3)
+
+
+def _shrink_for_model(data: bytes, mime: str, max_bytes: int, max_side: int) -> tuple[bytes, str]:
+    """Downscale / re-encode an image so it fits the model's limits.
+
+    Returns the original bytes untouched when already within limits.
+    """
+    from PIL import Image as PILImage, ImageOps  # local import: only needed here
+
+    with PILImage.open(io.BytesIO(data)) as img:
+        too_big = _b64_len(len(data)) > max_bytes
+        too_wide = max_side > 0 and max(img.size) > max_side
+        if not too_big and not too_wide:
+            return data, mime
+        img.seek(0)  # animated GIF/WebP: first frame only
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or (img.mode == "P" and "transparency" in img.info)
+        # Re-encoding drops EXIF, so bake the orientation into the pixels first
+        # (otherwise phone photos taken upright reach the model sideways).
+        frame = ImageOps.exif_transpose(img).convert("RGBA" if has_alpha else "RGB")
+
+    if too_wide:
+        frame.thumbnail((max_side, max_side), PILImage.LANCZOS)
+
+    def encode(im, fmt: str, **kw) -> bytes:
+        buf = io.BytesIO()
+        im.save(buf, format=fmt, **kw)
+        return buf.getvalue()
+
+    # Keep PNG for transparent images when that already fits.
+    if has_alpha:
+        out = encode(frame, "PNG", optimize=True)
+        if _b64_len(len(out)) <= max_bytes:
+            return out, "image/png"
+        background = PILImage.new("RGB", frame.size, (255, 255, 255))
+        background.paste(frame, mask=frame.getchannel("A"))
+        frame = background
+
+    # JPEG with decreasing quality, then decreasing resolution.
+    while True:
+        for quality in (90, 80, 70, 60, 50):
+            out = encode(frame, "JPEG", quality=quality, optimize=True)
+            if _b64_len(len(out)) <= max_bytes:
+                return out, "image/jpeg"
+        if max(frame.size) <= 256:
+            return out, "image/jpeg"  # give up shrinking further
+        frame = frame.resize((max(1, frame.width * 3 // 4), max(1, frame.height * 3 // 4)), PILImage.LANCZOS)
+
+
+def model_image_bytes(attachment: Attachment) -> tuple[bytes, str]:
+    """Bytes + mime of ``attachment`` sized for the model; cached on disk."""
+    max_bytes = model_image_max_bytes()
+    max_side = model_image_max_side()
+    data = attachment.path.read_bytes()
+    fits = _b64_len(len(data)) <= max_bytes
+    if fits and max_side <= 0:
+        return data, attachment.mime
+    cache_dir = attachments_dir() / "model"
+    for ext, mime in (("jpg", "image/jpeg"), ("png", "image/png")):
+        cached = cache_dir / f"{attachment.id}.{max_bytes}.{max_side}.{ext}"
+        if cached.is_file():
+            return cached.read_bytes(), mime
+    try:
+        out, mime = _shrink_for_model(data, attachment.mime, max_bytes, max_side)
+    except Exception:
+        logger.exception("could not shrink image %s for the model", attachment.id)
+        return data, attachment.mime
+    if out is not data:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached = cache_dir / f"{attachment.id}.{max_bytes}.{max_side}.{_EXT_BY_MIME[mime]}"
+        tmp = cached.with_suffix(cached.suffix + ".tmp")
+        tmp.write_bytes(out)
+        tmp.replace(cached)
+    return out, mime
+
+
 def data_url(ref: str) -> str:
-    """Resolve an ``att:`` reference into a data URL the model can read."""
+    """Resolve an ``att:`` reference into a data URL the model can read.
+
+    Oversized images are downscaled/re-encoded (see ``model_image_bytes``);
+    the stored original is left untouched.
+    """
     attachment = attachment_from_ref(ref)
-    encoded = base64.b64encode(attachment.path.read_bytes()).decode("ascii")
-    return f"data:{attachment.mime};base64,{encoded}"
+    data, mime = model_image_bytes(attachment)
+    encoded = base64.b64encode(data).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 # ---- turn-level validation ----
