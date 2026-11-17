@@ -1,12 +1,16 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { useAuthStore } from "../store/auth";
+import { BACKEND_ORIGIN } from "../api/backend";
+import BackendSettings from "../components/BackendSettings";
 
 export default function Login() {
   const login = useAuthStore((state) => state.login);
   const error = useAuthStore((state) => state.error);
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  // Reachable here too: with a wrong backend address the app never gets past login.
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -28,8 +32,20 @@ export default function Login() {
         onSubmit={handleSubmit}
         className="w-full max-w-sm rounded-xl border border-gray-800 bg-gray-900 p-6 shadow-xl"
       >
-        <h1 className="mb-1 text-xl font-semibold text-white">Augentia</h1>
+        <h1 className="mb-1 text-xl font-semibold text-white">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            title="设置后端地址"
+            className="hover:text-indigo-300 transition-colors"
+          >
+            Augentia
+          </button>
+        </h1>
         <p className="mb-6 text-sm text-gray-500">请输入访问密码</p>
+        <p className="-mt-5 mb-6 text-xs text-gray-600 font-mono break-all">
+          后端：{BACKEND_ORIGIN}
+        </p>
         <label className="block text-xs font-medium text-gray-400" htmlFor="password">
           Password
         </label>
@@ -51,6 +67,7 @@ export default function Login() {
           {submitting ? "登录中…" : "登录"}
         </button>
       </form>
+      {settingsOpen && <BackendSettings onClose={() => setSettingsOpen(false)} />}
     </main>
   );
 }

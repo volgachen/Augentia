@@ -1,9 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useStore } from "./store/sessions";
 import { useAuthStore } from "./store/auth";
 import { usePluginStore } from "./store/plugins";
+import { BACKEND_ORIGIN } from "./api/backend";
 import ActiveSessionsMenu from "./components/ActiveSessionsMenu";
+import BackendSettings from "./components/BackendSettings";
 import ToastCenter from "./components/ToastCenter";
 
 const NAV = [
@@ -25,6 +27,7 @@ export default function App() {
   // Highlight the session we're viewing (if the current route is a console).
   const match = useLocation().pathname.match(/^\/console\/(.+)$/);
   const currentSessionId = match?.[1];
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   useEffect(() => {
     setActiveSession(currentSessionId ?? null);
@@ -34,7 +37,14 @@ export default function App() {
     <div className="h-screen overflow-hidden bg-gray-950 text-gray-100 flex flex-col">
       {/* Top nav */}
       <nav className="shrink-0 border-b border-gray-800 px-6 py-3 flex items-center gap-6">
-        <span className="font-semibold text-white tracking-tight">Augentia</span>
+        <button
+          type="button"
+          onClick={() => setSettingsOpen(true)}
+          title={`设置（后端：${BACKEND_ORIGIN}）`}
+          className="font-semibold text-white tracking-tight hover:text-indigo-300 transition-colors"
+        >
+          Augentia
+        </button>
         <div className="flex gap-1">
           {NAV.map(({ to, label, end }) => (
             <NavLink
@@ -82,6 +92,7 @@ export default function App() {
         <Outlet />
       </main>
       <ToastCenter />
+      {settingsOpen && <BackendSettings onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }
