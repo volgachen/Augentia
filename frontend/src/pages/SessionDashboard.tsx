@@ -1,5 +1,5 @@
 import { useNavigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useStore } from "../store/sessions";
 import { api } from "../api/client";
 import type { AgentTemplate, Session, SessionStatus } from "../api/types";
