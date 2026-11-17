@@ -9,7 +9,8 @@ Covers:
   - model_params replaces the agent's config.model_params as a whole
   - validation: reserved keys / non-object params -> 400; unknown session 404
   - busy session -> 409
-  - diverge: the branch starts with the source's model
+  - diverge: the branch starts with the source's model unless the request
+    sets model / model_params (each on its own; null -> the agent's)
   - the value survives a rehydrate (runner rebuilt from the database)
 
 Run from backend/:  python scripts/test_session_model.py
@@ -122,6 +123,36 @@ def main() -> None:
             branch = r.json()
             check(r.status_code == 201 and branch["model"] == "kept-model" and branch["model_params"] == {},
                   f"branch starts on the source's model ({branch.get('model')}, {branch.get('model_params')})")
+
+            section("diverge with its own model")
+            diverge = f"{API}/{sid}/messages/{user['id']}/diverge"
+            r = c.post(diverge, json={"model": " branch-model ", "model_params": {"temperature": 0.1}})
+            b = r.json()
+            check(r.status_code == 201 and b["model"] == "branch-model"
+                  and b["model_params"] == {"temperature": 0.1},
+                  f"both set -> branch uses them, model trimmed ({b.get('model')}, {b.get('model_params')})")
+            before = len(CALLS)
+            c.post(f"{API}/{b['id']}/messages", json={"content": "in branch"})
+            deadline = time.time() + 15
+            while time.time() < deadline and not (
+                    len(CALLS) > before and c.get(f"{API}/{b['id']}").json()["status"] == "WAITING_USER"):
+                time.sleep(0.05)
+            check(CALLS[before:] == [{"model": "branch-model", "params": {"temperature": 0.1}}],
+                  f"the branch's first turn calls that model ({CALLS[before:]})")
+            check(c.get(f"{API}/{sid}").json()["model"] == "kept-model", "source unchanged")
+            b = c.post(diverge, json={"model": "only-model"}).json()
+            check(b["model"] == "only-model" and b["model_params"] == {},
+                  f"model only -> params kept from the source ({b.get('model_params')})")
+            b = c.post(diverge, json={"model_params": {"top_p": 0.2}}).json()
+            check(b["model"] == "kept-model" and b["model_params"] == {"top_p": 0.2},
+                  f"params only -> model kept from the source ({b.get('model')})")
+            b = c.post(diverge, json={"model": None, "model_params": None}).json()
+            check(b["model"] is None and b["model_params"] is None,
+                  f"null/null -> the agent's ({b.get('model')}, {b.get('model_params')})")
+            n_sessions = len(c.get(API).json())
+            r = c.post(diverge, json={"model_params": {"tool_choice": "auto"}})
+            check(r.status_code == 400 and "tool_choice" in r.json()["detail"], f"reserved key -> 400 ({r.status_code})")
+            check(len(c.get(API).json()) == n_sessions, "rejected diverge created no session")
 
             section("reset to the agent")
             r = c.put(f"{API}/{sid}/model", json={"model": None, "model_params": None})

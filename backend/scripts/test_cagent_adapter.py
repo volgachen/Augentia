@@ -389,7 +389,7 @@ async def test_turn_compression(db, wd) -> bool:
 
     async def model(*, messages, tools, tool_choice=None):
         seen.append(messages)
-        if "Summarize part of a conversation" in summary_instruction(messages):
+        if summary_instruction(messages).startswith("Summarize"):
             return {"content": "User asked to read notes.txt; it says hello."}
         if any(m["role"] == "tool" for m in messages):
             return {"content": "notes.txt says hello"}
@@ -474,14 +474,15 @@ async def test_turn_compression(db, wd) -> bool:
 async def test_turn_compression_marker(db, wd) -> bool:
     section("CAgent engine: config.turn_compression_marker sets the summarizer's start marker")
     import app.adapters.cagent_adapter as cagent_adapter_module
+    from app.adapters.cagent_agent import NO_MARKER_TURN_COMPRESSION_INSTRUCTION
     from cagent import BaseAgent
 
     async def run_case(label, config):
-        """Run one tool-heavy turn; return the summarizer's start-marker content."""
+        """Run one tool-heavy turn; return (message before the request, instruction)."""
         summarizer_calls = []
 
         async def model(*, messages, tools, tool_choice=None):
-            if "Summarize part of a conversation" in summary_instruction(messages):
+            if summary_instruction(messages).startswith("Summarize"):
                 summarizer_calls.append(messages)
                 return {"content": "User asked to read notes.txt; it says hello."}
             if any(m["role"] == "tool" for m in messages):
@@ -524,26 +525,40 @@ async def test_turn_compression_marker(db, wd) -> bool:
         if len(summarizer_calls) != 1:
             fail(f"[{label}] expected one summarizer call, got {len(summarizer_calls)}")
             return None
-        # Summarizer history: [system, <marker>, user request, assistant, tool, ..., instruction]
+        # Summarizer history: [system, [<marker>], user request, assistant, tool, ..., instruction]
         # (the turn start mark is placed before the turn's input message).
         sent = summarizer_calls[0]
         request = next(i for i, m in enumerate(sent)
                        if m["role"] == "user" and m["content"] == "read notes.txt")
-        marker = sent[request - 1]
-        if marker["role"] != "user":
-            fail(f"[{label}] message before the request is not the marker: {marker}")
-            return None
-        return marker["content"]
+        return sent[request - 1], sent[-1]["content"]
 
-    for label, config, expected in (
-            ("default", {}, BaseAgent.TURN_COMPRESSION_MARKER),
-            ("custom", {"turn_compression_marker": "从这里开始压缩"}, "从这里开始压缩"),
-            ("empty", {"turn_compression_marker": ""}, "")):
-        got = await run_case(label, config)
-        if got != expected:
-            fail(f"[{label}] marker content={got!r}, expected {expected!r}")
+    custom_instruction = "Summarize this turn briefly."
+    for label, config, marker, instruction in (
+            ("default", {}, None, NO_MARKER_TURN_COMPRESSION_INSTRUCTION),
+            ("empty", {"turn_compression_marker": ""}, None,
+             NO_MARKER_TURN_COMPRESSION_INSTRUCTION),
+            ("custom", {"turn_compression_marker": "从这里开始压缩"}, "从这里开始压缩",
+             BaseAgent.TURN_COMPRESSION_INSTRUCTION),
+            ("custom-instruction-no-marker",
+             {"turn_compression_instruction": custom_instruction}, None, custom_instruction)):
+        result = await run_case(label, config)
+        if result is None:
             return False
-    ok("turn_compression_marker: unset -> CAgent default; custom and empty string honored")
+        before, sent_instruction = result
+        if marker is None:
+            # No marker message: the turn's request directly follows the system
+            # prompt (this is the session's first turn).
+            if before["role"] != "system":
+                fail(f"[{label}] expected no marker message, found {before!r}")
+                return False
+        elif before != {"role": "user", "content": marker}:
+            fail(f"[{label}] marker message={before!r}, expected {marker!r}")
+            return False
+        if sent_instruction != instruction:
+            fail(f"[{label}] instruction={sent_instruction[:60]!r}, expected {instruction[:60]!r}")
+            return False
+    ok("turn_compression_marker: unset or \"\" -> no marker message and the marker-free "
+       "default instruction; a custom marker is inserted with CAgent's instruction")
     return True
 
 
@@ -833,7 +848,7 @@ async def test_response_metadata(db, wd) -> bool:
         async def create(self, **kwargs):
             calls.append(kwargs)
             n = len(calls)
-            is_summary = "Summarize part of a conversation" in summary_instruction(kwargs["messages"])
+            is_summary = summary_instruction(kwargs["messages"]).startswith("Summarize")
             if is_summary:
                 message = NS(content="SUMMARY", tool_calls=None)
             elif any(m["role"] == "tool" for m in kwargs["messages"]):

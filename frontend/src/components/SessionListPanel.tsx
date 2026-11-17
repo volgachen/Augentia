@@ -1,13 +1,16 @@
 import { useState } from "react";
 import type { Session, SessionStatus } from "../api/types";
+import { statusLabel, statusTitle } from "./statusLabel";
 
 const STATUS_DOT: Record<SessionStatus, string> = {
   INITIALIZING: "bg-yellow-400",
   RUNNING: "bg-green-400",
   WAITING_USER: "bg-blue-400",
   WAITING_CONFIRM: "bg-orange-400",
+  COMPRESSING: "bg-purple-400",
   COMPLETED: "bg-gray-500",
   ERROR: "bg-red-400",
+  DISPATCHING: "bg-sky-400",
 };
 
 function isSocketLive(socket: WebSocket | null): boolean {
@@ -63,8 +66,8 @@ export default function SessionListPanel({
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-300">
                     {session.title?.trim() || `${session.id.slice(0, 8)}…`}
                   </span>
-                  <span className="shrink-0 text-[10px] text-gray-500">
-                    {session.status}
+                  <span className="shrink-0 text-[10px] text-gray-500" title={statusTitle(session)}>
+                    {statusLabel(session)}
                   </span>
                 </button>
               </li>

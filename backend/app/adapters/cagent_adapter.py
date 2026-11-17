@@ -21,12 +21,13 @@ it onto Augentia's adapter/stream contract:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
 
@@ -46,6 +47,8 @@ from app.core import attachments
 from app.plugins.hooks import HookFailed, HookRejected, HookRunner
 from app.plugins.host import get_plugin_host
 from app.plugins.sdk import IncomingMessage, ModelRequest, ToolCall, TurnSummary
+from app.models.domain import SessionStatus
+from app.core.borrowed import aware as attachments_aware
 
 logger = logging.getLogger("augentia.adapter.cagent")
 
@@ -55,6 +58,10 @@ _FROM_SESSION_RE = re.compile(r"^\[from-session:([^\]]+)\]\s")
 _DEFAULT_MAX_STEPS = 50
 # STATUS payload after a turn that compressed history (clients reload it).
 HISTORY_COMPRESSED = "history_compressed"
+# STATUS events around a summarizer call (the stored status is COMPRESSING
+# in between); clients show it instead of RUNNING.
+COMPRESSING_STARTED = "compressing"
+COMPRESSING_ENDED = "compressing_done"
 # Screenshots arrive every step in browser sessions; only the newest few are
 # worth re-sending each turn. config.tool_image_limit overrides (null = all).
 _DEFAULT_TOOL_IMAGE_LIMIT = 3
@@ -228,6 +235,12 @@ class CAgentAdapter(BaseAgentAdapter):
         self._pending_metadata: dict | None = None
         self._pending_confirms: dict[str, tuple[asyncio.Future, str]] = {}
         self._events: asyncio.Queue | None = None
+        # Broadcasts a STATUS event outside a turn (manual compression); set
+        # by the SessionRunner that owns this adapter.
+        self.on_status = None
+        # A manual compression's upper bound (see compress(until=...)); read
+        # by the agent class's select_compression_range.
+        self.compress_until: datetime | None = None
         self._turn_task: asyncio.Task | None = None
         self._announced_assistant_id: str | None = None
         self._call_info: dict[str, dict] = {}
@@ -334,6 +347,7 @@ class CAgentAdapter(BaseAgentAdapter):
             # Always set: with None CAgent would summarize through the hooked
             # agent model. (Same callable as before hooks existed otherwise.)
             compression_model=self._compression_model,
+            borrowed_ids=lambda: self._store.borrowed_ids if self._store is not None else set(),
         )
         self._alive = True
         logger.info(
@@ -578,13 +592,62 @@ class CAgentAdapter(BaseAgentAdapter):
         if self._agent_cls is not None:
             self._agent_cls.SYSTEM_PROMPT = system_prompt or "You are a helpful assistant."
 
+    @contextlib.asynccontextmanager
+    async def compressing(self):
+        """Report COMPRESSING while the summarizer runs, then the prior status.
+
+        Clients hear a STATUS event at both ends: on the turn's event queue
+        during a turn, else through on_status (set by the runner, for a
+        manual compression).
+        """
+        db = self._db
+        session_id = self.session_id
+        prior = None
+        if db is not None and session_id:
+            try:
+                prior = (await db.get_session(session_id)).status
+                await db.update_session_status(session_id, SessionStatus.COMPRESSING)
+            except KeyError:
+                prior = None
+        await self._status_event(COMPRESSING_STARTED)
+        try:
+            yield
+        finally:
+            if prior is not None:
+                try:
+                    await db.update_session_status(session_id, prior)
+                except KeyError:
+                    pass
+            await self._status_event(COMPRESSING_ENDED)
+
+    async def _summary_slot(self, since: datetime, until: datetime) -> datetime | None:
+        """Where a range summary bounded by `until` goes: just after the last
+        row before `until` (1 ms later), so rows from `until` on follow it.
+        None (now) when nothing precedes `until`."""
+        rows = await self._db.get_messages(self.session_id)
+        before = [m.created_at for m in rows
+                  if attachments_aware(m.created_at) < until]
+        if not before:
+            return None
+        return attachments_aware(max(before)) + timedelta(milliseconds=1)
+
+    async def _status_event(self, data: str) -> None:
+        if self._turn_task is not None and self._events is not None:
+            await self._emit(StreamEventType.STATUS, data)
+        elif self.on_status is not None:
+            self.on_status(StreamEvent(type=StreamEventType.STATUS, data=data))
+
     async def compress(self, *, since: datetime | None = None,
-                       instruction: str | None = None) -> dict:
+                       instruction: str | None = None,
+                       until: datetime | None = None) -> dict:
         """Manually compress this session's history in place (CAgent compress_session).
 
         Same summarizer and image handling as threshold-triggered compression.
         since limits it to the turns from that time on (a range_summary row,
         earlier history kept); instruction replaces the summarizer instruction.
+        until (needs since) stops at the last turn that ended before it: later
+        turns stay as they are, and the summary row is placed right after the
+        turns it covers, before them.
         The caller (SessionRunner) guarantees no turn is running.
         Returns {"status": "compressed"|"skipped"|"failed", "kind", "reason", tokens...}.
         """
@@ -594,6 +657,11 @@ class CAgentAdapter(BaseAgentAdapter):
         # no such parameters, and plain compression must keep working there.
         options = {k: v for k, v in (("since", since), ("instruction", instruction))
                    if v is not None}
+        if until is not None:
+            if since is None:
+                return {"status": "failed", "reason": "until needs since"}
+            self.compress_until = until
+            self._store.pending_summary_at = await self._summary_slot(since, until)
         try:
             ctx = await self._agent_cls.compress_session(
                 session_id=self.session_id, store=self._store, model=self._compression_model,
@@ -601,6 +669,9 @@ class CAgentAdapter(BaseAgentAdapter):
             )
         except ValueError as exc:
             return {"status": "skipped", "reason": str(exc)}
+        finally:
+            self.compress_until = None
+            self._store.pending_summary_at = None
         if ctx.compression_applied:
             kind = getattr(ctx, "compression_kind", None) or "session"
             role, name = (("user", "range_summary") if kind == "range"

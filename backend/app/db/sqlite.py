@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.core.compressed import plain_copy_fields
+from app.core.borrowed import aware
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import SEED_AGENT_ROWS
 from app.models.domain import (
@@ -82,6 +82,12 @@ def _session(row: sqlite3.Row) -> Session:
     return Session(
         id=row["id"], agent_id=row["agent_id"], title=row["title"],
         working_dir=row["working_dir"], parent_session_id=row["parent_session_id"],
+        branched_from_session_id=row["branched_from_session_id"],
+        branched_from_message_id=row["branched_from_message_id"],
+        branched_cutoff_at=_dt(row["branched_cutoff_at"]),
+        join_into_session_id=row["join_into_session_id"],
+        joined_message_id=row["joined_message_id"],
+        dispatch_mode=bool(row["dispatch_mode"]),
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
@@ -187,6 +193,12 @@ class SqliteDatabase(IAgentDatabase):
                 title TEXT DEFAULT NULL,
                 working_dir TEXT DEFAULT NULL,
                 parent_session_id TEXT DEFAULT NULL,
+                branched_from_session_id TEXT DEFAULT NULL,
+                branched_from_message_id TEXT DEFAULT NULL,
+                branched_cutoff_at TEXT DEFAULT NULL,
+                join_into_session_id TEXT DEFAULT NULL,
+                joined_message_id TEXT DEFAULT NULL,
+                dispatch_mode INTEGER NOT NULL DEFAULT 0,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
                 system_prompt_id TEXT DEFAULT NULL,
@@ -274,9 +286,14 @@ class SqliteDatabase(IAgentDatabase):
             row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")
         }
         self._migrate_system_prompts(session_columns)
-        for column in ("model", "model_params"):
+        for column in ("model", "model_params", "branched_from_session_id",
+                       "branched_from_message_id", "branched_cutoff_at",
+                       "join_into_session_id", "joined_message_id"):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
+        if "dispatch_mode" not in session_columns:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN dispatch_mode INTEGER NOT NULL DEFAULT 0")
 
         # v1 plugin tables (instances / runs / logs), replaced by the
         # plugin_service_* tables; they only held test data.
@@ -431,6 +448,10 @@ class SqliteDatabase(IAgentDatabase):
             additional_prompt_path=kwargs.get("additional_prompt_path"),
             model=kwargs.get("model"),
             model_params=kwargs.get("model_params"),
+            branched_from_session_id=kwargs.get("branched_from_session_id"),
+            branched_from_message_id=kwargs.get("branched_from_message_id"),
+            branched_cutoff_at=kwargs.get("branched_cutoff_at"),
+            join_into_session_id=kwargs.get("join_into_session_id"),
         )
         if not session.title:
             session.title = f"{agent.name} · {session.created_at:%H:%M}"
@@ -441,19 +462,25 @@ class SqliteDatabase(IAgentDatabase):
                     kwargs["system_prompt_snapshot"], None, _iso(session.created_at))
             self._conn.execute(
                 """INSERT INTO sessions
-                   (id, agent_id, title, working_dir, parent_session_id, additional_prompt,
-                    additional_prompt_path, system_prompt_id, model, model_params, status,
-                    created_at, updated_at, last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id, agent_id, title, working_dir, parent_session_id,
+                    branched_from_session_id, branched_from_message_id, branched_cutoff_at,
+                    join_into_session_id, additional_prompt, additional_prompt_path,
+                    system_prompt_id, model, model_params, status, created_at, updated_at,
+                    last_message_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session.id, session.agent_id, session.title, session.working_dir,
-                 session.parent_session_id, session.additional_prompt, session.additional_prompt_path,
+                 session.parent_session_id, session.branched_from_session_id,
+                 session.branched_from_message_id, _iso(session.branched_cutoff_at),
+                 session.join_into_session_id,
+                 session.additional_prompt, session.additional_prompt_path,
                  prompt_id, session.model, _dump(session.model_params), session.status.value, _iso(session.created_at),
                  _iso(session.updated_at), _iso(session.last_message_at)),
             )
         return await self.get_session(session.id)
 
-    async def get_session(self, session_id: str) -> Session:
-        row = self._row(f"{_SESSION_SELECT} WHERE s.id = ? AND s.deleted_at IS NULL", (session_id,))
+    async def get_session(self, session_id: str, *, include_deleted: bool = False) -> Session:
+        live = "" if include_deleted else " AND s.deleted_at IS NULL"
+        row = self._row(f"{_SESSION_SELECT} WHERE s.id = ?{live}", (session_id,))
         if row is None:
             raise KeyError(f"Session '{session_id}' not found")
         return _session(row)
@@ -499,6 +526,30 @@ class SqliteDatabase(IAgentDatabase):
             raise KeyError(f"Session '{session_id}' not found")
         return await self.get_session(session_id)
 
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        now = datetime.now(timezone.utc)
+        cur = self._execute(
+            "UPDATE sessions SET dispatch_mode = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL",
+            (1 if enabled else 0, _iso(now), session_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id)
+
+    async def pending_joins(self) -> dict[str, int]:
+        rows = self._rows(
+            "SELECT join_into_session_id AS target, COUNT(*) AS n FROM sessions "
+            "WHERE join_into_session_id IS NOT NULL AND joined_message_id IS NULL "
+            "AND deleted_at IS NULL GROUP BY join_into_session_id")
+        return {r["target"]: r["n"] for r in rows}
+
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        cur = self._execute(
+            "UPDATE sessions SET joined_message_id = ? WHERE id = ?", (message_id, session_id))
+        if cur.rowcount == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id, include_deleted=True)
+
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         now = datetime.now(timezone.utc)
         cur = self._execute(
@@ -543,6 +594,8 @@ class SqliteDatabase(IAgentDatabase):
             from_session_id=kwargs.get("from_session_id"),
             metadata=dict(kwargs.get("metadata") or {}),
         )
+        if kwargs.get("created_at") is not None:
+            message.created_at = aware(kwargs["created_at"]).astimezone(timezone.utc)
         self._execute(
             """INSERT INTO messages
                (id, session_id, role, content, from_session_id, metadata, created_at)
@@ -550,7 +603,12 @@ class SqliteDatabase(IAgentDatabase):
             (message.id, message.session_id, message.role.value, message.content,
              message.from_session_id, _metadata_json(message.metadata), _iso(message.created_at)),
         )
-        self._execute("UPDATE sessions SET last_message_at = ? WHERE id = ?", (_iso(message.created_at), session_id))
+        # Only forward: a row placed earlier in time (created_at=) isn't the
+        # latest activity.
+        self._execute(
+            "UPDATE sessions SET last_message_at = ? WHERE id = ? "
+            "AND (last_message_at IS NULL OR last_message_at < ?)",
+            (_iso(message.created_at), session_id, _iso(message.created_at)))
         await get_plugin_event_bus().publish(PluginEvent(
             type="message.created",
             source=message.from_session_id or "augentia",
@@ -558,56 +616,21 @@ class SqliteDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> list[Message]:
-        await self.get_session(session_id)
-        live = "" if include_deleted else " AND deleted_at IS NULL"
+    async def get_own_messages(
+        self, session_id: str, *, include_deleted: bool = False,
+        before: datetime | None = None,
+    ) -> list[Message]:
+        where = "" if include_deleted else " AND deleted_at IS NULL"
+        params: list[Any] = [session_id]
+        if before is not None:
+            # Stored as UTC ISO strings of one shape, so they compare as text.
+            where += " AND created_at < ?"
+            params.append(_iso(aware(before).astimezone(timezone.utc)))
         rows = self._rows(
-            f"SELECT * FROM messages WHERE session_id = ?{live} ORDER BY created_at, id",
-            (session_id,),
+            f"SELECT * FROM messages WHERE session_id = ?{where} ORDER BY created_at, id",
+            params,
         )
         return [_message(r) for r in rows]
-
-    async def clone_messages(
-        self,
-        source_session_id: str,
-        target_session_id: str,
-        *,
-        before_message_id: str | None = None,
-    ) -> list[Message]:
-        await self.get_session(source_session_id)
-        await self.get_session(target_session_id)
-        source = await self.get_messages(source_session_id)
-        if before_message_id is not None:
-            index = next((i for i, message in enumerate(source) if message.id == before_message_id), None)
-            if index is None:
-                raise KeyError(f"Message '{before_message_id}' not found")
-            source = source[:index]
-        cloned: list[Message] = []
-        with self._conn:
-            for original in source:
-                role, content, metadata = plain_copy_fields(original)
-                message = Message(
-                    session_id=target_session_id,
-                    role=role,
-                    content=content,
-                    from_session_id=original.from_session_id,
-                    metadata=metadata,
-                    created_at=original.created_at,
-                )
-                self._execute(
-                    """INSERT INTO messages
-                       (id, session_id, role, content, from_session_id, metadata, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (message.id, message.session_id, message.role.value, message.content,
-                     message.from_session_id, _metadata_json(message.metadata),
-                     _iso(message.created_at)),
-                )
-                cloned.append(message)
-            self._execute(
-                "UPDATE sessions SET last_message_at = ? WHERE id = ?",
-                (_iso(cloned[-1].created_at) if cloned else None, target_session_id),
-            )
-        return cloned
 
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)

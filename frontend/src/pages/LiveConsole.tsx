@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { messageToEvent, useStore } from "../store/sessions";
 import { CompressedLoaderContext } from "../components/console/compressedLoader";
 import { api } from "../api/client";
@@ -15,13 +15,26 @@ import SystemPromptPanel from "../components/SystemPromptPanel";
 import ShareButton from "../components/ShareButton";
 import WorkingDirEditor from "../components/WorkingDirEditor";
 import ModelEditor from "../components/ModelEditor";
+import BranchIcon from "../components/BranchIcon";
 import { AttachmentTray } from "../components/ImageAttachments";
 import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAttachments";
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
-import { buildConsoleItems, isToolCallView, itemMessageId } from "../components/console/items";
+import {
+  buildConsoleItems,
+  isToolCallView,
+  itemBorrowedFrom,
+  itemMessageId,
+  itemMessageIds,
+} from "../components/console/items";
+import { statusLabel, statusTitle } from "../components/statusLabel";
 
 export default function LiveConsole() {
   const { sessionId } = useParams<{ sessionId: string }>();
+  // ?m=<message id>: scroll to that message once it is loaded (the "branched
+  // from" link of a branch points at its divergence point this way).
+  const [searchParams] = useSearchParams();
+  const jumpTarget = searchParams.get("m");
+  const jumpedFor = useRef<string | null>(null);
   const navigate = useNavigate();
   const sessions = useStore((s) => s.sessions);
   const sendMessage = useStore((s) => s.sendMessage);
@@ -30,6 +43,8 @@ export default function LiveConsole() {
   const divergeFromMessage = useStore((s) => s.divergeFromMessage);
   const deleteMessage = useStore((s) => s.deleteMessage);
   const setShowDeleted = useStore((s) => s.setShowDeleted);
+  const setDispatchMode = useStore((s) => s.setDispatchMode);
+  const [modeError, setModeError] = useState<{ scope: string; text: string } | null>(null);
   const compressSession = useStore((s) => s.compressSession);
   const resolveConfirm = useStore((s) => s.resolveConfirm);
   const openSession = useStore((s) => s.openSession);
@@ -98,10 +113,28 @@ export default function LiveConsole() {
     if (sessionId) openSession(sessionId);
   }, [sessionId, openSession]);
 
+  // Scroll to ?m= once its row has rendered (history may still be loading).
+  const eventsLoaded = entry?.events.length ?? 0;
   useEffect(() => {
-    if (!autoScroll) return;
+    if (!sessionId || !jumpTarget) return;
+    const key = `${sessionId}/${jumpTarget}`;
+    if (jumpedFor.current === key) return;
+    const index = buildConsoleItems(entry?.events ?? []).findIndex((item) =>
+      itemMessageIds(item).includes(jumpTarget),
+    );
+    if (index < 0) return;
+    const node = itemRefs.current[index];
+    if (!node) return;
+    jumpedFor.current = key;
+    setFocusedItemIndex(index);
+    node.scrollIntoView({ block: "center" });
+  }, [sessionId, jumpTarget, eventsLoaded, entry?.events]);
+
+  useEffect(() => {
+    // Opened at a message (?m=): stay there instead of following the tail.
+    if (!autoScroll || jumpTarget) return;
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entry?.events.length, entry?.session.status, autoScroll]);
+  }, [entry?.events.length, entry?.session.status, autoScroll, jumpTarget]);
 
   useEffect(() => {
     itemRefs.current = itemRefs.current.slice(0, entry?.events.length ?? 0);
@@ -169,8 +202,35 @@ export default function LiveConsole() {
   }
 
   const { session, events } = entry;
-  const generating = session.status === "RUNNING";
+  const branchSourceId = session.branched_from_session_id ?? "";
+  const branchSourceTitle =
+    sessions[branchSourceId]?.session.title?.trim() || `${branchSourceId.slice(0, 8)}…`;
+  // Busy: a turn runs or the summarizer does (COMPRESSING); both block input.
+  const compressingNow = session.status === "COMPRESSING";
+  const generating = session.status === "RUNNING" || compressingNow;
+  // Dispatch mode: messages (POST /messages) run in new branches whose
+  // results are joined back; the session runs no turns of its own, so typing
+  // here and rewrite are off (compression stays on: it summarizes the joined
+  // results). Outside it, results still to
+  // come from a dispatch also hold new messages back (the backend 409s).
+  const dispatchMode = !!session.dispatch_mode;
+  const pendingJoins = session.pending_joins ?? 0;
+  const dispatching = dispatchMode || pendingJoins > 0;
   const consoleItems = buildConsoleItems(events);
+  // In a branch: where its own messages start (after the borrowed ones);
+  // -1 when it has none borrowed. Equal to the length when it has none yet.
+  const lastBorrowed = consoleItems.reduce(
+    (last, item, i) => (itemBorrowedFrom(item) ? i : last), -1);
+  const ownHistoryStart = lastBorrowed >= 0 ? lastBorrowed + 1 : -1;
+  const borrowsHistory = lastBorrowed >= 0;
+
+  const jumpKey = sessionId && jumpTarget ? `${sessionId}/${jumpTarget}` : null;
+  const jumpIndex = jumpTarget
+    ? consoleItems.findIndex((item) => itemMessageIds(item).includes(jumpTarget))
+    : -1;
+  // Rows the transcript doesn't show (deleted, or compressed into a summary)
+  // can't be scrolled to; say so instead of jumping silently nowhere.
+  const jumpMissing = !!jumpTarget && jumpIndex < 0 && events.length > 0;
 
   const scrollToConsoleItem = (index: number) => {
     const nextIndex = Math.max(0, Math.min(index, consoleItems.length - 1));
@@ -198,7 +258,7 @@ export default function LiveConsole() {
 
   const handleSend = () => {
     const msg = input.trim();
-    if ((!msg && readyImages.length === 0) || !sessionId || generating || attachments.uploading) return;
+    if ((!msg && readyImages.length === 0) || !sessionId || generating || dispatching || attachments.uploading) return;
     sendMessage(sessionId, msg, readyImages);
     setInput("");
     attachments.clear();
@@ -321,6 +381,26 @@ export default function LiveConsole() {
           <p className="text-xs text-gray-500 font-mono select-all" title="会话 id">
             {session.id}
           </p>
+          {session.branched_from_session_id && (
+            <button
+              type="button"
+              onClick={() => {
+                const src = session.branched_from_session_id!;
+                const m = session.branched_from_message_id;
+                navigate(`/console/${src}${m ? `?m=${encodeURIComponent(m)}` : ""}`);
+              }}
+              className="mt-0.5 flex items-center gap-1 text-xs text-sky-400/80 hover:text-sky-300"
+              title="打开原会话并定位到分叉的那条消息"
+            >
+              <BranchIcon className="h-3 w-3" />
+              分支自 {branchSourceTitle}
+            </button>
+          )}
+          {jumpKey && jumpMissing && (
+            <p className="mt-0.5 text-xs text-amber-400/80">
+              要定位的消息不在当前显示的记录里（可能已被删除或压缩进摘要）
+            </p>
+          )}
         </div>
         <div className="text-left">
           <WorkingDirEditor session={session} />
@@ -332,7 +412,7 @@ export default function LiveConsole() {
           {generating ? (
             <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-900/60 text-indigo-200">
               <span className="inline-block w-1.5 h-1.5 rounded-full bg-indigo-300 animate-pulse" />
-              generating…
+              {compressingNow ? "compressing…" : "generating…"}
             </span>
           ) : (
             <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400">
@@ -347,14 +427,51 @@ export default function LiveConsole() {
                   ? "bg-red-900 text-red-300"
                   : session.status === "WAITING_CONFIRM"
                     ? "bg-orange-900 text-orange-300"
+                    : session.status === "COMPRESSING"
+                      ? "bg-purple-900 text-purple-300"
                     : session.status === "WAITING_USER"
                       ? "bg-blue-900 text-blue-300"
-                      : "bg-gray-700 text-gray-400"
+                      : session.status === "DISPATCHING"
+                        ? "bg-sky-900 text-sky-300"
+                        : "bg-gray-700 text-gray-400"
             }`}
+            title={
+              statusTitle(session) ??
+              (pendingJoins > 0 ? `${pendingJoins} 个并行分支的结果还没拼回` : undefined)
+            }
           >
-            {session.status}
+            {statusLabel(session)}
+            {session.status !== "DISPATCHING" && pendingJoins > 0 && ` · ${pendingJoins}`}
           </span>
+          <button
+            type="button"
+            onClick={() => {
+              setModeError(null);
+              void setDispatchMode(session.id, !dispatchMode).catch((e: unknown) =>
+                setModeError({
+                  scope: session.id,
+                  text: e instanceof Error ? e.message : String(e),
+                }),
+              );
+            }}
+            disabled={!dispatchMode && generating}
+            className={`px-2 py-0.5 rounded-full text-xs font-medium border transition-colors disabled:opacity-40 ${
+              dispatchMode
+                ? "border-sky-600 bg-sky-900/60 text-sky-200 hover:bg-sky-800"
+                : "border-gray-700 text-gray-400 hover:border-sky-700 hover:text-sky-300"
+            }`}
+            title={
+              dispatchMode
+                ? "派发模式开启中：发到这个会话的每条消息（POST /messages）都在新分支里处理，结果摘要拼回这里。点击关闭"
+                : "开启派发模式：之后每条消息都开一个新分支处理，结果摘要拼回这里（会话空闲时才能开启）"
+            }
+          >
+            派发模式{dispatchMode ? "：开" : "：关"}
+          </button>
         </div>
+        {modeError?.scope === session.id && (
+          <p className="text-xs text-red-400 break-all">{modeError.text}</p>
+        )}
         {/* Two columns of toggles: tool display on the left; deleted
             messages with auto-scroll (while running) below it on the right. */}
         <div className="flex items-start gap-4">
@@ -426,8 +543,18 @@ export default function LiveConsole() {
             <p className="text-gray-600 text-sm font-mono">Waiting for output…</p>
           )}
           {consoleItems.map((item, i) => (
+            <Fragment key={isToolCallView(item) ? item.callId : itemMessageId(item) ?? i}>
+            {i === ownHistoryStart && (
+              <div
+                className="my-1 flex items-center gap-2 text-[11px] text-sky-400/70"
+                title="以上的消息借用自原会话（不复制），在这个分支里只读：不能删除、重写或压缩"
+              >
+                <span className="flex-1 border-t border-dashed border-sky-900" />
+                <span className="shrink-0">以上借用自「{branchSourceTitle}」，只读 · 以下是这个分支自己的消息</span>
+                <span className="flex-1 border-t border-dashed border-sky-900" />
+              </div>
+            )}
             <div
-              key={isToolCallView(item) ? item.callId : itemMessageId(item) ?? i}
               ref={(node) => {
                 itemRefs.current[i] = node;
               }}
@@ -461,7 +588,15 @@ export default function LiveConsole() {
                 onDelete={handleDelete}
               />
             </div>
+            </Fragment>
           ))}
+          {borrowsHistory && ownHistoryStart === consoleItems.length && (
+            <div className="my-1 flex items-center gap-2 text-[11px] text-sky-400/70">
+              <span className="flex-1 border-t border-dashed border-sky-900" />
+              <span className="shrink-0">以上借用自「{branchSourceTitle}」，只读 · 这个分支还没有自己的消息</span>
+              <span className="flex-1 border-t border-dashed border-sky-900" />
+            </div>
+          )}
           {generating && (
             <div className="flex items-center gap-2 font-mono text-sm text-indigo-300">
               <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-indigo-400/40 border-t-indigo-300 animate-spin" />
@@ -541,6 +676,11 @@ export default function LiveConsole() {
                       className="w-full resize-y rounded border border-gray-700 bg-gray-900 px-1.5 py-1 text-[11px] text-gray-200 placeholder:text-gray-600"
                     />
                   </div>
+                  {borrowsHistory && (
+                    <p className="mt-1.5 text-[11px] text-gray-500">
+                      这是一个分支：借用的历史不能压缩，只能压缩分支自己的消息（填“只压缩最近 N 小时”）。
+                    </p>
+                  )}
                   {note && (
                     <p className={`mt-1.5 text-[11px] break-words ${note.ok ? "text-emerald-400" : "text-amber-400"}`}>
                       {note.text}
@@ -623,6 +763,10 @@ export default function LiveConsole() {
             placeholder={
               generating
                 ? "Agent is generating… wait for it to finish"
+                : dispatchMode
+                  ? "派发模式：消息通过 POST /messages 发来，每条在新分支里处理；这里不能直接输入"
+                  : dispatching
+                    ? `并行分支还在处理（还有 ${pendingJoins} 个结果没拼回来），全部拼回后才能发消息`
                 : canAttachImages
                   ? "Send a message… (Enter to send, Shift+Enter for newline; paste or drop images)"
                   : "Send a message… (Enter to send, Shift+Enter for newline)"
@@ -631,7 +775,7 @@ export default function LiveConsole() {
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             onPaste={handlePaste}
-            disabled={generating}
+            disabled={generating || dispatching}
           />
           {generating ? (
             <button
@@ -645,7 +789,7 @@ export default function LiveConsole() {
             <button
               type="button"
               onClick={handleSend}
-              disabled={(!input.trim() && readyImages.length === 0) || attachments.uploading}
+              disabled={(!input.trim() && readyImages.length === 0) || attachments.uploading || dispatching}
               title={attachments.uploading ? "Waiting for images to finish uploading" : undefined}
               className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-white text-sm font-medium transition-colors self-end"
             >

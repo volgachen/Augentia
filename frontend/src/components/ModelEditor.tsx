@@ -3,7 +3,7 @@ import { api } from "../api/client";
 import type { Session, SessionModelView } from "../api/types";
 import { useStore } from "../store/sessions";
 
-const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM"]);
+const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM", "COMPRESSING"]);
 
 function pretty(value: unknown): string {
   return JSON.stringify(value ?? {}, null, 2);

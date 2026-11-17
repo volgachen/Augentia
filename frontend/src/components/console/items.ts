@@ -29,6 +29,8 @@ export interface ToolCallView {
   messageId?: string;
   // The owning row was deleted by the user (shown only on request).
   deleted?: boolean;
+  // The owning row is borrowed from the session a branch was made from.
+  borrowedFrom?: string;
   result?: unknown;
   // Row of the paired tool result (it renders inside this item).
   resultMessageId?: string;
@@ -151,7 +153,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
       if (content) {
         items.push({
           type: "assistant_message", data: content, message_id: event.message_id,
-          deleted: event.deleted,
+          deleted: event.deleted, borrowedFrom: event.borrowedFrom,
         });
       }
       for (const [index, toolCall] of (payload.tool_calls ?? []).entries()) {
@@ -164,6 +166,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
           args: parseToolArguments(toolCall.function?.arguments),
           messageId: event.message_id,
           deleted: event.deleted,
+          borrowedFrom: event.borrowedFrom,
         };
         items.push(item);
         toolCallsById.set(callId, item);
@@ -192,6 +195,7 @@ function buildFlatItems(events: StreamEvent[]): ConsoleItem[] {
           args: obj?.args ?? {},
           messageId: event.type === "tool_call" ? event.message_id : undefined,
           deleted: event.deleted,
+          borrowedFrom: event.borrowedFrom,
         };
         items.push(item);
         toolCallsById.set(callId, item);
@@ -260,6 +264,12 @@ export function itemMessageIds(item: ConsoleItem): string[] {
   }
   const id = itemMessageId(item);
   return id ? [id] : [];
+}
+
+// In a branch: the session that owns this item's row (it is read-only here).
+export function itemBorrowedFrom(item: ConsoleItem): string | undefined {
+  if (isToolCallView(item)) return item.borrowedFrom;
+  return isCompressionGroup(item) ? item.event.borrowedFrom : item.borrowedFrom;
 }
 
 export function itemMessageId(item: ConsoleItem): string | undefined {

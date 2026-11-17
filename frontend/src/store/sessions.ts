@@ -109,17 +109,43 @@ const SUMMARY_PREFIXES: Record<string, { kind: "turn" | "range"; prefix: string 
 
 // STATUS payload the backend sends after a turn that compressed history.
 const HISTORY_COMPRESSED = "history_compressed";
+// STATUS payload sent when a fork-dispatch branch's result was appended.
+const HISTORY_JOINED = "history_joined";
+// STATUS payload: the reported status may have changed outside a turn
+// (fork-dispatch started or its last result joined); refetch the session.
+const SESSION_CHANGED = "session_changed";
+// STATUS payloads around a summarizer call: the session is COMPRESSING in
+// between (the backend stores it; these keep the live view in step).
+const COMPRESSING_STARTED = "compressing";
+const COMPRESSING_ENDED = "compressing_done";
 
 export function messageToEvent(m: Message): StreamEvent {
-  const event = rowToEvent(m);
+  let event = rowToEvent(m);
   // Only the delete button counts: compressed originals also have deleted_at,
   // but they are ordinary content shown when their summary is expanded.
-  return m.metadata?.deleted_by === "user" ? { ...event, deleted: true } : event;
+  if (m.metadata?.deleted_by === "user") event = { ...event, deleted: true };
+  const owner = m.metadata?.borrowed_from;
+  if (typeof owner === "string" && owner) event = { ...event, borrowedFrom: owner };
+  return event;
 }
 
 function rowToEvent(m: Message): StreamEvent {
   switch (m.role) {
     case "user": {
+      const joined = m.metadata?.joined_from as
+        | { session_id?: string; task?: string; ok?: boolean }
+        | undefined;
+      if (m.metadata?.cagent_name === "branch_summary" && joined?.session_id) {
+        return {
+          type: "compression",
+          data: m.content,
+          message_id: m.id,
+          compression: {
+            kind: "branch",
+            branch: { sessionId: joined.session_id, task: joined.task ?? "", ok: joined.ok !== false },
+          },
+        };
+      }
       const summaryKind = SUMMARY_PREFIXES[String(m.metadata?.cagent_name ?? "")];
       if (summaryKind) {
         return {
@@ -203,6 +229,7 @@ interface Store {
   closeSession: (sessionId: string) => Promise<void>;
   renameSession: (sessionId: string, title: string) => Promise<void>;
   unlinkParent: (sessionId: string) => Promise<void>;
+  setDispatchMode: (sessionId: string, enabled: boolean) => Promise<void>;
   updateWorkingDir: (
     sessionId: string,
     workingDir: string,
@@ -240,7 +267,30 @@ export const useStore = create<Store>((set, get) => {
 
     socket.onmessage = (e) => {
       const frame = JSON.parse(e.data);
-      if (frame.type === "status" && frame.data === HISTORY_COMPRESSED) {
+      if (frame.type === "status" && frame.data === SESSION_CHANGED) {
+        void get().refreshSession(sessionId).catch(() => {});
+        return;
+      }
+      if (frame.type === "status" && (frame.data === COMPRESSING_STARTED || frame.data === COMPRESSING_ENDED)) {
+        if (frame.data === COMPRESSING_STARTED) {
+          set((s) => {
+            const entry = s.sessions[sessionId];
+            if (!entry) return s;
+            return {
+              sessions: {
+                ...s.sessions,
+                [sessionId]: { ...entry, session: { ...entry.session, status: "COMPRESSING" } },
+              },
+            };
+          });
+        } else {
+          // Back to whatever it was (still RUNNING inside a turn, idle after a
+          // manual compression): ask the backend.
+          void get().refreshSession(sessionId).catch(() => {});
+        }
+        return;
+      }
+      if (frame.type === "status" && (frame.data === HISTORY_COMPRESSED || frame.data === HISTORY_JOINED)) {
         // A summary just replaced rows this client still shows; they are now
         // soft-deleted server-side, so reload the transcript.
         void reloadHistory(sessionId);
@@ -278,7 +328,10 @@ export const useStore = create<Store>((set, get) => {
           frame.type === "tool_confirm"
             ? "WAITING_CONFIRM"
             : frame.type === "done"
-              ? "WAITING_USER"
+              // An idle session in dispatch mode reports DISPATCHING.
+              ? entry.session.dispatch_mode
+                ? "DISPATCHING"
+                : "WAITING_USER"
               : frame.type === "error"
                 ? "ERROR"
                 : isUser || frame.type === "tool_result"
@@ -611,6 +664,15 @@ export const useStore = create<Store>((set, get) => {
             [sessionId]: { ...entry, session: updated },
           },
         };
+      });
+    },
+
+    setDispatchMode: async (sessionId, enabled) => {
+      const updated = await api.sessions.setDispatchMode(sessionId, enabled);
+      set((s) => {
+        const entry = s.sessions[sessionId];
+        if (!entry) return s;
+        return { sessions: { ...s.sessions, [sessionId]: { ...entry, session: updated } } };
       });
     },
 

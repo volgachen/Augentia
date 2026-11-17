@@ -5,8 +5,13 @@ export type SessionStatus =
   | "RUNNING"
   | "WAITING_USER"
   | "WAITING_CONFIRM"
+  // Waiting on the summarizer (turn / threshold / manual compression).
+  | "COMPRESSING"
   | "COMPLETED"
-  | "ERROR";
+  | "ERROR"
+  // Reported (not stored) for an idle session in dispatch mode: each message
+  // sent to it runs in a new branch whose result is joined back.
+  | "DISPATCHING";
 
 export type MessageRole = "system" | "user" | "agent" | "tool_call" | "tool" | "mark";
 
@@ -91,11 +96,23 @@ export interface Session {
   title: string | null;
   working_dir: string | null;
   parent_session_id: string | null;
+  // Set on a branch made by "diverge": the source session and the message the
+  // branch was made at. Unlike parent_session_id (sub-agents) it only links.
+  branched_from_session_id?: string | null;
+  branched_from_message_id?: string | null;
   additional_prompt: string | null;
   additional_prompt_path: string | null;
   // The session's own model / Chat Completions params; null = the agent's.
   model?: string | null;
   model_params?: Record<string, unknown> | null;
+  // Dispatch mode switch (PUT /sessions/{id}/dispatching).
+  dispatch_mode?: boolean;
+  // On a dispatched branch: the session its result is joined into, and the
+  // joined row once it is (null while it still runs).
+  join_into_session_id?: string | null;
+  joined_message_id?: string | null;
+  // Dispatched branches of this session not joined back yet.
+  pending_joins?: number;
   status: SessionStatus;
   created_at: string;
   updated_at: string;
@@ -183,6 +200,9 @@ export interface StreamEvent {
   // Client-only: set on history rows the user deleted, shown only when
   // "显示已删除消息" is on.
   deleted?: boolean;
+  // Client-only: in a branch, the id of the session that owns this row (the
+  // branch borrows it, read-only: no delete, rewrite or compression there).
+  borrowedFrom?: string;
   // Client-only, on "compression" events loaded from history.
   compression?: CompressionInfo;
 }
@@ -193,9 +213,13 @@ export interface CompressionInfo {
   // compress_session(since=...) (a range_summary user row). The rows a summary
   // replaced are soft-deleted with metadata.compressed_by = its id and are
   // fetched on demand (GET .../messages/{id}/compressed).
-  kind: "session" | "turn" | "range";
+  // "branch": the result of a fork-dispatch branch joined back (a
+  // branch_summary user row); expanding it shows that branch's turn.
+  kind: "session" | "turn" | "range" | "branch";
   // How many rows a turn/range summary lists as replaced (a hint only).
   replacedCount?: number;
+  // kind "branch": the branch it came from and the task it ran.
+  branch?: { sessionId: string; task: string; ok: boolean };
 }
 
 export type TaskStatus = "pending" | "in_progress" | "completed";

@@ -41,6 +41,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
+from app.core.borrowed import is_borrowed
 from app.core.compressed import SUMMARY_NAMES, compress_covered
 from app.db.interface import IAgentDatabase
 from app.models.domain import Message, MessageRole, SessionStatus
@@ -63,6 +64,8 @@ _STATUS_TO_FRAMEWORK = {
     SessionStatus.RUNNING: "RUNNING",
     SessionStatus.WAITING_USER: "IDLE",
     SessionStatus.WAITING_CONFIRM: "RUNNING",
+    # The framework has no "compressing": to it a summary in progress is running.
+    SessionStatus.COMPRESSING: "RUNNING",
     SessionStatus.COMPLETED: "IDLE",
     SessionStatus.ERROR: "FAILED",
 }
@@ -142,6 +145,10 @@ class AugentiaStore:
         self.pending_turn_overrides: dict | None = None
         # Extra metadata merged into the next turn input row (plugin_label, ...).
         self.pending_user_metadata: dict | None = None
+        # Set by the adapter for a compression with `until`: the next
+        # range_summary row is placed at this time (right after what it
+        # covers) instead of now, so later rows stay after it.
+        self.pending_summary_at: datetime | None = None
         # Set by the adapter's model wrapper after each agent-model call: that
         # response's details (usage, model, finish_reason, id, latency_ms).
         # CAgent saves the reply right after the call, so the next saved row
@@ -151,6 +158,8 @@ class AugentiaStore:
         # Returns the system_prompts version the live prompt came from (set by
         # the adapter); recorded on each reply as metadata.system_prompt_id.
         self.system_prompt_id = lambda: None
+        # Ids of borrowed rows seen on the last list_messages.
+        self.borrowed_ids: set[str] = set()
 
     # ------- sessions -------
 
@@ -197,6 +206,9 @@ class AugentiaStore:
         # live rows. A whole-history summary's turn_end boundary is a mark,
         # and marks are never compressed, so it always resolves.
         rows = await self._db.get_messages(session_id)
+        # Rows a branch borrows from its source (read-only here, see
+        # app.core.borrowed); the agent class keeps compression off them.
+        self.borrowed_ids = {m.id for m in rows if is_borrowed(m)}
         return self._to_framework_records(rows)
 
     async def save_messages(self, session_id: str, messages: list[dict]) -> list[dict]:
@@ -253,10 +265,14 @@ class AugentiaStore:
             if self.pending_user_metadata:
                 metadata.update(self.pending_user_metadata)
                 self.pending_user_metadata = None
+        placed_at = None
+        if message.get("name") == "range_summary" and self.pending_summary_at is not None:
+            placed_at, self.pending_summary_at = self.pending_summary_at, None
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,
             metadata=metadata,
+            created_at=placed_at,
         )
         if message.get("name") in SUMMARY_NAMES:
             await self._compress_covered(session_id, row)
@@ -413,8 +429,8 @@ class AugentiaStore:
         # verbatim, but their through_message_id still names a row of the
         # *source* session. CAgent treats a missing boundary as corrupt
         # history, so drop such marks: that branch also copied the original
-        # rows, so it simply runs uncompressed. (Diverging now copies a summary
-        # as a plain user message instead; see plain_copy_fields.)
+        # rows, so it simply runs uncompressed. (Branches no longer copy
+        # anything: they borrow the source's rows, ids unchanged.)
         ids = {r["id"] for r in records}
         kept = []
         for record in records:

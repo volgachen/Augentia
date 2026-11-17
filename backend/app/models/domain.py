@@ -13,8 +13,18 @@ class SessionStatus(str, Enum):
     # StreamEventType.TOOL_CONFIRM). Distinct from WAITING_USER, which means the
     # turn finished and the agent is idle.
     WAITING_CONFIRM = "WAITING_CONFIRM"
+    # Waiting on the summarizer: turn compression at the end of a turn, a
+    # threshold-triggered whole-history compression, or POST /compress.
+    # Busy like RUNNING (stored, reset after a restart like RUNNING).
+    COMPRESSING = "COMPRESSING"
     COMPLETED = "COMPLETED"
     ERROR = "ERROR"
+    # Never stored: reported (Session.status in API responses) for a session
+    # whose dispatch mode is on (Session.dispatch_mode) while it is idle.
+    # Each message sent to it runs in a new branch whose result is joined
+    # back; Session.pending_joins says how many are still running. The
+    # stored status keeps saying what the session itself is doing.
+    DISPATCHING = "DISPATCHING"
 
 
 class MessageRole(str, Enum):
@@ -83,6 +93,29 @@ class Session(BaseModel):
     # session was created directly by an operator. Used to render the agent
     # derivation tree and to let the child report results back to its parent.
     parent_session_id: Optional[str] = None
+    # Set on a branch made by diverge: the session it was branched from and
+    # the message it branched at (the divergence point the user picked; the
+    # branch holds a copy of the history before it, or through it for a
+    # summary). Separate from parent_session_id, which is for sub-agents.
+    branched_from_session_id: Optional[str] = None
+    branched_from_message_id: Optional[str] = None
+    # When the branch was made. The branch does not copy the source's history:
+    # it borrows the source's rows created before this time, as they were at
+    # this time (rows the source deletes or compresses later still show).
+    branched_cutoff_at: Optional[datetime] = None
+    # Set on a branch made by fork-dispatch: when its first turn ends, a
+    # summary of that turn is appended to this session (the one it was
+    # branched from). joined_message_id is that appended row once it exists;
+    # until then the join is pending (and is retried after a restart).
+    join_into_session_id: Optional[str] = None
+    joined_message_id: Optional[str] = None
+    # Dispatch mode (PUT /sessions/{id}/dispatching): every message sent to
+    # the session (POST /messages) runs in a new branch of it, and the
+    # branch's result is joined back. The session runs no turns of its own.
+    dispatch_mode: bool = False
+    # Not stored: how many branches dispatched from this session haven't been
+    # joined back yet (filled in by the API; 0 = all results are in).
+    pending_joins: int = 0
     # Per-session add-ons to the AgentTemplate's base system_prompt. Persisted so
     # a session rehydrated after a backend restart sees the exact same effective
     # prompt it was launched with. The router applies them at adapter.start()

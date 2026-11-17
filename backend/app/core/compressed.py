@@ -53,8 +53,8 @@ def _compressible(message: Message) -> bool:
 def covered_ids(live: list[Message], summary: Message) -> list[str]:
     """Ids among `live` (ordered, not deleted) that `summary` replaced.
 
-    A summary copied from another session (diverge) names ids that are not
-    here, so it covers nothing.
+    A summary copied from another session by an older diverge names ids that
+    are not here, so it covers nothing.
     """
     if summary.role == MessageRole.USER:
         replaced = set((summary.metadata or {}).get("replaced_message_ids") or [])
@@ -68,30 +68,15 @@ def covered_ids(live: list[Message], summary: Message) -> list[str]:
 
 
 async def compress_covered(db, session_id: str, summary: Message) -> int:
-    """Soft-delete the live rows `summary` replaced, tagging them compressed_by."""
+    """Soft-delete the live rows `summary` replaced, tagging them compressed_by.
+
+    Only the session's own rows: a branch never compresses the history it
+    borrows (the engine keeps summaries off it), and it couldn't change the
+    source's rows anyway.
+    """
     live = await db.get_messages(session_id)
-    ids = covered_ids(live, summary)
+    ids = [i for i in covered_ids(live, summary)
+           if i in {m.id for m in live if m.session_id == session_id}]
     if not ids:
         return 0
     return await db.soft_delete_messages(session_id, ids, metadata={COMPRESSED_BY: summary.id})
-
-
-def plain_copy_fields(message: Message) -> tuple[MessageRole, str, dict]:
-    """(role, content, metadata) for a copy of `message` in another session.
-
-    Copied rows get new ids, so a summary's references (replaced ids or its
-    boundary) would point into the source session, and the rows it replaced
-    are deleted there and not copied. The copy is therefore no longer a
-    summary: its text is kept as an ordinary user message. Other rows are
-    copied unchanged.
-    """
-    metadata = dict(message.metadata or {})
-    if message.role == MessageRole.USER and metadata.get(NAME_KEY) in SUMMARY_NAMES:
-        return MessageRole.USER, message.content, {
-            k: v for k, v in metadata.items()
-            if k not in (NAME_KEY, "replaced_message_ids", "through_message_id")
-        }
-    if is_completed_mark(message):
-        payload = mark_payload(message) or {}
-        return MessageRole.USER, str(payload.get("content") or ""), {}
-    return message.role, message.content, metadata

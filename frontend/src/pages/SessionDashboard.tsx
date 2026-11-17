@@ -3,6 +3,9 @@ import { useEffect, useState } from "react";
 import { useStore } from "../store/sessions";
 import { api } from "../api/client";
 import type { AgentTemplate, Session, SessionStatus } from "../api/types";
+import BranchIcon from "../components/BranchIcon";
+import NewSessionInDir from "../components/NewSessionInDir";
+import { statusLabel, statusTitle } from "../components/statusLabel";
 
 function formatTimestamp(iso: string | null): string {
   // The backend stores timestamps as UTC but the DATETIME column serializes
@@ -20,8 +23,10 @@ const STATUS_STYLE: Record<SessionStatus, string> = {
   RUNNING: "bg-green-900 text-green-300",
   WAITING_USER: "bg-blue-900 text-blue-300",
   WAITING_CONFIRM: "bg-orange-900 text-orange-300",
+  COMPRESSING: "bg-purple-900 text-purple-300",
   COMPLETED: "bg-gray-700 text-gray-400",
   ERROR: "bg-red-900 text-red-300",
+  DISPATCHING: "bg-sky-900 text-sky-300",
 };
 
 interface Entry {
@@ -43,6 +48,31 @@ interface Row {
   // Set when this session has a parent that isn't currently loaded in the
   // store; it's rendered as a root but we still hint at the missing parent.
   orphanParent: string | null;
+  // Branches dispatched from this session (results joined back into it),
+  // folded under its row; dispatched: this row is one of them.
+  dispatched?: Entry[];
+  dispatchedRow?: boolean;
+}
+
+// Branches made by dispatch (join_into_session_id) don't get rows of their
+// own: they are many and short-lived. They fold under the session they
+// join into; only those whose session isn't listed stay top-level.
+function splitDispatched(entries: Entry[]): { listed: Entry[]; byTarget: Map<string, Entry[]> } {
+  const ids = new Set(entries.map((e) => e.session.id));
+  const byTarget = new Map<string, Entry[]>();
+  const listed: Entry[] = [];
+  for (const e of entries) {
+    const target = e.session.join_into_session_id;
+    if (target && ids.has(target)) {
+      const arr = byTarget.get(target) ?? [];
+      arr.push(e);
+      byTarget.set(target, arr);
+    } else {
+      listed.push(e);
+    }
+  }
+  for (const arr of byTarget.values()) arr.sort(byUpdated);
+  return { listed, byTarget };
 }
 
 type SortMode = "time" | "dir";
@@ -79,7 +109,8 @@ const byActiveThenUpdated = (a: Entry, b: Entry) =>
 // forest, `compare` ordering the roots and each sibling group. Children whose
 // parent is not among `entries` (closed, owned by another client, or in
 // another directory group) become roots so nothing is ever hidden.
-function buildForest(entries: Entry[], compare: (a: Entry, b: Entry) => number): Row[] {
+function buildForest(all: Entry[], compare: (a: Entry, b: Entry) => number): Row[] {
+  const { listed: entries, byTarget } = splitDispatched(all);
   const byId = new Map(entries.map((e) => [e.session.id, e]));
   const childrenOf = new Map<string, Entry[]>();
   for (const e of entries) {
@@ -108,6 +139,7 @@ function buildForest(entries: Entry[], compare: (a: Entry, b: Entry) => number):
       entry,
       depth,
       orphanParent: pid && !byId.has(pid) ? pid : null,
+      dispatched: byTarget.get(entry.session.id),
     });
     const kids = (childrenOf.get(entry.session.id) ?? []).slice().sort(compare);
     for (const kid of kids) walk(kid, depth + 1);
@@ -123,6 +155,8 @@ interface DirGroup {
   rows: Row[];
   count: number;
   activeCount: number;
+  // Agent of the most recently created session here: the quick-create default.
+  lastAgentId: string;
 }
 
 // Windows paths compare case-insensitively and with either slash.
@@ -150,6 +184,8 @@ function buildDirGroups(entries: Entry[]): DirGroup[] {
     rows: buildForest(members, byActiveThenUpdated),
     count: members.length,
     activeCount: members.filter(isActive).length,
+    lastAgentId: members.reduce((x, y) => (y.session.created_at > x.session.created_at ? y : x))
+      .session.agent_id,
     latest: members.map(lastActivity).reduce((x, y) => (y > x ? y : x)),
   }));
   groups.sort((a, b) => {
@@ -181,12 +217,17 @@ export default function SessionDashboard() {
   const closeSession = useStore((s) => s.closeSession);
   const renameSession = useStore((s) => s.renameSession);
   const unlinkParent = useStore((s) => s.unlinkParent);
+  const launchSession = useStore((s) => s.launchSession);
   const hydrateSessions = useStore((s) => s.hydrateSessions);
   const navigate = useNavigate();
 
   // agent_id -> display name. Sessions only carry the agent UUID, so we fetch
   // the registry once to render human-readable names in the Agent column.
-  const [agentNames, setAgentNames] = useState<Record<string, string>>({});
+  const [agents, setAgents] = useState<AgentTemplate[]>([]);
+  const agentNames = useMemo(
+    () => Object.fromEntries(agents.map((a) => [a.id, a.name])) as Record<string, string>,
+    [agents],
+  );
 
   // Which session's title is being edited inline, and the draft text.
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -210,6 +251,16 @@ export default function SessionDashboard() {
       // Not remembered; still applies for this visit.
     }
   };
+  // Sessions whose dispatched branches are unfolded (folded by default).
+  const [openDispatched, setOpenDispatched] = useState<Set<string>>(() => new Set());
+  const toggleDispatched = (id: string) =>
+    setOpenDispatched((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   const toggleDir = (key: string) => {
     const next = new Set(collapsedDirs);
     if (next.has(key)) next.delete(key);
@@ -234,9 +285,7 @@ export default function SessionDashboard() {
     );
     api.agents
       .list()
-      .then((agents: AgentTemplate[]) =>
-        setAgentNames(Object.fromEntries(agents.map((a) => [a.id, a.name]))),
-      )
+      .then((list: AgentTemplate[]) => setAgents(list))
       .catch((err) => console.error("failed to load agents", err));
   }, [hydrateSessions]);
 
@@ -272,21 +321,47 @@ export default function SessionDashboard() {
   // Table body: plain rows by time, or rows under one header per directory.
   // A collapsed group keeps its header row and hides its sessions.
   type Item = { kind: "group"; group: DirGroup } | { kind: "row"; row: Row };
+  const withDispatched = (row: Row): Item[] => [
+    { kind: "row", row },
+    ...(row.dispatched && openDispatched.has(row.entry.session.id)
+      ? row.dispatched.map((entry): Item => ({
+          kind: "row",
+          row: { entry, depth: row.depth + 1, orphanParent: null, dispatchedRow: true },
+        }))
+      : []),
+  ];
   const dirGroups = sortMode === "dir" ? buildDirGroups(entries) : [];
   const items: Item[] =
     sortMode === "dir"
       ? dirGroups.flatMap((group): Item[] => [
           { kind: "group", group },
-          ...(collapsedDirs.has(group.key)
-            ? []
-            : group.rows.map((row): Item => ({ kind: "row", row }))),
+          ...(collapsedDirs.has(group.key) ? [] : group.rows.flatMap(withDispatched)),
         ])
-      : buildForest(entries, byUpdated).map((row): Item => ({ kind: "row", row }));
+      : buildForest(entries, byUpdated).flatMap(withDispatched);
   const allCollapsed = dirGroups.length > 0 && dirGroups.every((g) => collapsedDirs.has(g.key));
 
   const openSession = (sessionId: string) => {
     setActive(sessionId);
     navigate(`/console/${sessionId}`);
+  };
+
+  const branchSourceName = (session: Session) => {
+    const id = session.branched_from_session_id ?? "";
+    return sessions[id]?.session.title?.trim() || `${id.slice(0, 8)}…`;
+  };
+  const openBranchSource = (session: Session) => {
+    const id = session.branched_from_session_id;
+    if (!id) return;
+    const m = session.branched_from_message_id;
+    setActive(id);
+    navigate(`/console/${id}${m ? `?m=${encodeURIComponent(m)}` : ""}`);
+  };
+
+  // Quick create from a directory header: straight into that folder, then
+  // open the new session's console like a launch from the Agent Registry.
+  const createInDir = async (agentId: string, dir: string | null) => {
+    const sessionId = await launchSession(agentId, dir ?? "", "use_existing_directory");
+    openSession(sessionId);
   };
 
   return (
@@ -375,12 +450,18 @@ export default function SessionDashboard() {
                           {group.count} 个会话
                           {group.activeCount > 0 && `，${group.activeCount} 个 active`}
                         </span>
+                        <NewSessionInDir
+                          dir={group.dir}
+                          agents={agents}
+                          defaultAgentId={group.lastAgentId}
+                          onCreate={(agentId) => createInDir(agentId, group.dir)}
+                        />
                       </span>
                     </td>
                   </tr>
                 );
               }
-              const { entry, depth, orphanParent } = item.row;
+              const { entry, depth, orphanParent, dispatched, dispatchedRow } = item.row;
               const { session } = entry;
               const active = isActive(entry);
               return (
@@ -424,6 +505,19 @@ export default function SessionDashboard() {
                     {depth > 0 && (
                       <span className="text-gray-600 shrink-0">└─</span>
                     )}
+                    {session.branched_from_session_id && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openBranchSource(session);
+                        }}
+                        title={`分支自 ${branchSourceName(session)}，点击打开分叉的那条消息`}
+                        className="shrink-0 rounded p-0.5 text-sky-500/80 hover:bg-gray-800 hover:text-sky-300 transition-colors"
+                      >
+                        <BranchIcon />
+                      </button>
+                    )}
                     {editingId === session.id ? (
                       <input
                         autoFocus
@@ -457,6 +551,32 @@ export default function SessionDashboard() {
                         ↳ from {orphanParent.slice(0, 8)}…
                       </span>
                     )}
+                    {dispatchedRow && (
+                      <span
+                        className={`ml-1 text-[10px] shrink-0 ${
+                          session.joined_message_id ? "text-gray-600" : "text-sky-400"
+                        }`}
+                      >
+                        {session.joined_message_id ? "已拼回" : "处理中"}
+                      </span>
+                    )}
+                    {dispatched && dispatched.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleDispatched(session.id);
+                        }}
+                        className="ml-1 shrink-0 rounded border border-sky-900 px-1.5 py-0.5 text-[10px] text-sky-400/90 hover:border-sky-600 hover:text-sky-300"
+                        title="派发出去的分支（结果拼回这个会话）"
+                      >
+                        {openDispatched.has(session.id) ? "▾" : "▸"} 派发分支 {dispatched.length}
+                        {(() => {
+                          const running = dispatched.filter((d) => !d.session.joined_message_id).length;
+                          return running > 0 ? `（${running} 处理中）` : "";
+                        })()}
+                      </button>
+                    )}
                   </span>
                 </td>
                 <td className="py-3 pr-4 text-gray-300">
@@ -484,8 +604,9 @@ export default function SessionDashboard() {
                 <td className="py-3 pr-4">
                   <span
                     className={`px-2 py-0.5 rounded-full text-xs font-medium ${STATUS_STYLE[session.status]}`}
+                    title={statusTitle(session)}
                   >
-                    {session.status}
+                    {statusLabel(session)}
                   </span>
                 </td>
                 <td className="py-3 pr-4 text-gray-400 text-xs whitespace-nowrap">

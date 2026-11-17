@@ -8,6 +8,8 @@ Covers:
   - CAgent adapter: max_steps / tool_limit_at / step_reminder apply to that
     turn only; null switches a configured setting off for the turn; the user
     row records metadata.turn_overrides
+  - turn compression per turn: threshold on / off (null), instruction, marker
+    (and the default instruction following the effective marker)
   - HTTP: POST /messages and /retry accept them (202) and the turn honors
     them; bad values -> 400
 
@@ -74,6 +76,25 @@ def test_validation() -> None:
     check(validate_turn_overrides(None) == {}, "None -> no overrides")
     check(validate_turn_overrides({"tool_limit_at": None}) == {"tool_limit_at": None},
           "tool_limit_at=null accepted (off for the turn)")
+    compression = {"turn_compression_tool_call_threshold": None,
+                   "turn_compression_instruction": "只总结这一轮", "turn_compression_marker": ""}
+    check(validate_turn_overrides(compression) == compression,
+          "turn compression keys accepted (threshold null, marker \"\")")
+    check(validate_turn_overrides({"turn_compression_marker": None})
+          == {"turn_compression_marker": None}, "turn_compression_marker=null accepted")
+    for bad, label in (
+        ({"turn_compression_tool_call_threshold": 0}, "turn_compression_tool_call_threshold=0"),
+        ({"turn_compression_instruction": ""}, "empty turn_compression_instruction"),
+        ({"turn_compression_instruction": None}, "turn_compression_instruction=null"),
+        ({"turn_compression_marker": 1}, "turn_compression_marker not a string"),
+    ):
+        try:
+            validate_turn_overrides(bad)
+        except ValueError:
+            ok(f"rejected: {label}")
+        else:
+            fail(f"accepted: {label}")
+            FAILURES.append(label)
     for bad, label in (
         ({"max_step": 3}, "unknown key"),
         ({"max_steps": None}, "max_steps=null"),
@@ -182,6 +203,98 @@ async def test_adapter() -> None:
         await adapter.stop()
 
 
+async def test_compression_overrides() -> None:
+    section("CAgent adapter: turn compression settings per turn")
+    from cagent import BaseAgent
+    from app.adapters.cagent_agent import NO_MARKER_TURN_COMPRESSION_INSTRUCTION
+
+    db = MockMemoryDatabase()
+    await db.create_agent(AgentTemplate(
+        id="agent-tc", name="tc", description="", agent_type=AgentType.TOOL_USE,
+        system_prompt="test", tool_names=["read"], config={}, openai_model="test-model",
+    ))
+    wd = _TMP / "wd-tc"
+    wd.mkdir(parents=True, exist_ok=True)
+    (wd / "notes.txt").write_text("hello " * 400, encoding="utf-8")
+
+    async def run_case(label, config, turns):
+        """Run (text, overrides) turns, each reading notes.txt once.
+
+        Returns, per turn, the summarizer request or None if none was made.
+        """
+        summaries: list = []
+
+        async def model(*, messages, tools, tool_choice=None):
+            last = messages[-1]
+            if last["role"] == "user" and last["content"] not in [t for t, _ in turns]:
+                summaries[-1] = messages  # a summarizer request ends with its instruction
+                return {"content": f"summary of {label}"}
+            if last["role"] == "tool":
+                return {"content": "read it"}
+            return {"tool_calls": [{"id": f"{label}-{len(summaries)}", "name": "read",
+                                    "arguments": {"file_path": "notes.txt"}}]}
+
+        session = await db.create_session("agent-tc", working_dir=str(wd), session_id=f"s-tc-{label}")
+        adapter = CAgentAdapter(db=db, tool_names=["read"], session_id=session.id, working_dir=str(wd),
+                                config={"tool_approvals": {"read": False}, **config},
+                                model_callable=model)
+        await adapter.start("test")
+        try:
+            for text, overrides in turns:
+                summaries.append(None)
+                await run_turn(adapter, text, overrides)
+        finally:
+            await adapter.stop()
+        return summaries
+
+    def before_request(sent, text):
+        i = next(i for i, m in enumerate(sent) if m["role"] == "user" and m["content"] == text)
+        return sent[i - 1]
+
+    # Compression off for the session; one turn switches it on with its own instruction.
+    sent = await run_case("on", {}, [
+        ("first", {"turn_compression_tool_call_threshold": 1,
+                   "turn_compression_instruction": "只总结这一轮"}),
+        ("second", None)])
+    check(sent[0] is not None and sent[0][-1]["content"] == "只总结这一轮",
+          "threshold override compresses the turn with the overridden instruction")
+    check(sent[1] is None, "next turn without overrides is not compressed")
+
+    # Compression on for the session; null switches it off for one turn.
+    sent = await run_case("off", {"turn_compression_tool_call_threshold": 1},
+                          [("first", {"turn_compression_tool_call_threshold": None}), ("second", None)])
+    check(sent[0] is None and sent[1] is not None,
+          "threshold=null skips compression for that turn only")
+
+    # A marker for one turn: inserted, with CAgent's marker-based default instruction;
+    # the next turn is back to no marker and the marker-free instruction.
+    sent = await run_case("marker", {"turn_compression_tool_call_threshold": 1}, [
+        ("first", {"turn_compression_marker": "从这里开始压缩"}), ("second", None)])
+    check(before_request(sent[0], "first") == {"role": "user", "content": "从这里开始压缩"}
+          and sent[0][-1]["content"] == BaseAgent.TURN_COMPRESSION_INSTRUCTION,
+          "marker override inserts the marker and uses the marker-based default instruction")
+    # Before "second" sits the first turn's summary (a user row), not a marker.
+    check(before_request(sent[1], "second")["content"] == "summary of marker"
+          and sent[1][-1]["content"] == NO_MARKER_TURN_COMPRESSION_INSTRUCTION,
+          "next turn: no marker, marker-free default instruction")
+
+    # Session has a marker; "" removes it for one turn and the default instruction follows.
+    sent = await run_case("nomarker", {"turn_compression_tool_call_threshold": 1,
+                                       "turn_compression_marker": "M"},
+                          [("first", {"turn_compression_marker": ""})])
+    check(before_request(sent[0], "first")["role"] == "system"
+          and sent[0][-1]["content"] == NO_MARKER_TURN_COMPRESSION_INSTRUCTION,
+          "marker=\"\" for a turn: no marker message, marker-free default instruction")
+
+    # A session's custom instruction is kept when a turn changes only the marker.
+    sent = await run_case("custom", {"turn_compression_tool_call_threshold": 1,
+                                     "turn_compression_instruction": "按我的方式总结"},
+                          [("first", {"turn_compression_marker": "M"})])
+    check(before_request(sent[0], "first") == {"role": "user", "content": "M"}
+          and sent[0][-1]["content"] == "按我的方式总结",
+          "marker override keeps the session's custom instruction")
+
+
 # ---------------------------------------------------------------- HTTP
 
 def test_http() -> None:
@@ -279,6 +392,7 @@ def test_http() -> None:
 if __name__ == "__main__":
     test_validation()
     asyncio.run(test_adapter())
+    asyncio.run(test_compression_overrides())
     test_http()  # TestClient runs its own event loop; keep it outside asyncio.run
     if FAILURES:
         print(f"\n{len(FAILURES)} CHECK(S) FAILED")

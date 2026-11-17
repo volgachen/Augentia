@@ -1,12 +1,15 @@
 import type { Session, SessionStatus } from "../api/types";
+import { statusLabel, statusTitle } from "./statusLabel";
 
 const STATUS_DOT: Record<SessionStatus, string> = {
   INITIALIZING: "bg-yellow-400",
   RUNNING: "bg-green-400",
   WAITING_USER: "bg-blue-400",
   WAITING_CONFIRM: "bg-orange-400",
+  COMPRESSING: "bg-purple-400",
   COMPLETED: "bg-gray-500",
   ERROR: "bg-red-400",
+  DISPATCHING: "bg-sky-400",
 };
 
 export default function SubAgentListPanel({
@@ -51,8 +54,8 @@ export default function SubAgentListPanel({
                 <span className="font-mono text-xs text-gray-300 truncate flex-1">
                   {s.id.slice(0, 8)}…
                 </span>
-                <span className="text-[10px] text-gray-500 shrink-0">
-                  {s.status}
+                <span className="text-[10px] text-gray-500 shrink-0" title={statusTitle(s)}>
+                  {statusLabel(s)}
                 </span>
               </button>
             </li>

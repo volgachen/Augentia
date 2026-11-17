@@ -170,6 +170,11 @@ export const api = {
         method: "PATCH",
         body: JSON.stringify({ title }),
       }),
+    setDispatchMode: (id: string, enabled: boolean) =>
+      request<Session>(`/sessions/${id}/dispatching`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled }),
+      }),
     unlinkParent: (id: string) =>
       request<Session>(`/sessions/${id}/parent`, { method: "DELETE" }),
     get: (id: string) => request<Session>(`/sessions/${id}`),

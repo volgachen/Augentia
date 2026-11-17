@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { Session } from "../api/types";
 
-const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM"]);
+const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM", "COMPRESSING"]);
 
 export default function SystemPromptPanel({ session }: { session: Session }) {
   // `prompt` is the last value loaded from / saved to the backend; `draft` is

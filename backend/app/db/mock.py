@@ -1,7 +1,6 @@
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List
-from app.core.compressed import plain_copy_fields
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import seed_agent_templates
 from app.models.domain import (
@@ -111,6 +110,10 @@ class MockMemoryDatabase(IAgentDatabase):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        branched_from_session_id: str | None = None,
+        branched_from_message_id: str | None = None,
+        branched_cutoff_at: datetime | None = None,
+        join_into_session_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)  # validate agent exists
         session = Session(
@@ -123,6 +126,10 @@ class MockMemoryDatabase(IAgentDatabase):
             additional_prompt_path=additional_prompt_path,
             model=model,
             model_params=dict(model_params) if model_params is not None else None,
+            branched_from_session_id=branched_from_session_id,
+            branched_from_message_id=branched_from_message_id,
+            branched_cutoff_at=branched_cutoff_at,
+            join_into_session_id=join_into_session_id,
         )
         if system_prompt_snapshot is not None:
             self._point_at(session, system_prompt_snapshot, new_chain=True)
@@ -136,9 +143,9 @@ class MockMemoryDatabase(IAgentDatabase):
         self._messages[session.id] = []
         return session
 
-    async def get_session(self, session_id: str) -> Session:
+    async def get_session(self, session_id: str, *, include_deleted: bool = False) -> Session:
         session = self._sessions.get(session_id)
-        if session is None or session.deleted_at is not None:
+        if session is None or (session.deleted_at is not None and not include_deleted):
             raise KeyError(f"Session '{session_id}' not found")
         return session
 
@@ -173,6 +180,24 @@ class MockMemoryDatabase(IAgentDatabase):
         session.updated_at = datetime.now(timezone.utc)
         return session
 
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        session = await self.get_session(session_id)
+        session.dispatch_mode = enabled
+        session.updated_at = datetime.now(timezone.utc)
+        return session
+
+    async def pending_joins(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for s in self._sessions.values():
+            if s.join_into_session_id and not s.joined_message_id and s.deleted_at is None:
+                counts[s.join_into_session_id] = counts.get(s.join_into_session_id, 0) + 1
+        return counts
+
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        session = await self.get_session(session_id, include_deleted=True)
+        session.joined_message_id = message_id
+        return session
+
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         session = await self.get_session(session_id)
         session.parent_session_id = parent_session_id
@@ -205,6 +230,7 @@ class MockMemoryDatabase(IAgentDatabase):
         *,
         from_session_id: str | None = None,
         metadata: dict | None = None,
+        created_at: datetime | None = None,
     ) -> Message:
         session = await self.get_session(session_id)  # validate session exists
         message = Message(
@@ -214,8 +240,11 @@ class MockMemoryDatabase(IAgentDatabase):
             from_session_id=from_session_id,
             metadata=dict(metadata or {}),
         )
+        if created_at is not None:
+            message.created_at = created_at
         self._messages[session_id].append(message)
-        session.last_message_at = message.created_at
+        if session.last_message_at is None or message.created_at > session.last_message_at:
+            session.last_message_at = message.created_at
         await get_plugin_event_bus().publish(PluginEvent(
             type="message.created",
             source=from_session_id or "augentia",
@@ -223,44 +252,15 @@ class MockMemoryDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> List[Message]:
-        await self.get_session(session_id)
-        return [m for m in self._messages[session_id] if include_deleted or m.deleted_at is None]
-
-    async def clone_messages(
-        self,
-        source_session_id: str,
-        target_session_id: str,
-        *,
-        before_message_id: str | None = None,
+    async def get_own_messages(
+        self, session_id: str, *, include_deleted: bool = False,
+        before: datetime | None = None,
     ) -> List[Message]:
-        await self.get_session(source_session_id)
-        await self.get_session(target_session_id)
-        source = sorted(
-            (m for m in self._messages[source_session_id] if m.deleted_at is None),
-            key=lambda message: (message.created_at, message.id),
-        )
-        if before_message_id is not None:
-            index = next((i for i, m in enumerate(source) if m.id == before_message_id), None)
-            if index is None:
-                raise KeyError(f"Message '{before_message_id}' not found")
-            source = source[:index]
-        cloned = []
-        for original in source:
-            role, content, metadata = plain_copy_fields(original)
-            message = Message(
-                session_id=target_session_id,
-                role=role,
-                content=content,
-                from_session_id=original.from_session_id,
-                metadata=metadata,
-            )
-            message.created_at = original.created_at
-            self._messages[target_session_id].append(message)
-            cloned.append(message)
-        if cloned:
-            self._sessions[target_session_id].last_message_at = cloned[-1].created_at
-        return cloned
+        rows = sorted(self._messages.get(session_id, []), key=lambda m: (m.created_at, m.id))
+        # Copies: callers (borrowed history) adjust the rows they get.
+        return [m.model_copy(deep=True) for m in rows
+                if (include_deleted or m.deleted_at is None)
+                and (before is None or m.created_at < before)]
 
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)
@@ -273,7 +273,8 @@ class MockMemoryDatabase(IAgentDatabase):
             if message.deleted_at is None and message.created_at >= target.created_at:
                 message.deleted_at = now
         visible = [m for m in messages if m.deleted_at is None]
-        self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None
+        self._sessions[session_id].last_message_at = (
+            max(m.created_at for m in visible) if visible else None)
         return target
 
     async def soft_delete_messages(
@@ -290,7 +291,8 @@ class MockMemoryDatabase(IAgentDatabase):
                     message.metadata = {**message.metadata, **metadata}
                 changed += 1
         visible = [m for m in self._messages[session_id] if m.deleted_at is None]
-        self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None
+        self._sessions[session_id].last_message_at = (
+            max(m.created_at for m in visible) if visible else None)
         return changed
 
     # ------- v2 plugin service runs / logs -------

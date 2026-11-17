@@ -89,9 +89,79 @@ async def build_runner(
     # The CAgent store reads the persisted history itself on every turn.
     await adapter.start(session.system_prompt_snapshot or "")
     runner = SessionRunner(session.id, adapter, db)
+    if session.join_into_session_id and not session.joined_message_id:
+        runner.on_turn_finished = lambda: join_branch(session.id, db, registry)
     await runner.start()
     registry.register(session.id, runner)
     return runner
+
+
+# Sent to the joined session's subscribers so clients reload its transcript.
+HISTORY_JOINED = "history_joined"
+# Sent when a session's reported status may have changed without a turn
+# (fork-dispatch started / its last result joined): clients refetch it.
+SESSION_CHANGED = "session_changed"
+
+
+def announce_dispatch_state(registry: AdapterRegistry, session_id: str) -> None:
+    from app.adapters.base import StreamEvent, StreamEventType
+    try:
+        runner = registry.get(session_id)
+    except KeyError:
+        return
+    runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=SESSION_CHANGED))
+
+
+async def join_branch(branch_id: str, db: IAgentDatabase, registry: AdapterRegistry) -> None:
+    """Append a finished fork-dispatch branch turn to its target session.
+
+    Runs the write on the target's runner (between its turns). No-op while
+    the branch's first turn is still running, once it is joined, or when the
+    target is gone.
+    """
+    from app.adapters.base import StreamEvent, StreamEventType
+    from app.core.branch_join import write_join
+
+    try:
+        branch = await db.get_session(branch_id, include_deleted=True)
+    except KeyError:
+        return
+    if not branch.join_into_session_id or branch.joined_message_id:
+        return
+    try:
+        target = await db.get_session(branch.join_into_session_id)
+        agent = await db.get_agent(target.agent_id)
+    except KeyError:
+        logger.warning("join target gone branch=%s target=%s", branch_id, branch.join_into_session_id)
+        return
+    template = (agent.config or {}).get("branch_join_template")
+    runner = await get_or_rehydrate(target, db, registry)
+    if runner is None:
+        row = await write_join(db, branch, template=template)
+    else:
+        row = await runner.run_between_turns(lambda: write_join(db, branch, template=template))
+        if row is not None:
+            runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=HISTORY_JOINED))
+            # Possibly the last pending result: pending_joins changed.
+            runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=SESSION_CHANGED))
+    if row is not None:
+        try:
+            registry.get(branch_id).on_turn_finished = None
+        except KeyError:
+            pass
+
+
+async def join_pending_branches(db: IAgentDatabase, registry: AdapterRegistry) -> int:
+    """Redo joins a restart interrupted (the branch turn ended, no row yet)."""
+    count = 0
+    for session in await db.list_sessions():
+        if session.join_into_session_id and not session.joined_message_id:
+            try:
+                await join_branch(session.id, db, registry)
+                count += 1
+            except Exception:
+                logger.exception("pending join failed branch=%s", session.id)
+    return count
 
 
 async def get_or_rehydrate(
@@ -113,7 +183,8 @@ async def get_or_rehydrate(
     # tool confirm died with the old process (its Future is gone, so an approve
     # frame would be silently dropped). Reset the stale busy status so the
     # session is usable again instead of stuck in WAITING_CONFIRM/RUNNING.
-    if session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+    if session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                          SessionStatus.COMPRESSING):
         logger.warning("resetting stale status=%s session=%s", session.status, session.id)
         session = await db.update_session_status(session.id, SessionStatus.WAITING_USER)
     try:

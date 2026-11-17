@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from app.adapters.base import StreamEvent, StreamEventType
 from app.db.interface import IAgentDatabase
 from app.db.deps import get_db
 from app.models.domain import Session, SessionStatus, MessageRole, AgentType
@@ -19,7 +20,10 @@ from app.plugins.host import PluginHost, SessionPluginInfo, get_plugin_host
 from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
+from app.core.branch_join import is_branch_summary, joined_turn_rows
+from app.core import dispatching
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
+from app.core.borrowed import BORROWED_FROM, is_borrowed
 from app.core.workspace import (
     copy_workspace,
     create_git_worktree,
@@ -117,6 +121,9 @@ class PostMessageRequest(BaseModel):
     # step_reminder_at, step_reminder, tool_limit_at, tool_limit_message
     # (null for step_reminder_at / tool_limit_at turns it off this turn).
     turn_overrides: dict | None = None
+    # false: only add the message to the history, as context; no turn runs
+    # and nothing replies (see _inject_context). turn_overrides is ignored.
+    reply: bool = True
 
 
 class CompressRequest(BaseModel):
@@ -127,6 +134,10 @@ class CompressRequest(BaseModel):
     hours: float | None = None
     # Replaces the summarizer instruction for this compression.
     instruction: str | None = None
+    # With since: stop at the last turn that ended before this time; later
+    # turns stay, and the summary row is placed right after what it covers
+    # (before them). For summarizing a past day after the next one started.
+    until: datetime | None = None
 
 
 class RetryMessageRequest(BaseModel):
@@ -140,6 +151,24 @@ class RetryMessageRequest(BaseModel):
 
 class DeriveSessionRequest(BaseModel):
     title: str | None = None
+    # The branch's own model / model_params, as in PUT /sessions/{id}/model.
+    # Each field independently: omitted keeps the source's value, null (or a
+    # blank model) uses the agent's, a value sets it.
+    model: str | None = None
+    model_params: dict | None = None
+
+
+class DispatchModeRequest(BaseModel):
+    enabled: bool
+
+
+class ForkDispatchRequest(BaseModel):
+    # One branch per message, each running that message as its turn.
+    messages: list[str]
+    # Optional titles, one per message (default: "<title> · 并行 i").
+    titles: list[str] | None = None
+    # As PostMessageRequest.turn_overrides, applied to every branch's turn.
+    turn_overrides: dict | None = None
 
 
 async def _turn_images(db: IAgentDatabase, session: Session, images) -> list[dict]:
@@ -166,8 +195,20 @@ async def _create_derived_session(
     registry: AdapterRegistry,
     *,
     title: str | None,
-    before_message_id: str | None = None,
+    cutoff: datetime | None = None,
+    branched_from_message_id: str | None = None,
+    join_into: bool = False,
+    model_override: tuple[str | None, dict | None] | None = None,
 ) -> Session:
+    """A session continuing `source`'s history.
+
+    With a cutoff (diverge) the branch copies nothing: it borrows the source's
+    rows created before the cutoff, as they are now (see app.core.borrowed).
+    Without one (sub-sessions that only share settings) it starts empty.
+    model_override: (model, model_params) for the branch instead of the
+    source's (see _derive_model).
+    """
+    model, model_params = model_override or (source.model, source.model_params)
     agent = await db.get_agent(source.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="derived sessions currently support only tool_use sessions")
@@ -175,18 +216,25 @@ async def _create_derived_session(
         source.agent_id,
         working_dir=source.working_dir,
         title=title,
-        parent_session_id=source.id,
+        # A branch is not a sub-agent: it records where it came from instead
+        # of a parent (list_subagents and the Sub-agents panel only follow
+        # parent_session_id).
+        branched_from_session_id=source.id,
+        branched_from_message_id=branched_from_message_id,
+        branched_cutoff_at=cutoff,
+        # fork-dispatch: append the branch's first turn back to the source.
+        join_into_session_id=source.id if join_into else None,
         additional_prompt=source.additional_prompt,
         additional_prompt_path=source.additional_prompt_path,
         # Versions are immutable, so the branch shares the source's current
         # one; editing the branch's prompt later chains a version of its own.
         system_prompt_id=source.system_prompt_id,
-        # Same model as the source; the branch can change it on its own.
-        model=source.model,
-        model_params=source.model_params,
+        # The source's model unless the request picked one; the branch can
+        # change it on its own later.
+        model=model,
+        model_params=model_params,
     )
     try:
-        await db.clone_messages(source.id, target.id, before_message_id=before_message_id)
         await build_runner(target, agent, db, registry)
         await db.update_session_status(target.id, SessionStatus.WAITING_USER)
         created = await db.get_session(target.id)
@@ -196,6 +244,23 @@ async def _create_derived_session(
         await registry.remove(target.id)
         await db.soft_delete_session(target.id)
         raise
+
+
+def _derive_model(body: DeriveSessionRequest, source: Session) -> tuple[str | None, dict | None]:
+    """The branch's (model, model_params): the source's for fields the request
+    omitted, else the request's (null: the agent's); 400 on bad params."""
+    sent = body.model_fields_set
+    model = source.model
+    if "model" in sent:
+        model = (body.model.strip() if body.model is not None else None) or None
+    params = source.model_params
+    if "model_params" in sent:
+        try:
+            params = (validate_model_params(body.model_params)
+                      if body.model_params is not None else None)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return model, params
 
 
 @router.post("", response_model=Session, status_code=201)
@@ -291,13 +356,15 @@ async def _session_created(session: Session) -> None:
 
 @router.get("", response_model=list[Session])
 async def list_sessions(db: IAgentDatabase = Depends(get_db)):
-    return await db.list_sessions()
+    # status is DISPATCHING while fork-dispatch results are pending (see
+    # app.core.dispatching); pending_joins says how many.
+    return await dispatching.view_all(db, await db.list_sessions())
 
 
 @router.get("/{session_id}", response_model=Session)
 async def get_session(session_id: str, db: IAgentDatabase = Depends(get_db)):
     try:
-        return await db.get_session(session_id)
+        return await dispatching.view(db, await db.get_session(session_id))
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -381,7 +448,7 @@ async def update_session_model(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(
             status_code=409,
@@ -480,7 +547,7 @@ async def update_session_system_prompt(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(
             status_code=409,
@@ -537,7 +604,7 @@ async def update_session_working_dir(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(
             status_code=409,
@@ -804,6 +871,10 @@ def transcript_messages(messages: list, *, include_compression: bool) -> list:
 async def compressed_messages(db: IAgentDatabase, session_id: str, summary_id: str) -> list:
     """Rows the summary `summary_id` replaced, in order (raises KeyError)."""
     rows = await db.get_messages(session_id, include_deleted=True)
+    joined = next((m for m in rows if m.id == summary_id and is_branch_summary(m)), None)
+    if joined is not None:
+        # A fork-dispatch result: the branch's turn, read from the branch.
+        return transcript_messages(await joined_turn_rows(db, joined), include_compression=True)
     if not any(m.id == summary_id and is_summary(m) for m in rows):
         raise KeyError(f"Summary '{summary_id}' not found")
     return transcript_messages(
@@ -824,6 +895,85 @@ async def get_compressed_messages(
         raise HTTPException(status_code=404, detail=str(e))
 
 
+@router.put("/{session_id}/dispatching", response_model=Session)
+async def set_dispatch_mode(
+    session_id: str,
+    body: DispatchModeRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Turn dispatch mode on or off.
+
+    On: every POST /messages runs in a new branch of this session (borrowing
+    its history as of then) and that branch's result is joined back; the
+    session reports status DISPATCHING while idle and runs no turns of its
+    own (typing into it and rewrite are refused; compression is allowed and
+    covers the joined results). Turning it on
+    needs an idle session. Off: back to ordinary turns; branches still
+    running keep joining their results, and the session takes new messages
+    once they are all in (pending_joins == 0).
+    """
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    if body.enabled and not session.dispatch_mode:
+        _refuse_while_running(registry, session, "turn dispatch mode on")
+    if body.enabled != session.dispatch_mode:
+        session = await db.update_session_dispatch_mode(session_id, body.enabled)
+        logger.info("dispatch mode session=%s enabled=%s", session_id, body.enabled)
+        _announce_state(registry, session_id)
+    return await dispatching.view(db, session)
+
+
+@router.post("/{session_id}/fork-dispatch", status_code=202)
+async def fork_dispatch(
+    session_id: str,
+    body: ForkDispatchRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Run several messages concurrently, each in its own branch, and join the
+    results back (a batch of what POST /messages does in dispatch mode).
+
+    Each message gets a branch borrowing this session's whole current history
+    (see app.core.borrowed); its turn runs in parallel with the others. When
+    a branch's turn ends, its result (the turn summary when turn compression
+    ran, else its last reply; a note if it failed) is appended to this
+    session as a branch_summary row plus a turn_end mark, on this session's
+    queue, in completion order. Expanding that row shows the branch's turn.
+    Branches share this session's working directory. Outside dispatch mode
+    it is one batch at a time (409 while a previous one is being joined).
+    """
+    messages = [m.strip() for m in body.messages]
+    if not messages or any(not m for m in messages):
+        raise HTTPException(status_code=400, detail="messages must be non-empty strings")
+    if body.titles is not None and len(body.titles) != len(messages):
+        raise HTTPException(status_code=400, detail="titles must match messages one to one")
+    overrides = _turn_overrides(body.turn_overrides)
+    try:
+        source = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    # Not over a running turn: the branches start from a settled history. In
+    # dispatch mode it adds to whatever runs already (the session itself runs
+    # no turns then); otherwise one batch at a time.
+    _refuse_while_running(registry, source, "dispatch")
+    if not source.dispatch_mode:
+        pending = await dispatching.pending_for(db, session_id)
+        if pending:
+            raise HTTPException(status_code=409, detail=dispatching.PENDING_DETAIL.format(n=pending))
+    branches = []
+    for i, content in enumerate(messages):
+        title = (body.titles[i].strip() if body.titles and body.titles[i].strip()
+                 else f"{source.title or 'Session'} · 并行 {i + 1}")
+        branch = await _dispatch(source, db, registry, content, title=title, turn_overrides=overrides)
+        branches.append({"session_id": branch.id, "title": branch.title, "message": content})
+    logger.info("fork-dispatch session=%s branches=%s", session_id, [b["session_id"] for b in branches])
+    _announce_state(registry, session_id)
+    return {"branches": branches}
+
+
 @router.post("/{session_id}/messages/{message_id}/diverge", response_model=Session, status_code=201)
 async def diverge_from_message(
     session_id: str,
@@ -839,27 +989,38 @@ async def diverge_from_message(
         raise HTTPException(status_code=404, detail=str(e))
     target = next((message for message in messages if message.id == message_id), None)
     if target is None:
+        # A row a summary replaced (metadata.compressed_by) is soft-deleted, so it is not
+        # among the live rows; it can still be a divergence point. The branch borrows the
+        # rows created before it as they are when the branch is made (app.core.borrowed),
+        # which revives the other rows that summary covered, so the branch sees the turn up
+        # to that point instead of its summary. Rows deleted with the delete button or
+        # discarded by a rewrite stay out (404 as before).
+        target = next((m for m in await db.get_messages(session_id, include_deleted=True)
+                       if m.id == message_id and (m.metadata or {}).get(COMPRESSED_BY)), None)
+    if target is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
-    # The branch keeps only the history *before* the target, so the target
-    # message itself (user input or agent reply) is not carried over.
-    # A summary is the exception: the branch keeps history *through* it (it is
-    # copied as a plain user message, see plain_copy_fields), plus the marks
-    # right after it (its turn's turn_end), so the branch restarts from that
-    # summary. Allowed while the source is RUNNING: it only reads
-    # already-persisted rows.
+    # The branch borrows the history *before* the target (nothing is copied),
+    # so the target message itself (user input or agent reply) is not part of
+    # it. A summary is the exception: the branch keeps history *through* it
+    # plus the marks right after it (its turn's turn_end), so it restarts from
+    # that summary. Borrowed rows keep their ids, so a summary stays a summary.
+    # Allowed while the source is RUNNING: it only reads persisted rows.
     if is_summary(target):
         index = messages.index(target)
-        before_message_id = next(
-            (m.id for m in messages[index + 1:] if m.role != MessageRole.MARK), None)
+        first_out = next((m for m in messages[index + 1:] if m.role != MessageRole.MARK), None)
+        cutoff = first_out.created_at if first_out else datetime.now(timezone.utc)
     elif target.role in (MessageRole.USER, MessageRole.AGENT):
-        before_message_id = message_id
+        cutoff = target.created_at
     else:
         raise HTTPException(status_code=400, detail="only user or agent messages or summaries can be used as a divergence point")
+    model_override = _derive_model(body, source)
     try:
         return await _create_derived_session(
             source, db, registry,
             title=body.title or f"{source.title or 'Session'} · Branch",
-            before_message_id=before_message_id,
+            cutoff=cutoff,
+            branched_from_message_id=message_id,
+            model_override=model_override,
         )
     except HTTPException:
         raise
@@ -897,12 +1058,14 @@ async def delete_message(
     except KeyError:
         runner = None
     if (runner is not None and runner.is_busy) or session.status in (
-        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+        SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(status_code=409, detail="session is running; delete after the turn finishes")
     index = next((i for i, m in enumerate(messages) if m.id == message_id), None)
     if index is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
+    if is_borrowed(messages[index]):
+        raise HTTPException(status_code=400, detail=_BORROWED_READ_ONLY)
     ids = _deletion_group(messages, index)
     deleted = await db.soft_delete_messages(session_id, ids, metadata={DELETED_BY: "user"})
     logger.info("delete message session=%s message=%s rows=%d", session_id, message_id, deleted)
@@ -910,6 +1073,102 @@ async def delete_message(
         await registry.remove(session_id)
         await get_or_rehydrate(session, db, registry)
     return {"deleted_ids": ids}
+
+
+async def _inject_context(
+    session: Session,
+    db: IAgentDatabase,
+    registry: AdapterRegistry,
+    content: str,
+    images: list[dict],
+    from_session_id: str | None,
+):
+    """Add a user row to the history without running a turn (POST /messages
+    with reply=false), e.g. context for whatever comes next.
+
+    Written on the session's queue between turns, so it never lands inside
+    a turn; no turn_end follows it. The next turn's model sees it right
+    before that turn's input, and it stays as written: turn compression only
+    replaces the rows after the next turn starts, so it is not part of that
+    turn (a whole-history compression covers it with everything else). In
+    dispatch mode it goes into the session itself, and branches made later
+    borrow it. Clients get the history_compressed status to reload.
+    """
+    from app.adapters.cagent_adapter import HISTORY_COMPRESSED
+
+    # The same prefix the runner bakes into a delivered message, so the model
+    # sees who sent it; the column records it for the UI.
+    text = f"[from-session:{from_session_id}] {content}" if from_session_id else content
+    metadata = {"images": images} if images else None
+
+    async def write():
+        return await db.add_message(
+            session.id, MessageRole.USER, text,
+            from_session_id=from_session_id, metadata=metadata)
+
+    runner = await get_or_rehydrate(session, db, registry)
+    if runner is None:
+        row = await write()
+    else:
+        row = await runner.run_between_turns(write)
+        runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=HISTORY_COMPRESSED))
+    logger.info("context added session=%s row=%s len=%d images=%d",
+                session.id, row.id, len(content), len(images))
+    return row
+
+
+async def _refuse_while_dispatching(db: IAgentDatabase, session: Session, action: str) -> None:
+    """409 for work that would run a turn (or rewrite history) in the session
+    itself: not in dispatch mode (it runs no turns of its own), and not while
+    dispatched results are still to be joined back."""
+    if session.dispatch_mode:
+        raise HTTPException(status_code=409, detail=dispatching.MODE_DETAIL.format(action=action))
+    pending = await dispatching.pending_for(db, session.id)
+    if pending:
+        raise HTTPException(status_code=409, detail=dispatching.PENDING_DETAIL.format(n=pending))
+
+
+def _refuse_while_running(registry: AdapterRegistry, session: Session, action: str) -> None:
+    try:
+        busy = registry.get(session.id).is_busy
+    except KeyError:
+        busy = False
+    if busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                                  SessionStatus.COMPRESSING):
+        raise HTTPException(status_code=409, detail=f"session is running; {action} after the turn finishes")
+
+
+async def _dispatch(
+    source: Session,
+    db: IAgentDatabase,
+    registry: AdapterRegistry,
+    content: str,
+    *,
+    title: str,
+    images: list[dict] | None = None,
+    from_session_id: str | None = None,
+    turn_overrides: dict | None = None,
+) -> Session:
+    """Run `content` as the first turn of a new branch of `source` (borrowing
+    its history as of now); the result is joined back when the turn ends."""
+    branch = await _create_derived_session(
+        source, db, registry, title=title, cutoff=datetime.now(timezone.utc), join_into=True)
+    await registry.get(branch.id).submit(
+        content, from_session_id=from_session_id, images=images or None,
+        turn_overrides=turn_overrides)
+    return branch
+
+
+def _announce_state(registry: AdapterRegistry, session_id: str) -> None:
+    """Tell live clients the reported state changed (they refetch the session)."""
+    from app.core.session_runtime import announce_dispatch_state
+    announce_dispatch_state(registry, session_id)
+
+
+_BORROWED_READ_ONLY = (
+    "this message belongs to the session this branch was made from; "
+    "a branch cannot delete, rewrite or compress the history it borrows"
+)
 
 
 def _deletion_group(messages: list, index: int) -> list[str]:
@@ -984,9 +1243,19 @@ async def compress_session(
     if body.hours is not None:
         since = datetime.now(timezone.utc) - timedelta(hours=body.hours)
     instruction = body.instruction.strip() if body.instruction else None
+    until = body.until
+    if until is not None:
+        if since is None:
+            raise HTTPException(status_code=422, detail="until needs since (or hours)")
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if until <= since:
+            raise HTTPException(status_code=422, detail="until must be after since")
     options = {}
     if since is not None:
         options["since"] = since
+    if until is not None:
+        options["until"] = until
     if instruction:
         options["instruction"] = instruction
     try:
@@ -996,10 +1265,17 @@ async def compress_session(
         raise HTTPException(status_code=404, detail=str(e))
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="manual compression is only supported for tool_use sessions")
+    # Allowed in dispatch mode and while dispatched results are pending: it
+    # runs on the session's queue, so it never interleaves with a join;
+    # running branches keep the history as of their start (app.core.borrowed),
+    # later ones borrow the summary; joined results end in turn_end marks, so
+    # they are whole turns to compress. Only a turn of the session's own
+    # (running or queued) holds it back.
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    if runner.is_busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM):
+    if runner.has_turn or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                                             SessionStatus.COMPRESSING):
         raise HTTPException(status_code=409, detail="session is running; compress after the turn finishes")
     result = await runner.compress(**options)
     logger.info("manual compression session=%s result=%s", session_id, result.get("status"))
@@ -1024,6 +1300,21 @@ async def post_message(
     if not body.content.strip() and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
+    if not body.reply:
+        row = await _inject_context(session, db, registry, body.content, images, body.from_session_id)
+        return {"status": "added", "message_id": row.id}
+    if session.dispatch_mode:
+        # Dispatch mode: this message runs in a new branch of the session and
+        # its result is joined back (app.core.dispatching).
+        stamp = datetime.now(timezone.utc).astimezone().strftime("%H:%M:%S")
+        branch = await _dispatch(
+            session, db, registry, body.content,
+            title=f"{session.title or 'Session'} · 并行 {stamp}",
+            images=images, from_session_id=body.from_session_id, turn_overrides=overrides)
+        logger.info("HTTP dispatch session=%s branch=%s len=%d", session_id, branch.id, len(body.content))
+        _announce_state(registry, session_id)
+        return {"status": "dispatched", "branch_session_id": branch.id}
+    await _refuse_while_dispatching(db, session, "send it messages")
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
@@ -1053,6 +1344,8 @@ async def retry_from_message(
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
     if target.role != MessageRole.USER:
         raise HTTPException(status_code=400, detail="only user messages can be retried")
+    if is_borrowed(target):
+        raise HTTPException(status_code=400, detail=_BORROWED_READ_ONLY)
     agent = await db.get_agent(session.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(
@@ -1071,6 +1364,7 @@ async def retry_from_message(
     if not content and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
+    await _refuse_while_dispatching(db, session, "rewrite from a message")
     await db.soft_delete_messages_from(session_id, message_id)
 
     # Drop any in-memory context that still contains the deleted suffix, then
@@ -1094,15 +1388,26 @@ async def delete_session(
 ):
     logger.info("delete_session id=%s", session_id)
     try:
-        await db.get_session(session_id)
+        session = await db.get_session(session_id)
     except KeyError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     await registry.remove(session_id)
+    if session.join_into_session_id and not session.joined_message_id:
+        # A fork-dispatch branch: join what it finished (stopping it above
+        # ends a running turn as cancelled); after the delete it no longer
+        # holds its target in DISPATCHING either way.
+        from app.core.session_runtime import join_branch
+        try:
+            await join_branch(session_id, db, registry)
+        except Exception:
+            logger.exception("join on delete failed branch=%s", session_id)
     await db.soft_delete_session(session_id)
     host = get_plugin_host()
     await host.session_deleted(session_id)
     await host.event_bus.publish(PluginEvent(type="session.deleted", data={"session_id": session_id}))
+    if session.join_into_session_id:
+        _announce_state(registry, session.join_into_session_id)
 
 
 @router.websocket("/{session_id}/stream")
@@ -1128,7 +1433,7 @@ async def session_stream(
 
     runner = await get_or_rehydrate(session, db, registry)
     # Re-read after rehydrate: it may have reset a stale RUNNING/WAITING_CONFIRM.
-    session = await db.get_session(session_id)
+    session = await dispatching.view(db, await db.get_session(session_id))
     await ws.send_text(json.dumps({"type": "session_state", "data": session.model_dump(mode="json")}))
     if runner is None:
         logger.warning("WS session=%s has no live runner (post-restart, stub)", session_id)
@@ -1164,6 +1469,12 @@ async def session_stream(
                 await ws.send_text(json.dumps({"type": "error", "data": str(e)}))
                 continue
             if not content.strip() and not images:
+                continue
+            current = await db.get_session(session_id)
+            try:
+                await _refuse_while_dispatching(db, current, "type into it")
+            except HTTPException as e:
+                await ws.send_text(json.dumps({"type": "error", "data": e.detail}))
                 continue
             logger.info("WS recv session=%s len=%d images=%d", session_id, len(content), len(images))
             await runner.submit(content, images=images)

@@ -46,7 +46,13 @@ Live/past sessions; form a tree via `parent_session_id`.
 | `agent_id` | VARCHAR(36) | NOT NULL |
 | `title` | VARCHAR(300) | nullable |
 | `working_dir` | VARCHAR(1000) | nullable |
-| `parent_session_id` | VARCHAR(36) | nullable |
+| `parent_session_id` | VARCHAR(36) | nullable; the session that spawned this one as a sub-agent (`subagent` tool / `POST /sessions`) |
+| `branched_from_session_id` | VARCHAR(36) | nullable; set on a branch made by diverge: the session it was branched from |
+| `branched_from_message_id` | VARCHAR(36) | nullable; the message the branch was made at (in the source session) |
+| `branched_cutoff_at` | DATETIME(3) | nullable; the branch borrows the source's rows created before this time (see below) |
+| `join_into_session_id` | VARCHAR(36) | nullable; fork-dispatch branches: the session its first turn's result is appended to |
+| `joined_message_id` | VARCHAR(36) | nullable; the `branch_summary` row that result became (NULL while the join is pending) |
+| `dispatch_mode` | TINYINT(1) | NOT NULL, default 0; dispatch mode on: each `POST /messages` runs in a new branch whose result is joined back |
 | `additional_prompt` | LONGTEXT | nullable |
 | `additional_prompt_path` | VARCHAR(1000) | nullable |
 | `system_prompt_id` | VARCHAR(36) | nullable; current `system_prompts` version of the effective prompt (agent prompt + additions + runtime context, frozen at first start). NULL until first start |
@@ -60,7 +66,37 @@ Live/past sessions; form a tree via `parent_session_id`.
 
 Indexes: `idx_sessions_agent (agent_id)`, `idx_sessions_parent (parent_session_id)`.
 
-`model` / `model_params` are added to existing databases on startup (both NULL).
+`model` / `model_params`, `branched_from_*` and `branched_cutoff_at` are added
+to existing databases on startup (NULL). Branches made before `branched_from_*`
+existed were linked through `parent_session_id` and hold copied rows; they are
+not migrated.
+
+**Branches borrow, they don't copy.** A branch has no rows for the history it
+was made from: reading its messages returns the source's rows created before
+`branched_cutoff_at` (recursively for a branch of a branch), then its own
+rows. Borrowed rows keep their ids and are rebuilt as they were when the
+branch was made (`app/core/borrowed.py::as_of`): rows are never edited after
+they are written, only `deleted_at` set and a reason merged into `metadata`,
+so a row the source deletes or compresses later stays live in the branch.
+API responses mark them `metadata.borrowed_from = <owning session id>`; a
+branch can't delete, rewrite or compress them (400 / compression skipped).
+`IAgentDatabase.get_own_messages` reads only a session's own rows;
+`get_messages` adds the borrowed ones.
+
+**fork-dispatch joins.** `POST /sessions/{id}/fork-dispatch` branches the
+session once per message; each branch has `join_into_session_id` set. When a
+branch's first turn ends, the session it came from gets two rows, written on
+its runner queue between its own turns (`app/core/branch_join.py`): a user
+row with `metadata.cagent_name = "branch_summary"` and
+`metadata.joined_from = {session_id, turn_id, summary_id, task, ok}` (content:
+`config.branch_join_template` filled with the task and the result), and a
+`turn_end` mark. The branch's rows are not copied; expanding the summary
+reads them from the branch. Pending joins are redone at startup.
+
+API responses add `pending_joins` (live branches not joined back yet,
+computed from `join_into_session_id` / `joined_message_id`) and report
+`status` as `DISPATCHING` for an idle session with `dispatch_mode` on; that
+value is never stored in `status`.
 
 The API still returns the resolved text as `agents.system_prompt` /
 `sessions.system_prompt_snapshot` alongside `system_prompt_id`. Databases

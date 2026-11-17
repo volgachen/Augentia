@@ -7,7 +7,6 @@ from typing import Any
 import aiomysql
 from aiomysql import DictCursor, Pool
 
-from app.core.compressed import plain_copy_fields
 from app.config import Settings
 from app.db.interface import IAgentDatabase, _UNSET
 from app.db.seed_agents import SEED_AGENT_ROWS
@@ -54,6 +53,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     title             VARCHAR(300)  DEFAULT NULL,
     working_dir       VARCHAR(1000) DEFAULT NULL,
     parent_session_id VARCHAR(36)   DEFAULT NULL,
+    branched_from_session_id VARCHAR(36) DEFAULT NULL,
+    branched_from_message_id VARCHAR(36) DEFAULT NULL,
+    branched_cutoff_at DATETIME(3)  DEFAULT NULL,
+    join_into_session_id VARCHAR(36) DEFAULT NULL,
+    joined_message_id VARCHAR(36)   DEFAULT NULL,
+    dispatch_mode     TINYINT(1)    NOT NULL DEFAULT 0,
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
     system_prompt_id  VARCHAR(36)   DEFAULT NULL,
@@ -182,6 +187,42 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "sessions",
+        "branched_from_session_id",
+        ["ALTER TABLE sessions ADD COLUMN branched_from_session_id VARCHAR(36) DEFAULT NULL "
+         "AFTER parent_session_id"],
+    ),
+    (
+        "sessions",
+        "branched_from_message_id",
+        ["ALTER TABLE sessions ADD COLUMN branched_from_message_id VARCHAR(36) DEFAULT NULL "
+         "AFTER branched_from_session_id"],
+    ),
+    (
+        "sessions",
+        "branched_cutoff_at",
+        ["ALTER TABLE sessions ADD COLUMN branched_cutoff_at DATETIME(3) DEFAULT NULL "
+         "AFTER branched_from_message_id"],
+    ),
+    (
+        "sessions",
+        "join_into_session_id",
+        ["ALTER TABLE sessions ADD COLUMN join_into_session_id VARCHAR(36) DEFAULT NULL "
+         "AFTER branched_cutoff_at"],
+    ),
+    (
+        "sessions",
+        "joined_message_id",
+        ["ALTER TABLE sessions ADD COLUMN joined_message_id VARCHAR(36) DEFAULT NULL "
+         "AFTER join_into_session_id"],
+    ),
+    (
+        "sessions",
+        "dispatch_mode",
+        ["ALTER TABLE sessions ADD COLUMN dispatch_mode TINYINT(1) NOT NULL DEFAULT 0 "
+         "AFTER joined_message_id"],
+    ),
+    (
+        "sessions",
         "model",
         ["ALTER TABLE sessions ADD COLUMN model VARCHAR(200) DEFAULT NULL AFTER system_prompt_id"],
     ),
@@ -241,6 +282,12 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         title=row.get("title"),
         working_dir=row["working_dir"],
         parent_session_id=row["parent_session_id"],
+        branched_from_session_id=row.get("branched_from_session_id"),
+        branched_from_message_id=row.get("branched_from_message_id"),
+        branched_cutoff_at=row.get("branched_cutoff_at"),
+        join_into_session_id=row.get("join_into_session_id"),
+        joined_message_id=row.get("joined_message_id"),
+        dispatch_mode=bool(row.get("dispatch_mode") or 0),
         # `.get` instead of `[]` so a database that hasn't had the additional_*
         # columns ALTER'd in yet still loads. Operators run that ALTER manually
         # (see CLAUDE.md / migration notes).
@@ -626,6 +673,10 @@ class MySqlDatabase(IAgentDatabase):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        branched_from_session_id: str | None = None,
+        branched_from_message_id: str | None = None,
+        branched_cutoff_at: datetime | None = None,
+        join_into_session_id: str | None = None,
     ) -> Session:
         agent = await self.get_agent(agent_id)
         session = Session(
@@ -638,6 +689,10 @@ class MySqlDatabase(IAgentDatabase):
             additional_prompt_path=additional_prompt_path,
             model=model,
             model_params=model_params,
+            branched_from_session_id=branched_from_session_id,
+            branched_from_message_id=branched_from_message_id,
+            branched_cutoff_at=branched_cutoff_at,
+            join_into_session_id=join_into_session_id,
         )
         # Seed a friendly default so the UI never shows a blank title. Uses the
         # agent's name + creation time; a caller-supplied title (e.g. a spawning
@@ -654,16 +709,22 @@ class MySqlDatabase(IAgentDatabase):
                 await cur.execute(
                     """INSERT INTO sessions
                        (id, agent_id, title, working_dir, parent_session_id,
+                        branched_from_session_id, branched_from_message_id, branched_cutoff_at,
+                        join_into_session_id,
                         additional_prompt, additional_prompt_path,
                         system_prompt_id, model, model_params,
                         status, created_at, updated_at, last_message_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         session.id,
                         session.agent_id,
                         session.title,
                         session.working_dir,
                         session.parent_session_id,
+                        session.branched_from_session_id,
+                        session.branched_from_message_id,
+                        session.branched_cutoff_at,
+                        session.join_into_session_id,
                         session.additional_prompt,
                         session.additional_prompt_path,
                         prompt_id,
@@ -717,6 +778,40 @@ class MySqlDatabase(IAgentDatabase):
                 )
         return session
 
+    async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:
+        session = await self.get_session(session_id)
+        now = datetime.now(timezone.utc)
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE sessions SET dispatch_mode = %s, updated_at = %s WHERE id = %s",
+                    (1 if enabled else 0, now, session_id),
+                )
+        session.dispatch_mode = enabled
+        session.updated_at = now
+        return session
+
+    async def pending_joins(self) -> dict[str, int]:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute(
+                    "SELECT join_into_session_id AS target, COUNT(*) AS n FROM sessions "
+                    "WHERE join_into_session_id IS NOT NULL AND joined_message_id IS NULL "
+                    "AND deleted_at IS NULL GROUP BY join_into_session_id")
+                rows = await cur.fetchall()
+        return {r["target"]: int(r["n"]) for r in rows}
+
+    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                changed = await cur.execute(
+                    "UPDATE sessions SET joined_message_id = %s WHERE id = %s",
+                    (message_id, session_id),
+                )
+        if changed == 0:
+            raise KeyError(f"Session '{session_id}' not found")
+        return await self.get_session(session_id, include_deleted=True)
+
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         session = await self.get_session(session_id)
         session.parent_session_id = parent_session_id
@@ -729,12 +824,11 @@ class MySqlDatabase(IAgentDatabase):
                 )
         return session
 
-    async def get_session(self, session_id: str) -> Session:
+    async def get_session(self, session_id: str, *, include_deleted: bool = False) -> Session:
+        live = "" if include_deleted else " AND s.deleted_at IS NULL"
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
-                await cur.execute(
-                    f"{_SESSION_SELECT} WHERE s.id = %s AND s.deleted_at IS NULL", (session_id,)
-                )
+                await cur.execute(f"{_SESSION_SELECT} WHERE s.id = %s{live}", (session_id,))
                 row = await cur.fetchone()
         if row is None:
             raise KeyError(f"Session '{session_id}' not found")
@@ -802,6 +896,7 @@ class MySqlDatabase(IAgentDatabase):
         *,
         from_session_id: str | None = None,
         metadata: dict | None = None,
+        created_at: datetime | None = None,
     ) -> Message:
         await self.get_session(session_id)
         message = Message(
@@ -811,6 +906,8 @@ class MySqlDatabase(IAgentDatabase):
             from_session_id=from_session_id,
             metadata=dict(metadata or {}),
         )
+        if created_at is not None:
+            message.created_at = created_at
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -832,8 +929,9 @@ class MySqlDatabase(IAgentDatabase):
                 # messages, which keeps the dashboard's sort key a plain column
                 # read instead of a MAX() join over the (large) messages table.
                 await cur.execute(
-                    "UPDATE sessions SET last_message_at = %s WHERE id = %s",
-                    (message.created_at, session_id),
+                    "UPDATE sessions SET last_message_at = %s WHERE id = %s "
+                    "AND (last_message_at IS NULL OR last_message_at < %s)",
+                    (message.created_at, session_id, message.created_at),
                 )
         await get_plugin_event_bus().publish(PluginEvent(
             type="message.created",
@@ -842,84 +940,25 @@ class MySqlDatabase(IAgentDatabase):
         ))
         return message
 
-    async def get_messages(self, session_id: str, *, include_deleted: bool = False) -> list[Message]:
-        await self.get_session(session_id)
-        live = "" if include_deleted else " AND deleted_at IS NULL"
+    async def get_own_messages(
+        self, session_id: str, *, include_deleted: bool = False,
+        before: datetime | None = None,
+    ) -> list[Message]:
+        where = "" if include_deleted else " AND deleted_at IS NULL"
+        params: list[Any] = [session_id]
+        if before is not None:
+            where += " AND created_at < %s"
+            params.append(before)
         async with self._pool.acquire() as conn:
             async with conn.cursor(DictCursor) as cur:
                 await cur.execute(
                     f"""SELECT * FROM messages
-                       WHERE session_id = %s{live}
+                       WHERE session_id = %s{where}
                        ORDER BY created_at, id""",
-                    (session_id,),
+                    params,
                 )
                 rows = await cur.fetchall()
         return [_row_to_message(r) for r in rows]
-
-    async def clone_messages(
-        self,
-        source_session_id: str,
-        target_session_id: str,
-        *,
-        before_message_id: str | None = None,
-    ) -> list[Message]:
-        await self.get_session(source_session_id)
-        await self.get_session(target_session_id)
-        async with self._pool.acquire() as conn:
-            await conn.begin()
-            try:
-                async with conn.cursor(DictCursor) as cur:
-                    await cur.execute(
-                        """SELECT * FROM messages
-                           WHERE session_id = %s AND deleted_at IS NULL
-                           ORDER BY created_at, id""",
-                        (source_session_id,),
-                    )
-                    rows = await cur.fetchall()
-                    originals = [_row_to_message(row) for row in rows]
-                    if before_message_id is not None:
-                        index = next(
-                            (i for i, message in enumerate(originals) if message.id == before_message_id),
-                            None,
-                        )
-                        if index is None:
-                            raise KeyError(f"Message '{before_message_id}' not found")
-                        originals = originals[:index]
-                    cloned: list[Message] = []
-                    for original in originals:
-                        role, content, metadata = plain_copy_fields(original)
-                        message = Message(
-                            session_id=target_session_id,
-                            role=role,
-                            content=content,
-                            from_session_id=original.from_session_id,
-                            metadata=metadata,
-                            created_at=original.created_at,
-                        )
-                        await cur.execute(
-                            """INSERT INTO messages
-                               (id, session_id, role, content, from_session_id, metadata, created_at)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                            (
-                                message.id,
-                                message.session_id,
-                                message.role.value,
-                                message.content,
-                                message.from_session_id,
-                                _metadata_json(message.metadata),
-                                message.created_at,
-                            ),
-                        )
-                        cloned.append(message)
-                    await cur.execute(
-                        "UPDATE sessions SET last_message_at = %s WHERE id = %s",
-                        (cloned[-1].created_at if cloned else None, target_session_id),
-                    )
-                await conn.commit()
-            except Exception:
-                await conn.rollback()
-                raise
-        return cloned
 
     async def soft_delete_messages_from(self, session_id: str, message_id: str) -> Message:
         await self.get_session(session_id)
