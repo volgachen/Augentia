@@ -778,7 +778,8 @@ async def set_dispatch_mode(
     On: every POST /messages runs in a new branch of this session (borrowing
     its history as of then) and that branch's result is joined back; the
     session reports status DISPATCHING while idle and runs no turns of its
-    own (typing into it, rewrite and compression are refused). Turning it on
+    own (typing into it and rewrite are refused; compression is allowed and
+    covers the joined results). Turning it on
     needs an idle session. Off: back to ordinary turns; branches still
     running keep joining their results, and the session takes new messages
     once they are all in (pending_joins == 0).
@@ -1072,12 +1073,17 @@ async def compress_session(
         raise HTTPException(status_code=404, detail=str(e))
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="manual compression is only supported for tool_use sessions")
-    await _refuse_while_dispatching(db, session, "compress it")
+    # Allowed in dispatch mode and while dispatched results are pending: it
+    # runs on the session's queue, so it never interleaves with a join;
+    # running branches keep the history as of their start (app.core.borrowed),
+    # later ones borrow the summary; joined results end in turn_end marks, so
+    # they are whole turns to compress. Only a turn of the session's own
+    # (running or queued) holds it back.
     runner = await get_or_rehydrate(session, db, registry)
     if runner is None:
         raise HTTPException(status_code=409, detail="session has no live adapter")
-    if runner.is_busy or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
-                                            SessionStatus.COMPRESSING):
+    if runner.has_turn or session.status in (SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM,
+                                             SessionStatus.COMPRESSING):
         raise HTTPException(status_code=409, detail="session is running; compress after the turn finishes")
     result = await runner.compress(**options)
     logger.info("manual compression session=%s result=%s", session_id, result.get("status"))

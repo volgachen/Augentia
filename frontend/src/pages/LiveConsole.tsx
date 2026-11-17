@@ -209,7 +209,8 @@ export default function LiveConsole() {
   const generating = session.status === "RUNNING" || compressingNow;
   // Dispatch mode: messages (POST /messages) run in new branches whose
   // results are joined back; the session runs no turns of its own, so typing
-  // here, rewrite and compression are off. Outside it, results still to
+  // here and rewrite are off (compression stays on: it summarizes the joined
+  // results). Outside it, results still to
   // come from a dispatch also hold new messages back (the backend 409s).
   const dispatchMode = !!session.dispatch_mode;
   const pendingJoins = session.pending_joins ?? 0;
@@ -643,7 +644,7 @@ export default function LiveConsole() {
                   <button
                     type="button"
                     onClick={handleCompress}
-                    disabled={generating || dispatching || compressing || events.length === 0}
+                    disabled={generating || compressing || events.length === 0}
                     title="Summarize history through the last completed turn, in place (or only the last N hours, keeping earlier history). Original messages stay visible but the model sees only the summary."
                     className="w-full rounded bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-500 disabled:opacity-40"
                   >

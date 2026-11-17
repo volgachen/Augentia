@@ -131,6 +131,14 @@ class SessionRunner:
     def is_busy(self) -> bool:
         return self._turn_task is not None or not self._inbox.empty()
 
+    @property
+    def has_turn(self) -> bool:
+        """A turn is running or queued (between-turns jobs and compressions
+        don't count: they wait their turn on the queue anyway)."""
+        return self._turn_task is not None or any(
+            item.job is None and item.compress_result is None
+            for item in list(self._inbox._queue))  # noqa: SLF001 — asyncio.Queue's deque
+
     async def compress(self, **options) -> dict:
         """Queue a manual compression behind any pending turns and await it.
 

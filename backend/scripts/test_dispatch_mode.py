@@ -11,7 +11,7 @@ Covers:
     result is joined back; messages run concurrently; later messages borrow
     the results already joined
   - in dispatch mode the session runs no turns of its own: retry and
-    compression -> 409; fork-dispatch adds branches
+    compression works there (also with a branch running); fork-dispatch adds branches
   - turning it off: back to ordinary turns once pending results are in
   - a branch deleted after its join stays expandable
   - the mode survives a rebuilt runner (status writes can't clear it)
@@ -85,6 +85,9 @@ async def main() -> int:
 
     async def model(*, messages, tools, tool_choice=None):
         text = last_user(messages)
+        if text.startswith("Summarize"):
+            # whole-history compression (CAgent default instruction)
+            return {"content": "DAY SUMMARY"}
         seen[text] = messages
         if text.startswith("msg "):
             active["now"] += 1
@@ -173,12 +176,37 @@ async def main() -> int:
             user = next(m for m in await db.get_own_messages("src") if m.content == "hello")
             await expect_409("retry", retry_from_message(
                 "src", user.id, RetryMessageRequest(content="x"), db=db, registry=registry))
-            await expect_409("compress", compress_session(
-                "src", CompressRequest(), db=db, registry=registry))
             r = await fork_dispatch("src", ForkDispatchRequest(messages=["msg five", "msg six"]),
                                     db=db, registry=registry)
             check(len(r["branches"]) == 2, "fork-dispatch adds a batch in dispatch mode")
             await wait_for(lambda: _gte_async(joined_count, 6))
+
+            section("compression in dispatch mode")
+            gate.clear()
+            running = await post("msg during compress")
+            await asyncio.sleep(0.1)
+            shown = await get_session("src", db=db)
+            check(shown.status.value == "DISPATCHING" and shown.pending_joins == 1,
+                  "one branch running while we compress")
+            r = await compress_session("src", CompressRequest(), db=db, registry=registry)
+            check(r.get("status") == "compressed" and r.get("kind") == "session",
+                  f"POST /compress works in dispatch mode with a branch running ({r.get('status')}: {r.get('reason')})")
+            check((await get_session("src", db=db)).status.value == "DISPATCHING",
+                  "still DISPATCHING after compressing")
+            visible = [m for m in await db.get_messages("src") if is_branch_summary(m)]
+            check(not visible, f"joined results are now covered by the summary ({len(visible)} still live)")
+            gate.set()
+            check(await wait_for(lambda: _joined(db, running["branch_session_id"])),
+                  "the branch running during the compression joins back afterwards")
+            sent = json.dumps(seen["msg during compress"], ensure_ascii=False)
+            check("result of msg one" in sent and "DAY SUMMARY" not in sent,
+                  "that branch kept the history as of its start (originals, not the summary)")
+            later = await post("msg after compress")
+            await wait_for(lambda: _joined(db, later["branch_session_id"]))
+            sent = json.dumps(seen["msg after compress"], ensure_ascii=False)
+            check("DAY SUMMARY" in sent and "result of msg during compress" in sent
+                  and "result of msg one" not in sent,
+                  "a later branch borrows the summary plus the join after it")
 
             section("the mode survives a rebuilt runner")
             await registry.remove("src")
@@ -187,8 +215,9 @@ async def main() -> int:
                   "still DISPATCHING after the runner is rebuilt")
 
             section("a deleted branch's joined result stays expandable")
-            first = next(m for m in await db.get_own_messages("src") if is_branch_summary(m)
-                         and m.metadata[JOINED_FROM]["session_id"] == b1.id)
+            # (compressed under the summary above, so read deleted rows too)
+            first = next(m for m in await db.get_own_messages("src", include_deleted=True)
+                         if is_branch_summary(m) and m.metadata[JOINED_FROM]["session_id"] == b1.id)
             await delete_session(b1.id, db=db, registry=registry)
             rows_a = await compressed_messages(db, "src", first.id)
             check([m.content for m in rows_a if m.role == MessageRole.USER] == ["msg one"],
