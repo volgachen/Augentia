@@ -119,6 +119,10 @@ class CompressRequest(BaseModel):
     hours: float | None = None
     # Replaces the summarizer instruction for this compression.
     instruction: str | None = None
+    # With since: stop at the last turn that ended before this time; later
+    # turns stay, and the summary row is placed right after what it covers
+    # (before them). For summarizing a past day after the next one started.
+    until: datetime | None = None
 
 
 class RetryMessageRequest(BaseModel):
@@ -1061,9 +1065,19 @@ async def compress_session(
     if body.hours is not None:
         since = datetime.now(timezone.utc) - timedelta(hours=body.hours)
     instruction = body.instruction.strip() if body.instruction else None
+    until = body.until
+    if until is not None:
+        if since is None:
+            raise HTTPException(status_code=422, detail="until needs since (or hours)")
+        if until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        if until <= since:
+            raise HTTPException(status_code=422, detail="until must be after since")
     options = {}
     if since is not None:
         options["since"] = since
+    if until is not None:
+        options["until"] = until
     if instruction:
         options["instruction"] = instruction
     try:

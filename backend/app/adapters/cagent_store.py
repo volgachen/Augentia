@@ -143,6 +143,10 @@ class AugentiaStore:
         # Injected by the adapter before each turn: the settings this turn
         # overrides, recorded on its first user row as metadata.turn_overrides.
         self.pending_turn_overrides: dict | None = None
+        # Set by the adapter for a compression with `until`: the next
+        # range_summary row is placed at this time (right after what it
+        # covers) instead of now, so later rows stay after it.
+        self.pending_summary_at: datetime | None = None
         # Set by the adapter's model wrapper after each agent-model call: that
         # response's details (usage, model, finish_reason, id, latency_ms).
         # CAgent saves the reply right after the call, so the next saved row
@@ -255,10 +259,14 @@ class AugentiaStore:
             # The turn's own input row (summaries are user rows too, but named).
             metadata[TURN_OVERRIDES_KEY] = self.pending_turn_overrides
             self.pending_turn_overrides = None
+        placed_at = None
+        if message.get("name") == "range_summary" and self.pending_summary_at is not None:
+            placed_at, self.pending_summary_at = self.pending_summary_at, None
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,
             metadata=metadata,
+            created_at=placed_at,
         )
         if message.get("name") in SUMMARY_NAMES:
             await self._compress_covered(session_id, row)

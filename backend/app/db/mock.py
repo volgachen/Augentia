@@ -231,6 +231,7 @@ class MockMemoryDatabase(IAgentDatabase):
         *,
         from_session_id: str | None = None,
         metadata: dict | None = None,
+        created_at: datetime | None = None,
     ) -> Message:
         session = await self.get_session(session_id)  # validate session exists
         message = Message(
@@ -240,8 +241,11 @@ class MockMemoryDatabase(IAgentDatabase):
             from_session_id=from_session_id,
             metadata=dict(metadata or {}),
         )
+        if created_at is not None:
+            message.created_at = created_at
         self._messages[session_id].append(message)
-        session.last_message_at = message.created_at
+        if session.last_message_at is None or message.created_at > session.last_message_at:
+            session.last_message_at = message.created_at
         await get_plugin_event_bus().publish(PluginEvent(
             type="message.created",
             source=from_session_id or "augentia",
@@ -270,7 +274,8 @@ class MockMemoryDatabase(IAgentDatabase):
             if message.deleted_at is None and message.created_at >= target.created_at:
                 message.deleted_at = now
         visible = [m for m in messages if m.deleted_at is None]
-        self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None
+        self._sessions[session_id].last_message_at = (
+            max(m.created_at for m in visible) if visible else None)
         return target
 
     async def soft_delete_messages(
@@ -287,7 +292,8 @@ class MockMemoryDatabase(IAgentDatabase):
                     message.metadata = {**message.metadata, **metadata}
                 changed += 1
         visible = [m for m in self._messages[session_id] if m.deleted_at is None]
-        self._sessions[session_id].last_message_at = visible[-1].created_at if visible else None
+        self._sessions[session_id].last_message_at = (
+            max(m.created_at for m in visible) if visible else None)
         return changed
 
     # ------- Plugin instances/runs/logs -------

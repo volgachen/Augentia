@@ -301,7 +301,20 @@ def make_agent_class(
                 own_start = cls._created_at(first_own)
                 if own_start is not None and (since is None or since < own_start):
                     since = own_start
-            return super().select_compression_range(ctx, since)
+            until = adapter.compress_until
+            if until is None:
+                return super().select_compression_range(ctx, since)
+            # Stop at the last turn that ended before `until`: hide the later
+            # records from CAgent's pick, then map the indexes back.
+            cut = next((i for i, m in enumerate(ctx.messages)
+                        if (stamp := cls._created_at(m)) is not None and stamp >= until),
+                       len(ctx.messages))
+            full = ctx.messages
+            ctx.messages = full[:cut]
+            try:
+                return super().select_compression_range(ctx, since)
+            finally:
+                ctx.messages = full
 
         @classmethod
         async def resolve_image(cls, store, ctx, image):

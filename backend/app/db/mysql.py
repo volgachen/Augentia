@@ -969,6 +969,7 @@ class MySqlDatabase(IAgentDatabase):
         *,
         from_session_id: str | None = None,
         metadata: dict | None = None,
+        created_at: datetime | None = None,
     ) -> Message:
         await self.get_session(session_id)
         message = Message(
@@ -978,6 +979,8 @@ class MySqlDatabase(IAgentDatabase):
             from_session_id=from_session_id,
             metadata=dict(metadata or {}),
         )
+        if created_at is not None:
+            message.created_at = created_at
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -999,8 +1002,9 @@ class MySqlDatabase(IAgentDatabase):
                 # messages, which keeps the dashboard's sort key a plain column
                 # read instead of a MAX() join over the (large) messages table.
                 await cur.execute(
-                    "UPDATE sessions SET last_message_at = %s WHERE id = %s",
-                    (message.created_at, session_id),
+                    "UPDATE sessions SET last_message_at = %s WHERE id = %s "
+                    "AND (last_message_at IS NULL OR last_message_at < %s)",
+                    (message.created_at, session_id, message.created_at),
                 )
         await get_plugin_event_bus().publish(PluginEvent(
             type="message.created",

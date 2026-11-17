@@ -641,6 +641,8 @@ class SqliteDatabase(IAgentDatabase):
             from_session_id=kwargs.get("from_session_id"),
             metadata=dict(kwargs.get("metadata") or {}),
         )
+        if kwargs.get("created_at") is not None:
+            message.created_at = aware(kwargs["created_at"]).astimezone(timezone.utc)
         self._execute(
             """INSERT INTO messages
                (id, session_id, role, content, from_session_id, metadata, created_at)
@@ -648,7 +650,12 @@ class SqliteDatabase(IAgentDatabase):
             (message.id, message.session_id, message.role.value, message.content,
              message.from_session_id, _metadata_json(message.metadata), _iso(message.created_at)),
         )
-        self._execute("UPDATE sessions SET last_message_at = ? WHERE id = ?", (_iso(message.created_at), session_id))
+        # Only forward: a row placed earlier in time (created_at=) isn't the
+        # latest activity.
+        self._execute(
+            "UPDATE sessions SET last_message_at = ? WHERE id = ? "
+            "AND (last_message_at IS NULL OR last_message_at < ?)",
+            (_iso(message.created_at), session_id, _iso(message.created_at)))
         await get_plugin_event_bus().publish(PluginEvent(
             type="message.created",
             source=message.from_session_id or "augentia",

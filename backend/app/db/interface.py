@@ -145,7 +145,10 @@ class IAgentDatabase(ABC):
         *,
         from_session_id: str | None = None,
         metadata: dict | None = None,
-    ) -> Message: pass
+        created_at: datetime | None = None,
+    ) -> Message:
+        """created_at: place the row at this time instead of now (a summary
+        written later for an earlier span); last_message_at only moves forward."""
 
     @abstractmethod
     async def get_own_messages(
