@@ -864,6 +864,15 @@ async def diverge_from_message(
         raise HTTPException(status_code=404, detail=str(e))
     target = next((message for message in messages if message.id == message_id), None)
     if target is None:
+        # A row a summary replaced (metadata.compressed_by) is soft-deleted, so it is not
+        # among the live rows; it can still be a divergence point. The branch borrows the
+        # rows created before it as they are when the branch is made (app.core.borrowed),
+        # which revives the other rows that summary covered, so the branch sees the turn up
+        # to that point instead of its summary. Rows deleted with the delete button or
+        # discarded by a rewrite stay out (404 as before).
+        target = next((m for m in await db.get_messages(session_id, include_deleted=True)
+                       if m.id == message_id and (m.metadata or {}).get(COMPRESSED_BY)), None)
+    if target is None:
         raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
     # The branch borrows the history *before* the target (nothing is copied),
     # so the target message itself (user input or agent reply) is not part of

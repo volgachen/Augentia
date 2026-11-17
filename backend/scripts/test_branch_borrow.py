@@ -211,6 +211,38 @@ async def main() -> int:
                   "branch still reads the deleted source's rows")
             await turn(branch.id, "after delete")
             check(user_texts(seen[-1])[:2] == ["u:one", "a:re:one"], "and still sends them to the model")
+
+            section("diverge from a row a summary replaced")
+            # 新会话：三轮，整段压缩后第二轮的行都被摘要替代（软删除，compressed_by）
+            await new_session("cmp")
+            for t in ("c-one", "c-two", "c-three"):
+                await turn("cmp", t)
+            c_reply = next(m for m in await db.get_own_messages("cmp")
+                           if m.role == MessageRole.AGENT and "c-two" in (m.content or ""))
+            r = await compress_session("cmp", CompressRequest(), db=db, registry=registry)
+            check(r.get("status") == "compressed", f"source compressed ({r.get('status')})")
+            hidden = next(m for m in await db.get_own_messages("cmp", include_deleted=True) if m.id == c_reply.id)
+            check(hidden.deleted_at is not None and hidden.metadata.get("compressed_by"),
+                  "the agent reply is now soft-deleted under a summary")
+            cb = await diverge_from_message("cmp", c_reply.id, DeriveSessionRequest(), db=db, registry=registry)
+            cb_rows = await rows(cb.id)
+            check(texts(cb_rows) == ["c-one", "c-two"],
+                  f"branch sees the turns before the reply, not the summary ({texts(cb_rows)})")
+            check(c_reply.id not in {m.id for m in cb_rows}, "the divergence point itself is left out")
+            check(not any(is_summary(m) for m in cb_rows), "no summary in the branch's borrowed history")
+            await turn(cb.id, "c-retry")
+            sent = user_texts(seen[-1])
+            check(sent == ["u:c-one", "a:re:c-one", "u:c-two", "u:c-retry"],
+                  f"the branch's next turn sends that history, no summary and no old reply ({sent})")
+
+            section("rows deleted by the user are still not divergence points")
+            gone = next(m for m in await db.get_own_messages(cb.id) if m.content == "c-retry")
+            await delete_message(cb.id, gone.id, db=db, registry=registry)
+            try:
+                await diverge_from_message(cb.id, gone.id, DeriveSessionRequest(), db=db, registry=registry)
+                check(False, "diverge from a user-deleted row should 404")
+            except HTTPException as e:
+                check(e.status_code == 404, f"user-deleted row -> 404 ({e.status_code})")
     finally:
         cagent_adapter_module._make_model = original
         for sid in list(getattr(registry, "_runners", {})):
