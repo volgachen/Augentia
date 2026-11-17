@@ -60,7 +60,7 @@
   "description": "把微信消息转发进会话，并把 Agent 的回复发回微信。",
   "author": "augentia",
   "entry": "plugin:WeChatPlugin",
-  "python_dependencies": ["wechatbot"],
+  "python_dependencies": ["wechatbot-sdk"],
 
   "config": {
     "global": {

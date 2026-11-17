@@ -21,11 +21,13 @@ is forwarded automatically. Messages go to the WeChat contact who wrote last
 Files in ``ctx.data_dir``: ``wechat_credentials.json`` (WeChatBot login) and
 ``state.json`` (``auto_connect``, ``inbound``, ``contact``).
 
-WeChatBot API used (``wechatbot`` package): ``WeChatBot(cred_path=...,
+WeChatBot API used (pip ``wechatbot-sdk``, imported as ``wechatbot``): ``WeChatBot(cred_path=...,
 on_qr_url=..., on_scanned=..., on_expired=..., on_error=...)``,
 ``@bot.on_message`` (handler gets ``msg.user_id`` / ``msg.text``),
 ``await bot.login()``, ``await bot.start()`` (runs until stopped),
-``bot.stop()``, ``await bot.send(user_id, text)``.
+``bot.stop()``, ``await bot.send(user_id, text)``. ``send`` needs a message
+from that user received by this bot instance (its context token is kept in
+memory), else it raises ``NoContextError``.
 """
 
 from __future__ import annotations
@@ -420,6 +422,9 @@ class WeChatPlugin(Plugin):
         try:
             await self._bot.send(contact, text.strip())
         except Exception as exc:
+            if type(exc).__name__ == "NoContextError":
+                return ("WeChat only allows replying after the user has written since the bridge "
+                        "(re)connected; ask them to send any message on WeChat first.")
             if self.ctx is not None:
                 self.ctx.log.error(f"could not send to WeChat: {exc}")
             return "Sending to WeChat failed; see the plugin logs."

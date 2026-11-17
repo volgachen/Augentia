@@ -6,7 +6,7 @@
   "description": "Connect one WeChat account: its messages go into an inbound session; the agent replies with the wechat__send tool, or a mirrored session forwards everything it writes.",
   "author": "augentia",
   "entry": "plugin:WeChatPlugin",
-  "python_dependencies": ["wechatbot"],
+  "python_dependencies": ["wechatbot-sdk"],
   "config": {
     "global": {
       "type": "object",

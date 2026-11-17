@@ -1,6 +1,7 @@
 # WeChat Bridge
 
-Connects one WeChat account to Augentia through the `wechatbot` package.
+Connects one WeChat account to Augentia through the `wechatbot-sdk` package
+(imported as `wechatbot`).
 Only you use the account, so there is no contact allowlist.
 
 ## How text moves
@@ -10,7 +11,9 @@ Only you use the account, so there is no contact allowlist.
   label `wechat:<user id>`). Set it from a session's plugin card.
 - **Replies**: the agent answers with the `wechat__send` tool. Ordinary
   replies are *not* forwarded; the default message prefix tells the agent so.
-  Messages go to the WeChat contact who wrote last.
+  Messages go to the WeChat contact who wrote last. WeChat only lets the bot
+  write to someone who has messaged it since it connected, so after a
+  reconnect or backend restart, send any message from WeChat first.
 - **Mirror session** (none by default): every assistant message written
   there, including text before tool calls and turns started from the web
   console, is forwarded to WeChat. Only `\cmd bind` sets it.
@@ -36,7 +39,7 @@ The binding is kept in memory only: a backend restart also unbinds.
 ## Install
 
 ```bash
-pip install wechatbot          # into the backend's Python environment
+pip install wechatbot-sdk      # into the backend's Python environment (imported as `wechatbot`)
 mkdir -p ~/.augentia/plugins
 cp -r backend/plugins/wechat ~/.augentia/plugins/
 ```
@@ -45,7 +48,7 @@ Or, for development, point the backend at this repo copy:
 `AUGENTIA_PLUGIN_PATH=./plugins` in `backend/.env`.
 
 Then open the Plugins page (or press Rescan) and check that **WeChat Bridge**
-is `loaded`. Without `wechatbot` installed it shows `error` with the missing
+is `loaded`. Without `wechatbot-sdk` installed it shows `error` with the missing
 package.
 
 ## Use

@@ -98,7 +98,7 @@ _real_distribution = importlib.metadata.distribution
 
 
 def _distribution(name):
-    if name == "wechatbot":
+    if name == "wechatbot-sdk":
         return object()
     return _real_distribution(name)
 
