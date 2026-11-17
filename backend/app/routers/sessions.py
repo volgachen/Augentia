@@ -7,6 +7,7 @@ from enum import Enum
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from app.adapters.base import StreamEvent, StreamEventType
 from app.db.interface import IAgentDatabase
 from app.db.deps import get_db
 from app.models.domain import Session, SessionStatus, MessageRole, AgentType
@@ -109,6 +110,9 @@ class PostMessageRequest(BaseModel):
     # step_reminder_at, step_reminder, tool_limit_at, tool_limit_message
     # (null for step_reminder_at / tool_limit_at turns it off this turn).
     turn_overrides: dict | None = None
+    # false: only add the message to the history, as context; no turn runs
+    # and nothing replies (see _inject_context). turn_overrides is ignored.
+    reply: bool = True
 
 
 class CompressRequest(BaseModel):
@@ -977,6 +981,48 @@ async def delete_message(
     return {"deleted_ids": ids}
 
 
+async def _inject_context(
+    session: Session,
+    db: IAgentDatabase,
+    registry: AdapterRegistry,
+    content: str,
+    images: list[dict],
+    from_session_id: str | None,
+):
+    """Add a user row to the history without running a turn (POST /messages
+    with reply=false), e.g. context for whatever comes next.
+
+    Written on the session's queue between turns, so it never lands inside
+    a turn; no turn_end follows it. The next turn's model sees it right
+    before that turn's input, and it stays as written: turn compression only
+    replaces the rows after the next turn starts, so it is not part of that
+    turn (a whole-history compression covers it with everything else). In
+    dispatch mode it goes into the session itself, and branches made later
+    borrow it. Clients get the history_compressed status to reload.
+    """
+    from app.adapters.cagent_adapter import HISTORY_COMPRESSED
+
+    # The same prefix the runner bakes into a delivered message, so the model
+    # sees who sent it; the column records it for the UI.
+    text = f"[from-session:{from_session_id}] {content}" if from_session_id else content
+    metadata = {"images": images} if images else None
+
+    async def write():
+        return await db.add_message(
+            session.id, MessageRole.USER, text,
+            from_session_id=from_session_id, metadata=metadata)
+
+    runner = await get_or_rehydrate(session, db, registry)
+    if runner is None:
+        row = await write()
+    else:
+        row = await runner.run_between_turns(write)
+        runner.broadcast(StreamEvent(type=StreamEventType.STATUS, data=HISTORY_COMPRESSED))
+    logger.info("context added session=%s row=%s len=%d images=%d",
+                session.id, row.id, len(content), len(images))
+    return row
+
+
 async def _refuse_while_dispatching(db: IAgentDatabase, session: Session, action: str) -> None:
     """409 for work that would run a turn (or rewrite history) in the session
     itself: not in dispatch mode (it runs no turns of its own), and not while
@@ -1160,6 +1206,9 @@ async def post_message(
     if not body.content.strip() and not images:
         raise HTTPException(status_code=400, detail="content must not be empty")
     overrides = _turn_overrides(body.turn_overrides)
+    if not body.reply:
+        row = await _inject_context(session, db, registry, body.content, images, body.from_session_id)
+        return {"status": "added", "message_id": row.id}
     if session.dispatch_mode:
         # Dispatch mode: this message runs in a new branch of the session and
         # its result is joined back (app.core.dispatching).

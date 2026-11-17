@@ -34,6 +34,7 @@ Each exits 0 on success, nonzero on failure — so they compose in CI or a shell
 | `test_branch_join.py` | fork-dispatch: one branch per message run concurrently, results joined back (turn summary / last reply / failure note) between the source's turns, expand, idempotent, pending joins redone | none (mock DB, scripted model) |
 | `test_dispatch_mode.py` | Dispatch mode: on needs an idle session, each message runs in its own branch (concurrently) and is joined back, later messages see joined results, retry / compress 409, survives a rebuilt runner, off restores ordinary turns, deleted branch stays expandable | none (mock DB, scripted model) |
 | `test_compressing_status.py` | COMPRESSING while the summarizer runs (turn and manual compression), status events, busy (409), the framework reads it as RUNNING, reset after a restart | none (mock DB, scripted model) |
+| `test_inject_context.py` | POST /messages reply=false: added without a turn, seen by the next turn, kept by its turn compression, lands after a running turn, from_session_id, dispatch mode | none (mock DB, scripted model) |
 | `test_compress_until.py` | `POST /compress` with since + until: only turns ended before until are summarized, the summary is placed right after them (later turns follow it), validation | none (mock DB, scripted model) |
 | `test_unlink_parent.py` | `DELETE /sessions/{id}/parent`: unlink, no-op without a parent, 404 | none (TestClient + temp SQLite) |
 
