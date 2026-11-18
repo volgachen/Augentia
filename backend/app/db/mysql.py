@@ -1013,6 +1013,15 @@ class MySqlDatabase(IAgentDatabase):
         ))
         return message
 
+    async def get_message(self, message_id: str) -> Message:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute("SELECT * FROM messages WHERE id = %s", (message_id,))
+                row = await cur.fetchone()
+        if row is None:
+            raise KeyError(f"Message '{message_id}' not found")
+        return _row_to_message(row)
+
     async def get_own_messages(
         self, session_id: str, *, include_deleted: bool = False,
         before: datetime | None = None,

@@ -17,7 +17,7 @@ from app.core.session_config import ensure_session_config, write_session_config
 from app.core.session_share import read_share, write_share
 from app.core.session_prompt import effective_system_prompt, replace_runtime_working_dir
 from app.core.session_runtime import build_runner, get_or_rehydrate
-from app.core.branch_join import is_branch_summary, joined_turn_rows
+from app.core.branch_join import is_branch_summary, joined_result_for, joined_turn_rows
 from app.core import dispatching
 from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark, is_summary
 from app.core.borrowed import BORROWED_FROM, is_borrowed
@@ -787,6 +787,64 @@ async def compressed_messages(db: IAgentDatabase, session_id: str, summary_id: s
         [m for m in rows if (m.metadata or {}).get(COMPRESSED_BY) == summary_id],
         include_compression=True,
     )
+
+
+async def locate_message(db: IAgentDatabase, session_id: str, message_id: str) -> dict:
+    """Where `message_id` sits in the session's transcript (KeyError if it
+    isn't shown there), for links to one message.
+
+    expand: summary ids to expand, outermost first, so the row becomes
+    visible (a compressed original lives under its summary, which may itself
+    be compressed). role lets the page reveal tool rows it may be hiding.
+    deleted: the row, or the summary it ends up under, was removed with the
+    delete button, so it only shows with include_deleted. Framework marks
+    and rows a rewrite discarded are not shown. A row of a fork-dispatch
+    branch is found too when a joined result here shows it (looked up by id,
+    so only that branch is read): expand then ends with that result.
+    """
+    rows = {m.id: m for m in await db.get_messages(session_id, include_deleted=True)}
+    current = rows.get(message_id)
+    expand: list[str] = []
+    if current is None:
+        joined = await joined_result_for(db, list(rows.values()), message_id)
+        if joined is None:
+            raise KeyError(message_id)
+        target = await db.get_message(message_id)
+        if target.role == MessageRole.MARK:
+            raise KeyError(message_id)
+        expand.append(joined.id)
+        current = joined
+        role = target.role
+    elif current.role == MessageRole.MARK and not is_completed_mark(current):
+        raise KeyError(message_id)
+    else:
+        role = current.role
+    deleted = False
+    while current.deleted_at is not None:
+        metadata = current.metadata or {}
+        if metadata.get(DELETED_BY) == "user":
+            deleted = True
+            break
+        summary_id = metadata.get(COMPRESSED_BY)
+        if not summary_id or summary_id not in rows or summary_id in expand:
+            raise KeyError(message_id)
+        expand.append(summary_id)
+        current = rows[summary_id]
+    return {"message_id": message_id, "role": role, "expand": expand[::-1], "deleted": deleted}
+
+
+@router.get("/{session_id}/locate/{message_id}")
+async def locate_session_message(
+    session_id: str,
+    message_id: str,
+    db: IAgentDatabase = Depends(get_db),
+):
+    """Like the share page's locate, for the console's ?m= links."""
+    try:
+        await db.get_session(session_id)
+        return await locate_message(db, session_id, message_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="message not found")
 
 
 @router.get("/{session_id}/messages/{summary_id}/compressed")

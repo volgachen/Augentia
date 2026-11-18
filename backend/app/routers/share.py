@@ -12,13 +12,13 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.core.attachments import ATTACHMENT_PREFIX, get_attachment
-from app.core.compressed import COMPRESSED_BY, DELETED_BY, is_completed_mark
 from app.core.branch_join import is_branch_summary, joined_turn_rows
 from app.core.session_share import is_shared
 from app.db.deps import get_db
 from app.db.interface import IAgentDatabase
-from app.models.domain import MessageRole
-from app.routers.sessions import compressed_messages, live_or_user_deleted, transcript_messages
+from app.routers.sessions import (
+    compressed_messages, live_or_user_deleted, locate_message, transcript_messages,
+)
 
 logger = logging.getLogger("augentia.share")
 router = APIRouter(prefix="/share", tags=["share"])
@@ -106,28 +106,15 @@ async def locate_shared_message(session_id: str, message_id: str, db: IAgentData
     deleted: the row, or the summary it ends up under, was
     removed with the delete button, so it only shows with include_deleted.
     Rows the page never shows (framework marks, rows a rewrite discarded)
-    yield the same 404 as a missing id.
+    yield the same 404 as a missing id. A row of a fork-dispatch branch is
+    found too when a joined result here shows it (its turn, read from the
+    branch): expand then ends with that result.
     """
     await _shared_messages(session_id, db)
-    rows = {m.id: m for m in await db.get_messages(session_id, include_deleted=True)}
-    not_found = HTTPException(status_code=404, detail="message not found")
-    current = rows.get(message_id)
-    if current is None or (current.role == MessageRole.MARK and not is_completed_mark(current)):
-        raise not_found
-    role = current.role
-    expand: list[str] = []
-    deleted = False
-    while current.deleted_at is not None:
-        metadata = current.metadata or {}
-        if metadata.get(DELETED_BY) == "user":
-            deleted = True
-            break
-        summary_id = metadata.get(COMPRESSED_BY)
-        if not summary_id or summary_id not in rows or summary_id in expand:
-            raise not_found
-        expand.append(summary_id)
-        current = rows[summary_id]
-    return {"message_id": message_id, "role": role, "expand": expand[::-1], "deleted": deleted}
+    try:
+        return await locate_message(db, session_id, message_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="message not found")
 
 
 @router.get("/{session_id}/attachments/{attachment_id}")

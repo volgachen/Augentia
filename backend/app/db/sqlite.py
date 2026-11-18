@@ -663,6 +663,12 @@ class SqliteDatabase(IAgentDatabase):
         ))
         return message
 
+    async def get_message(self, message_id: str) -> Message:
+        row = self._row("SELECT * FROM messages WHERE id = ?", (message_id,))
+        if row is None:
+            raise KeyError(f"Message '{message_id}' not found")
+        return _message(row)
+
     async def get_own_messages(
         self, session_id: str, *, include_deleted: bool = False,
         before: datetime | None = None,

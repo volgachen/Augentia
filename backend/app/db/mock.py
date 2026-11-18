@@ -253,6 +253,13 @@ class MockMemoryDatabase(IAgentDatabase):
         ))
         return message
 
+    async def get_message(self, message_id: str) -> Message:
+        for rows in self._messages.values():
+            for m in rows:
+                if m.id == message_id:
+                    return m.model_copy(deep=True)
+        raise KeyError(f"Message '{message_id}' not found")
+
     async def get_own_messages(
         self, session_id: str, *, include_deleted: bool = False,
         before: datetime | None = None,
