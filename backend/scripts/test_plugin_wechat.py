@@ -1,14 +1,16 @@
 """WeChat bridge plugin end to end, with a fake wechatbot package.
 
-Covers the account-level bridge: one global login, an inbound session set
-from a session card, ``\\cmd bind`` / ``\\cmd unbind`` for a temporary
-inbound + mirror session, and replies only through the wechat__send tool.
+Covers several WeChat accounts at once: QR login per account (scanned as a
+given WeChat id), rename through a card input, one inbound session per
+account (and per session), ``\\cmd bind`` / ``\\cmd unbind`` per account,
+replies only through wechat__send via the session's account, the duplicate
+account guard, migration of the 0.3 single account, and auto-reconnect
+after a restart.
 
 Loads backend/plugins/wechat through AUGENTIA_PLUGIN_PATH. A fake
-``wechatbot.WeChatBot`` (installed into sys.modules and as a distribution
-so the dependency check passes) lets the test play WeChat: trigger the QR
-callbacks, deliver incoming messages and read what the plugin sent back.
-The sessions run the real CAgent engine with a scripted model.
+``wechatbot.WeChatBot`` (installed into sys.modules and as the
+``wechatbot-sdk`` distribution so the dependency check passes) lets the test
+play WeChat. The sessions run the real CAgent engine with a scripted model.
 
 Run from backend/:  python scripts/test_plugin_wechat.py
 """
@@ -53,9 +55,16 @@ class FakeMsg:
         self.text = text
 
 
+class FakeCreds:
+    def __init__(self, account_id):
+        self.account_id = account_id
+        self.user_id = account_id
+
+
 class FakeBot:
     instances: list["FakeBot"] = []
-    need_qr = True
+    # The WeChat id the next QR scan logs in as (set by the test).
+    scan_as = "wx-bot-1"
 
     def __init__(self, *, cred_path, on_qr_url, on_scanned, on_expired, on_error):
         self.cred_path = cred_path
@@ -65,6 +74,7 @@ class FakeBot:
         self.allow_login = asyncio.Event()
         self.stopped = asyncio.Event()
         self.loop = asyncio.get_running_loop()
+        self.account_id = None
         FakeBot.instances.append(self)
 
     def on_message(self, fn):
@@ -72,11 +82,14 @@ class FakeBot:
         return fn
 
     async def login(self):
-        if FakeBot.need_qr and not Path(self.cred_path).exists():
-            self.callbacks["qr"]("https://login.weixin.example/qr/123")
+        path = Path(self.cred_path)
+        if not path.exists():
+            self.callbacks["qr"](f"https://login.weixin.example/qr/{len(FakeBot.instances)}")
             await self.allow_login.wait()
             self.callbacks["scanned"]()
-            Path(self.cred_path).write_text("{}")
+            path.write_text(json.dumps({"account_id": FakeBot.scan_as}))
+        self.account_id = json.loads(path.read_text()).get("account_id")
+        return FakeCreds(self.account_id)
 
     async def start(self):
         await self.stopped.wait()
@@ -152,9 +165,14 @@ def main() -> None:
     from app.plugins.host import get_plugin_host
 
     data_dir = ROOT / "home" / "plugin_data" / "wechat"
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    def saved_state():
-        return json.loads((data_dir / "state.json").read_text(encoding="utf-8"))
+    # A 0.3 single account on disk: migrated into the first account.
+    (data_dir / "wechat_credentials.json").write_text(json.dumps({"account_id": "wx-bot-1"}))
+    (data_dir / "state.json").write_text(json.dumps({"auto_connect": False, "inbound": None, "contact": "wx-me"}))
+
+    def saved():
+        return json.loads((data_dir / "accounts.json").read_text(encoding="utf-8"))["accounts"]
 
     with TestClient(app) as client:
         host = get_plugin_host()
@@ -165,14 +183,15 @@ def main() -> None:
         def ui(sid=None):
             return host.services.ui_state("wechat", sid)
 
-        def bridge():
-            return host.services.get("wechat", "bridge", None)
+        def act(action_id, sid=None, **data):
+            return api("post", f"/plugins/wechat/actions/{action_id}", json={"session_id": sid, "data": data})
 
-        def bot():
-            return FakeBot.instances[-1]
+        def bot_of(wechat_id):
+            live = [b for b in FakeBot.instances if b.account_id == wechat_id and not b.stopped.is_set()]
+            return live[-1] if live else None
 
-        def deliver(user, text):
-            client.portal.call(bot().deliver, user, text)
+        def deliver(wechat_id, user, text):
+            client.portal.call(bot_of(wechat_id).deliver, user, text)
 
         def messages(sid):
             return api("get", f"/sessions/{sid}/messages").json()
@@ -180,159 +199,150 @@ def main() -> None:
         def user_rows(sid):
             return [m for m in messages(sid) if m["role"] == "user"]
 
-        def actions(card):
-            return [a["id"] for a in card.actions] if card else None
+        def sec(card, title):
+            return next((s for s in card.sections if s["title"] == title), None) if card else None
 
-        section("loading")
+        def ids(block):
+            return [a["id"] for a in block["actions"]] if block else None
+
+        section("loading and migration")
         info = api("get", "/plugins/wechat").json()
-        check(info["state"] == "loaded", f"plugin loads from AUGENTIA_PLUGIN_PATH: {info['state']} {info['error']}")
+        check(info["state"] == "loaded", f"plugin loads: {info['state']} {info['error']}")
         caps = info["capabilities"]
         check([t["full_name"] for t in caps["tools"]] == ["wechat__send"] and not caps["hooks"]
-              and caps["services"][0]["name"] == "bridge" and caps["services"][0]["scope"] == "global",
-              f"capabilities: one tool, no hooks, a global bridge: {caps}")
-        check(set(caps["actions"]) == {"connect", "disconnect", "set_inbound", "clear_inbound"},
-              f"actions: {caps['actions']}")
-        check(wait_for(lambda: bridge() is not None and bridge().status not in ("starting", "running"))
-              and not FakeBot.instances,
-              f"never connected before: no login at startup ({bridge()})")
-        check(actions(ui()) == ["connect"], f"plugin page card offers Connect: {ui()}")
+              and caps["services"][0]["scope"] == "global", "one tool, no hooks, a global bridge")
+        accounts = saved()
+        check(len(accounts) == 1 and not (data_dir / "wechat_credentials.json").exists()
+              and (data_dir / "state.json.migrated").exists(), f"0.3 account migrated: {accounts}")
+        key1 = next(iter(accounts))
+        check((data_dir / "accounts" / key1 / "credentials.json").exists() and accounts[key1]["contact"] == "wx-me",
+              "credentials and contact moved")
+        check(not FakeBot.instances, "auto_connect was off: not connected at startup")
+        page = ui()
+        check(page and len(page.sections) == 1 and "connect" in ids(page.sections[0])
+              and [a["id"] for a in page.actions] == ["add_account"], f"plugin page card: {page}")
 
-        section("connect from a session card")
+        section("first account: connect and rename")
+        r = act("connect", account=key1)
+        check(r.status_code == 200 and wait_for(lambda: bot_of("wx-bot-1") is not None), f"connect: {r.text}")
+        check(wait_for(lambda: saved()[key1]["wechat_id"] == "wx-bot-1"), "WeChat id recorded at login")
+        rename = next(a for a in ui().sections[0]["actions"] if a["id"] == "rename")
+        check(rename["input"]["name"] == "alias" and rename["data"] == {"account": key1}, f"rename input: {rename}")
+        act("rename", account=key1, alias="Work")
+        check(saved()[key1]["alias"] == "Work" and ui().sections[0]["title"] == "Work", "renamed to Work")
+
+        section("second account from a session card")
         agent = api("post", "/agents", json={
             "name": "wx", "description": "", "agent_type": "tool_use", "system_prompt": "",
             "tool_names": ["wechat__send"], "openai_model": "m", "config": {}}).json()
         sid_a = api("post", "/sessions", json={"agent_id": agent["id"], "title": "Alpha"}).json()["id"]
         sid_b = api("post", "/sessions", json={"agent_id": agent["id"], "title": "Beta"}).json()["id"]
-        check(ui(sid_a) is None, "no card while the plugin is off for the session")
-        api("put", f"/sessions/{sid_a}/plugins/wechat", json={"enabled": True})
-        check(actions(ui(sid_a)) == ["connect", "set_inbound"], f"session card: {ui(sid_a)}")
+        sid_c = api("post", "/sessions", json={"agent_id": agent["id"], "title": "Gamma"}).json()["id"]
+        for sid in (sid_a, sid_b, sid_c):
+            api("put", f"/sessions/{sid}/plugins/wechat", json={"enabled": True})
+        check(ids(sec(ui(sid_a), "Work")) == ["disconnect", "set_inbound"], f"session card lists Work: {ui(sid_a)}")
 
-        r = api("post", "/plugins/wechat/actions/connect", json={"session_id": sid_a})
-        check(r.status_code == 200, f"connect action: {r.text}")
-        check(wait_for(lambda: ui(sid_a) and ui(sid_a).qr), "QR code shown on the session card")
-        check(ui().qr and ui().qr.endswith("/qr/123"), "and on the plugin page")
-        check(Path(bot().cred_path) == data_dir / "wechat_credentials.json",
-              f"one account-level credential file: {bot().cred_path}")
-        client.portal.call(bot().allow_login.set)
-        check(wait_for(lambda: ui(sid_a).status == "ok"), "after scanning: connected")
-        check(actions(ui(sid_a)) == ["disconnect", "clear_inbound"] and "receives WeChat" in ui(sid_a).message,
-              f"connecting from a session made it the inbound session: {ui(sid_a)}")
-        state = saved_state()
-        check(state["auto_connect"] is True and state["inbound"]["id"] == sid_a, f"state.json: {state}")
+        FakeBot.scan_as = "wx-bot-2"
+        r = act("add_account", sid_b)
+        key2 = r.json()["result"]
+        check(r.status_code == 200 and wait_for(lambda: any(s.get("qr") for s in ui(sid_b).sections)),
+              "add_account shows a QR code in the new section")
+        client.portal.call(FakeBot.instances[-1].allow_login.set)
+        check(wait_for(lambda: saved()[key2]["wechat_id"] == "wx-bot-2"), "second account logged in")
+        check(saved()[key2]["inbound"]["id"] == sid_b, "added from Beta's card: Beta receives it")
+        act("rename", account=key2, alias="Home")
+        check("Home" in ui(sid_b).message, f"Beta's card names its account: {ui(sid_b).message}")
+        check(ids(sec(ui(sid_b), "Work")) == ["disconnect"], "Beta can't also receive Work (no set_inbound)")
 
-        section("WeChat -> inbound session; replies only through the tool")
-        deliver("wx-me", "hello there")
-        check(wait_for(lambda: any(m["role"] == "agent" for m in messages(sid_a))), "the agent answered in the session")
+        section("one session per account, one account per session")
+        r = act("set_inbound", sid_b, account=key1)
+        check(r.status_code == 422 and "already receives" in r.text, f"Beta already has Home: {r.text}")
+        check(act("set_inbound", sid_a, account=key1).status_code == 200, "Alpha receives Work")
+        check(saved()[key1]["inbound"]["id"] == sid_a, "saved")
+
+        section("routing per account; replies only via the session's account")
+        deliver("wx-bot-1", "wx-me", "hello work")
+        deliver("wx-bot-2", "wx-mom", "hello home")
+        check(wait_for(lambda: len(user_rows(sid_a)) == 1 and len(user_rows(sid_b)) == 1),
+              "each account's message lands in its own session")
+        check(user_rows(sid_a)[0]["metadata"]["plugin_label"] == "wechat:wx-me", "label carries the contact")
         time.sleep(0.3)
-        check(bot().sent == [], f"the plain answer is not forwarded: {bot().sent}")
-        row = user_rows(sid_a)[0]
-        check(row["content"] == "[from WeChat; reply with the wechat__send tool] hello there"
-              and row["from_session_id"] == "plugin:wechat" and row["metadata"]["plugin_label"] == "wechat:wx-me",
-              f"stored user message: {row}")
-        deliver("wx-me", "please reply")
-        check(wait_for(lambda: ("wx-me", "hi from the agent") in bot().sent),
-              f"wechat__send reaches WeChat: {bot().sent}")
-        time.sleep(0.3)
-        check(bot().sent == [("wx-me", "hi from the agent")], f"only the tool's text: {bot().sent}")
+        check(not bot_of("wx-bot-1").sent and not bot_of("wx-bot-2").sent, "plain answers are not forwarded")
+        deliver("wx-bot-2", "wx-mom", "please reply")
+        check(wait_for(lambda: ("wx-mom", "hi from the agent") in bot_of("wx-bot-2").sent),
+              f"Beta's wechat__send goes out through Home: {bot_of('wx-bot-2').sent}")
+        check(not bot_of("wx-bot-1").sent, "nothing through Work")
+        client.post(f"/api/v1/sessions/{sid_c}/messages", json={"content": "please reply"})
+        check(wait_for(lambda: any(m["role"] == "tool" and "not bound to a WeChat account" in m["content"]
+                                   for m in messages(sid_c))), "unbound session: the tool says so")
 
-        section("commands")
-        bot().sent.clear()
-        n = len(messages(sid_a))
-        deliver("wx-me", "\\cmd status")
-        check(wait_for(lambda: bot().sent) and "Alpha" in bot().sent[0][1],
-              f"status names the inbound session: {bot().sent}")
-        deliver("wx-me", "\\cmd help")
-        check(wait_for(lambda: len(bot().sent) == 2) and "bind" in bot().sent[1][1], "help")
-        time.sleep(0.2)
-        check(len(messages(sid_a)) == n, "commands do not reach the agent")
+        section("\\cmd bind per account")
+        w = bot_of("wx-bot-1")
+        w.sent.clear()
+        deliver("wx-bot-1", "wx-me", "\\cmd bind")
+        check(wait_for(lambda: w.sent) and "(uses Home)" in w.sent[0][1], f"listing shows taken sessions: {w.sent}")
+        w.sent.clear()
+        deliver("wx-bot-1", "wx-me", "\\cmd bind beta")
+        check(wait_for(lambda: w.sent) and "already uses WeChat account Home" in w.sent[0][1],
+              f"can't bind a session another account receives: {w.sent}")
+        w.sent.clear()
+        deliver("wx-bot-1", "wx-me", "\\cmd bind gamma")
+        check(wait_for(lambda: w.sent) and "Bound to \"Gamma\"" in w.sent[0][1], f"bind Work to Gamma: {w.sent}")
+        w.sent.clear()
+        deliver("wx-bot-1", "wx-me", "use a tool")
+        check(wait_for(lambda: ("wx-me", "Done.") in w.sent), f"Gamma mirrored to Work: {w.sent}")
+        check(("wx-me", "Let me check.") in w.sent and ("wx-me", "tool text") in w.sent,
+              "text before tool calls and the tool's message arrive too")
+        check(len(user_rows(sid_a)) == 1, "Alpha did not get it while bound")
+        check(not [m for m in bot_of("wx-bot-2").sent if m[1] in ("Done.", "tool text")], "Home unaffected")
+        w.sent.clear()
+        deliver("wx-bot-1", "wx-me", "\\cmd unbind")
+        check(wait_for(lambda: w.sent) and "Alpha" in w.sent[0][1], f"unbind back to Alpha: {w.sent}")
 
-        section("\\cmd bind: inbound + mirror")
-        bot().sent.clear()
-        deliver("wx-me", "\\cmd bind")
-        check(wait_for(lambda: bot().sent) and sid_b[:8] in bot().sent[0][1],
-              f"bind without argument lists sessions: {bot().sent}")
-        bot().sent.clear()
-        deliver("wx-me", "\\cmd bind nope-nothing")
-        check(wait_for(lambda: bot().sent) and "No session matches" in bot().sent[0][1], "unknown session")
-        bot().sent.clear()
-        deliver("wx-me", "\\cmd bind beta")
-        check(wait_for(lambda: bot().sent) and "Bound to \"Beta\"" in bot().sent[0][1], f"bind by title: {bot().sent}")
-        check("Bound from WeChat" in ui(sid_a).message, "cards show the binding")
-        bot().sent.clear()
-        a_before = len(user_rows(sid_a))
-        deliver("wx-me", "use a tool")
-        check(wait_for(lambda: ("wx-me", "Done.") in bot().sent), f"bound session's final answer mirrored: {bot().sent}")
-        check(("wx-me", "Let me check.") in bot().sent and ("wx-me", "tool text") in bot().sent,
-              f"text before tool calls and the tool's message also arrive: {bot().sent}")
-        check(len(user_rows(sid_b)) == 1 and len(user_rows(sid_a)) == a_before, "the message went to the bound session")
+        section("no inbound session")
+        act("clear_inbound", sid_a, account=key1)
+        w.sent.clear()
+        deliver("wx-bot-1", "wx-me", "anyone?")
+        check(wait_for(lambda: w.sent) and "No Augentia session receives" in w.sent[0][1], f"told so: {w.sent}")
+        act("set_inbound", sid_a, account=key1)
 
-        bot().sent.clear()
-        r = client.post(f"/api/v1/sessions/{sid_b}/messages", json={"content": "typed in the console"})
-        check(r.status_code == 202 and wait_for(lambda: bot().sent), f"mirror also forwards console turns: {bot().sent}")
+        section("duplicate account")
+        FakeBot.scan_as = "wx-bot-2"
+        n_accounts, n_bots = len(saved()), len(FakeBot.instances)
+        act("add_account")
+        check(wait_for(lambda: len(FakeBot.instances) > n_bots and len(saved()) == n_accounts + 1),
+              "a new entry waits for its QR scan")
+        client.portal.call(FakeBot.instances[-1].allow_login.set)
+        check(wait_for(lambda: len(saved()) == n_accounts and "already added as Home" in (ui().message or "")),
+              f"scanning an added account again drops the new entry: {ui().message}")
 
-        time.sleep(0.3)
-        bot().sent.clear()
-        deliver("wx-me", "\\cmd unbind")
-        check(wait_for(lambda: bot().sent) and "Unbound" in bot().sent[0][1] and "Alpha" in bot().sent[0][1],
-              f"unbind restores the inbound session: {bot().sent}")
-        bot().sent.clear()
-        r = client.post(f"/api/v1/sessions/{sid_b}/messages", json={"content": "not mirrored now"})
-        check(r.status_code == 202, "console turn after unbind")
-        time.sleep(0.5)
-        check(bot().sent == [], f"no mirror after unbind: {bot().sent}")
-        deliver("wx-me", "back to alpha")
-        check(wait_for(lambda: len(user_rows(sid_a)) == a_before + 1), "messages go to the inbound session again")
-
-        section("changing the inbound session")
-        api("put", f"/sessions/{sid_b}/plugins/wechat", json={"enabled": True})
-        check(actions(ui(sid_b)) == ["disconnect", "set_inbound"], f"second session card: {ui(sid_b)}")
-        r = api("post", "/plugins/wechat/actions/set_inbound", json={"session_id": sid_b})
-        check(r.status_code == 200 and actions(ui(sid_b))[1] == "clear_inbound"
-              and actions(ui(sid_a))[1] == "set_inbound", "set_inbound moves the role")
-        api("post", "/plugins/wechat/actions/clear_inbound", json={"session_id": sid_b})
-        bot().sent.clear()
-        deliver("wx-me", "anyone?")
-        check(wait_for(lambda: bot().sent) and "No Augentia session receives" in bot().sent[0][1],
-              f"no inbound session: WeChat is told so: {bot().sent}")
-        api("post", "/plugins/wechat/actions/set_inbound", json={"session_id": sid_b})
+        section("disconnect / remove")
+        old = bot_of("wx-bot-2")
+        check(act("disconnect", account=key2).status_code == 200 and old.stopped.is_set(), "disconnect Home")
+        check(saved()[key2]["auto_connect"] is False and bot_of("wx-bot-1") is not None, "Work still connected")
+        act("connect", account=key2)
+        check(wait_for(lambda: bot_of("wx-bot-2") is not None and bot_of("wx-bot-2") is not old),
+              "reconnect without QR")
         api("delete", f"/sessions/{sid_b}")
-        check(wait_for(lambda: saved_state()["inbound"] is None), "deleting the inbound session clears it")
+        check(wait_for(lambda: saved()[key2]["inbound"] is None), "deleting Beta clears Home's inbound")
 
-        section("disconnect / reconnect")
-        current = bot()
-        r = api("post", "/plugins/wechat/actions/disconnect", json={})
-        check(r.status_code == 200 and current.stopped.is_set() and actions(ui()) == ["connect"],
-              "disconnect from the plugin page")
-        check(saved_state()["auto_connect"] is False, "auto_connect off")
-        api("post", "/plugins/wechat/actions/connect", json={})
-        check(wait_for(lambda: ui().status == "ok") and bot() is not current, "reconnect with saved credentials (no QR)")
-
-        section("tool without a connection")
-        api("post", "/plugins/wechat/actions/disconnect", json={})
-        client.post(f"/api/v1/sessions/{sid_a}/messages", json={"content": "please reply"})
-        check(wait_for(lambda: any(m["role"] == "tool" and "not connected" in m["content"] for m in messages(sid_a))),
-              "the tool explains WeChat is not connected")
-
-    section("restart: reconnects on its own")
-    # A real restart is a new process; here the session runners of the first
-    # app (bound to its closed event loop) must go.
+    section("restart: connected accounts reconnect")
     from app.adapters.registry import get_registry
-    get_registry()._runners.clear()
+    get_registry()._runners.clear()  # runners of the first app's event loop
     FakeBot.instances.clear()
-    (data_dir / "state.json").write_text(json.dumps({
-        "auto_connect": True, "inbound": {"id": sid_a, "title": "Alpha"}, "contact": "wx-me"}), encoding="utf-8")
     with TestClient(app) as client:
         host = get_plugin_host()
-
-        def users():
-            return [m for m in client.get(f"/api/v1/sessions/{sid_a}/messages").json() if m["role"] == "user"]
-
-        check(wait_for(lambda: host.services.ui_state("wechat", None) is not None
-                       and host.services.ui_state("wechat", None).status == "ok"),
-              "auto_connect: logged in at startup without a click")
+        check(wait_for(lambda: {b.account_id for b in FakeBot.instances} == {"wx-bot-1", "wx-bot-2"}),
+              "both accounts logged in at startup")
+        users = lambda: [m for m in client.get(f"/api/v1/sessions/{sid_a}/messages").json() if m["role"] == "user"]
         n = len(users())
-        client.portal.call(FakeBot.instances[-1].deliver, "wx-me", "after restart")
-        check(wait_for(lambda: len(users()) == n + 1), "saved inbound session still receives")
+        work = next(b for b in FakeBot.instances if b.account_id == "wx-bot-1")
+        check(wait_for(lambda: work.handler is not None), "handler registered")
+        client.portal.call(work.deliver, "wx-me", "after restart")
+        check(wait_for(lambda: len(users()) == n + 1), "Work still sends to Alpha")
+        r = client.post(f"/api/v1/plugins/wechat/actions/remove_account", json={"data": {"account": key2}})
+        check(r.status_code == 200 and key2 not in saved() and not (data_dir / "accounts" / key2).exists(),
+              "remove deletes the account and its credentials")
 
 
 main()

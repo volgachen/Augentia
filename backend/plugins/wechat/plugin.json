@@ -1,9 +1,9 @@
 {
   "id": "wechat",
   "name": "WeChat Bridge",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "api_version": 1,
-  "description": "Connect one WeChat account: its messages go into an inbound session; the agent replies with the wechat__send tool, or a mirrored session forwards everything it writes.",
+  "description": "Connect WeChat accounts: each account's messages go into its inbound session; the agent replies with the wechat__send tool, or a mirrored session forwards everything it writes.",
   "author": "augentia",
   "entry": "plugin:WeChatPlugin",
   "python_dependencies": ["wechatbot-sdk"],
