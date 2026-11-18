@@ -20,6 +20,7 @@ import json
 import sys
 import time
 import types
+from datetime import datetime
 from pathlib import Path
 
 import _common  # noqa: F401 — sets sys.path + logging
@@ -275,6 +276,21 @@ def main() -> None:
         check(wait_for(lambda: len(user_rows(sid_a)) == 1 and len(user_rows(sid_b)) == 1),
               "each account's message lands in its own session")
         check(user_rows(sid_a)[0]["metadata"]["plugin_label"] == "wechat:wx-me", "label carries the contact")
+
+        section("message_prefix placeholders")
+        r = api("put", "/plugins/wechat/config", json={"config": {
+            "message_prefix": "[WeChat {time} {weekday} from {contact} via {account} {nope}] "}})
+        check(r.status_code == 200, f"set the prefix: {r.text}")
+        n_a = len(user_rows(sid_a))
+        before = datetime.now()
+        deliver("wx-bot-1", "wx-me", "what time is it")
+        check(wait_for(lambda: len(user_rows(sid_a)) == n_a + 1), "delivered")
+        content = user_rows(sid_a)[-1]["content"]
+        after = datetime.now()
+        stamps = {f"{t:%Y-%m-%d %H:%M} {t:%A}" for t in (before, after)}
+        check(any(content == f"[WeChat {s} from wx-me via {W} {{nope}}] what time is it" for s in stamps),
+              f"placeholders filled, unknown kept: {content!r}")
+        api("put", "/plugins/wechat/config", json={"config": {}})
         time.sleep(0.3)
         check(not bot_of("wx-bot-1").sent and not bot_of("wx-bot-2").sent, "plain answers are not forwarded")
         deliver("wx-bot-2", "wx-mom", "please reply")
@@ -287,6 +303,7 @@ def main() -> None:
 
         section("\\cmd bind per account")
         w = bot_of("wx-bot-1")
+        alpha_rows = len(user_rows(sid_a))
         w.sent.clear()
         deliver("wx-bot-1", "wx-me", "\\cmd bind")
         check(wait_for(lambda: w.sent) and "(uses Home)" in w.sent[0][1], f"listing shows taken sessions: {w.sent}")
@@ -304,7 +321,7 @@ def main() -> None:
         check(wait_for(lambda: ("wx-me", "Done.") in w.sent), f"Gamma mirrored: {w.sent}")
         check(("wx-me", "Let me check.") in w.sent and ("wx-me", "tool text") in w.sent,
               "text before tool calls and the tool's message arrive too")
-        check(len(user_rows(sid_a)) == 1, "Alpha did not get it while bound")
+        check(len(user_rows(sid_a)) == alpha_rows, "Alpha did not get it while bound")
         check(not [m for m in bot_of("wx-bot-2").sent if m[1] in ("Done.", "tool text")], "Home unaffected")
         w.sent.clear()
         deliver("wx-bot-1", "wx-me", "\\cmd unbind")

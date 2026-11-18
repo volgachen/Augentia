@@ -20,7 +20,7 @@
         "message_prefix": {
           "type": "string",
           "title": "Message prefix",
-          "description": "Prepended to every WeChat message the agent receives.",
+          "description": "Prepended to every WeChat message the agent receives. Placeholders: {time} (2026-11-18 14:05, backend local time), {date}, {weekday}, {contact} (WeChat user id), {account} (account name).",
           "default": "[from WeChat; reply with the wechat__send tool] "
         }
       },

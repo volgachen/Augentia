@@ -92,7 +92,20 @@ In `~/.augentia/plugin_data/wechat/`:
 | Key | Default | Meaning |
 |---|---|---|
 | `command_prefix` | `\cmd` | WeChat messages starting with this are bridge commands |
-| `message_prefix` | `[from WeChat; reply with the wechat__send tool] ` | Prepended to messages the agent receives |
+| `message_prefix` | `[from WeChat; reply with the wechat__send tool] ` | Prepended to messages the agent receives; may contain placeholders (below) |
+
+Placeholders in `message_prefix`, filled for each message:
+
+| Placeholder | Example |
+|---|---|
+| `{time}` | `2026-11-18 14:05` (the backend machine's local time) |
+| `{date}` | `2026-11-18` |
+| `{weekday}` | `Wednesday` |
+| `{contact}` | the sender's WeChat user id |
+| `{account}` | the account's name |
+
+Other `{...}` text is kept as typed. Example:
+`[from WeChat {time}; reply with the wechat__send tool] `.
 
 The plugin has no per-session settings; its session switch decides whether
 the card (and the inbound role) is offered in that session.

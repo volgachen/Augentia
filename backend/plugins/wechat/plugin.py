@@ -44,9 +44,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +76,23 @@ def _describe(ref: dict | None) -> str:
         return "none"
     title = ref.get("title")
     return f"\"{title}\" ({_short(ref['id'])})" if title else _short(ref["id"])
+
+
+def _render_prefix(template: str, *, contact: str, account: str, now: datetime | None = None) -> str:
+    """Fill the message_prefix placeholders; unknown {names} and stray braces stay as typed.
+
+    {time}: 2026-11-18 14:05 (backend's local time), {date}: 2026-11-18,
+    {weekday}: Wednesday, {contact}: WeChat user id, {account}: account name.
+    """
+    now = now or datetime.now()
+    values = {
+        "time": now.strftime("%Y-%m-%d %H:%M"),
+        "date": now.strftime("%Y-%m-%d"),
+        "weekday": now.strftime("%A"),
+        "contact": contact,
+        "account": account,
+    }
+    return re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), m.group(0)), template)
 
 
 def _assistant_text(content: str) -> str:
@@ -567,8 +586,9 @@ class WeChatPlugin(Plugin):
             return
         ctx.log.info("message from WeChat", account=key, user=user_id, length=len(text), session_id=target["id"])
         try:
-            await ctx.sessions.send(target["id"], f"{ctx.global_config.get('message_prefix', '')}{text}",
-                                    label=f"wechat:{user_id}")
+            prefix_text = _render_prefix(ctx.global_config.get("message_prefix", ""),
+                                         contact=user_id, account=self._name(key))
+            await ctx.sessions.send(target["id"], f"{prefix_text}{text}", label=f"wechat:{user_id}")
         except KeyError:
             await self._forget_session(target["id"])
             await self._reply(key, user_id, f"Session {_describe(target)} no longer exists; the message was not "
