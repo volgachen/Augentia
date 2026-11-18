@@ -93,7 +93,11 @@ class FakeBot:
         return FakeCreds(self.account_id)
 
     async def start(self):
-        await self.stopped.wait()
+        # Like wechatbot-sdk: a cancelled long-poll returns normally.
+        try:
+            await self.stopped.wait()
+        except asyncio.CancelledError:
+            pass
 
     def stop(self):
         self.loop.call_soon_threadsafe(self.stopped.set)
@@ -351,6 +355,12 @@ def main() -> None:
         api("delete", f"/sessions/{sid_b}")
         check(wait_for(lambda: saved()[key2]["inbound"] is None), "deleting Beta unbinds Home")
 
+        bots_at_shutdown = len(FakeBot.instances)
+
+    section("shutdown does not reconnect")
+    check(len(FakeBot.instances) == bots_at_shutdown,
+          f"no login while shutting down: {len(FakeBot.instances) - bots_at_shutdown} new bot(s)")
+
     section("restart: every account reconnects")
     from app.adapters.registry import get_registry
     get_registry()._runners.clear()  # runners of the first app's event loop
@@ -365,7 +375,9 @@ def main() -> None:
         check(wait_for(lambda: work.handler is not None), "handler registered")
         client.portal.call(work.deliver, "wx-me", "after restart")
         check(wait_for(lambda: len(users()) == n + 1), "Work still sends to Alpha")
+        n_bots = len(FakeBot.instances)
         r = client.post(f"/api/v1/plugins/wechat/actions/remove_account", json={"data": {"account": key2}})
+        check(len(FakeBot.instances) == n_bots, "Remove does not log the account in again")
         check(r.status_code == 200 and key2 not in saved() and not (data_dir / "accounts" / key2).exists(),
               "remove deletes the account and its credentials")
 

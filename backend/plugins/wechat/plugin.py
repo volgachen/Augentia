@@ -492,6 +492,12 @@ class WeChatPlugin(Plugin):
             log.info("connected", account=key)
             self._set_conn(key, "ok", "Connected.")
             await bot.start()
+            # wechatbot-sdk's start() catches CancelledError and returns
+            # normally; without this a stop (disconnect, Remove, backend
+            # shutdown) would look like a dropped connection and reconnect.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise asyncio.CancelledError
             return True
         finally:
             rt.bot = None
