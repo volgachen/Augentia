@@ -297,6 +297,20 @@ export interface PluginUIAction {
   id: string;
   label: string;
   style?: "default" | "primary" | "danger";
+  // Passed to the action as its data (merged with the input's text).
+  data?: Record<string, unknown>;
+  // A text box in front of the button; its text is sent as data[name].
+  input?: { name: string; placeholder?: string; value?: string };
+}
+
+// A sub-card inside a plugin card (e.g. one per account).
+export interface PluginUISection {
+  title: string | null;
+  status: "idle" | "waiting" | "ok" | "error";
+  message: string | null;
+  link: string | null;
+  qr: string | null;
+  actions: PluginUIAction[];
 }
 
 // Status card a plugin pushes with ctx.ui.update (README §5.4).
@@ -308,6 +322,7 @@ export interface PluginUIState {
   link: string | null;
   qr: string | null;
   actions: PluginUIAction[];
+  sections?: PluginUISection[];
   updated_at: string;
 }
 

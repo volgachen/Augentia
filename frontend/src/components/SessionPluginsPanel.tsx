@@ -170,7 +170,8 @@ function parseErrors(message: string): string[] {
 
 // An idle card with nothing to show (e.g. after ctx.ui.clear()) is hidden.
 const hasContent = (ui: PluginUIState) =>
-  ui.status !== "idle" || !!ui.message || !!ui.link || !!ui.qr || ui.actions.length > 0;
+  ui.status !== "idle" || !!ui.message || !!ui.link || !!ui.qr || ui.actions.length > 0
+  || (ui.sections?.length ?? 0) > 0;
 
 function LiveSection({ sessionId, plugin }: { sessionId: string; plugin: SessionPluginInfo }) {
   // Live values win; the GET response covers the time before the stream's snapshot.

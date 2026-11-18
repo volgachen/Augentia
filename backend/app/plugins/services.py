@@ -24,6 +24,7 @@ the host can drop a plugin after ``stop_plugin``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import deque
@@ -89,38 +90,94 @@ class UIState(BaseModel):
     link: str | None = None
     qr: str | None = None
     actions: list[dict] = []
+    # Optional sub-cards (e.g. one per account), each with the same fields
+    # except sections; see validate_ui.
+    sections: list[dict] = []
     updated_at: datetime
 
 
 UI_STATUSES = ("idle", "waiting", "ok", "error")
+UI_MAX_SECTIONS = 50
+
+
+def _validate_action(item: Any) -> dict:
+    """One button: id, label, optional style, data (passed to the action) and input.
+
+    ``input`` adds a text box next to the button; its text is sent as
+    ``data[input.name]``. ``input`` is ``{"name", "placeholder"?, "value"?}``.
+    """
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("label"), str):
+        raise ValueError("each ui action needs string id and label")
+    unknown = set(item) - {"id", "label", "style", "data", "input"}
+    if unknown:
+        raise ValueError(f"unknown ui action keys: {sorted(unknown)}")
+    clean: dict[str, Any] = {"id": item["id"], "label": item["label"]}
+    style = item.get("style")
+    if style is not None:
+        if style not in ("default", "primary", "danger"):
+            raise ValueError("ui action style must be default, primary or danger")
+        clean["style"] = style
+    data = item.get("data")
+    if data is not None:
+        if not isinstance(data, dict):
+            raise ValueError("ui action data must be an object")
+        try:
+            json.dumps(data)
+        except (TypeError, ValueError):
+            raise ValueError("ui action data must be JSON-serializable") from None
+        clean["data"] = data
+    field_ = item.get("input")
+    if field_ is not None:
+        if not isinstance(field_, dict) or not isinstance(field_.get("name"), str) or not field_["name"]:
+            raise ValueError("ui action input needs a string name")
+        unknown = set(field_) - {"name", "placeholder", "value"}
+        if unknown:
+            raise ValueError(f"unknown ui action input keys: {sorted(unknown)}")
+        for key in ("placeholder", "value"):
+            if field_.get(key) is not None and not isinstance(field_[key], str):
+                raise ValueError(f"ui action input {key} must be a string")
+        clean["input"] = {k: field_[k] for k in ("name", "placeholder", "value") if field_.get(k) is not None}
+    return clean
+
+
+def _validate_block(data: dict, *, allowed: set[str]) -> dict:
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError(f"unknown ui keys: {sorted(unknown)}")
+    status = data.get("status", "idle")
+    if status not in UI_STATUSES:
+        raise ValueError(f"ui status must be one of {UI_STATUSES}")
+    for key in ("message", "link", "qr", "title"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            raise ValueError(f"ui {key} must be a string")
+    actions = data.get("actions") or []
+    if not isinstance(actions, list):
+        raise ValueError("ui actions must be a list")
+    clean = {"status": status, "message": data.get("message"), "link": data.get("link"),
+             "qr": data.get("qr"), "actions": [_validate_action(a) for a in actions]}
+    if "title" in allowed:
+        clean["title"] = data.get("title")
+    return clean
 
 
 def validate_ui(data: Any) -> dict:
     """Checked copy of a ctx.ui.update payload; ValueError names the problem."""
     if not isinstance(data, dict):
         raise ValueError("ui state must be an object")
-    unknown = set(data) - {"status", "message", "link", "qr", "actions"}
-    if unknown:
-        raise ValueError(f"unknown ui keys: {sorted(unknown)}")
-    status = data.get("status", "idle")
-    if status not in UI_STATUSES:
-        raise ValueError(f"ui status must be one of {UI_STATUSES}")
-    for key in ("message", "link", "qr"):
-        if data.get(key) is not None and not isinstance(data[key], str):
-            raise ValueError(f"ui {key} must be a string")
-    actions = data.get("actions") or []
-    if not isinstance(actions, list):
-        raise ValueError("ui actions must be a list")
-    clean_actions = []
-    for item in actions:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("label"), str):
-            raise ValueError("each ui action needs string id and label")
-        style = item.get("style")
-        if style is not None and style not in ("default", "primary", "danger"):
-            raise ValueError("ui action style must be default, primary or danger")
-        clean_actions.append({"id": item["id"], "label": item["label"], **({"style": style} if style else {})})
-    return {"status": status, "message": data.get("message"), "link": data.get("link"),
-            "qr": data.get("qr"), "actions": clean_actions}
+    clean = _validate_block(data, allowed={"status", "message", "link", "qr", "actions", "sections"})
+    sections = data.get("sections") or []
+    if not isinstance(sections, list):
+        raise ValueError("ui sections must be a list")
+    if len(sections) > UI_MAX_SECTIONS:
+        raise ValueError(f"at most {UI_MAX_SECTIONS} ui sections")
+    clean_sections = []
+    for section in sections:
+        if not isinstance(section, dict):
+            raise ValueError("each ui section must be an object")
+        clean_sections.append(_validate_block(
+            section, allowed={"title", "status", "message", "link", "qr", "actions"}))
+    clean["sections"] = clean_sections
+    return clean
 
 
 @dataclass

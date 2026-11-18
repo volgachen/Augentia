@@ -225,6 +225,9 @@ await ctx.ui.update({
 ```
 
 - `ctx.ui` 来自 `SessionContext` 时，状态显示在该会话的插件面板里；来自 `PluginContext` 时，显示在插件页面上。
+- 按钮可以带 `data`（对象，点击时原样作为 action 的 `data` 传入），用来区分同一个 action 作用于哪个对象，例如 `{"id": "disconnect", "label": "断开", "data": {"account": "a1"}}`。
+- 按钮可以带 `input`：`{"name", "placeholder"?, "value"?}`，前端在按钮前显示一个文本框，点击（或回车）时文本作为 `data[name]` 传入，例如改名。
+- `sections`：子卡片列表（最多 50 个），每个有 `title`、`status`、`message`、`link`、`qr`、`actions`，渲染在主卡片里，适合“每个账号一块”的场景。子卡片不能再嵌套。
 - 字段会被校验：`status` 只能是 `idle / waiting / ok / error`，按钮的 `style` 只能是 `default / primary / danger`，未知字段报错。`ctx.ui.clear()` 等于推送一个空的 `idle` 状态（前端隐藏）。
 - 插件禁用或卸载时，它的 UI 状态一并清除。
 - 每次 `update` 会**整体替换**之前的状态。宿主在内存中保存最新的一份，前端连上时立刻推送。
@@ -636,13 +639,12 @@ Agent 模板的 `agent.config.plugins.<id>` 是**新建会话时的初始值**�
 
 ## 13. 示例：微信插件
 
-> 已实现：`backend/plugins/wechat/`（`plugin.py`、`plugin.json`、`README.md`）。下面是最初的草图（0.2 的每会话一个登录）；0.3 已改为：
-> - 一个账号级登录：`bridge` 改为全局服务（`autostart=True`，但只有 `state.json` 中 `auto_connect` 为真时才登录，所以连过一次后重启会自动重连），凭据放在 `ctx.data_dir`。
-> - 两个会话角色：**收件会话**（微信消息发进去，在会话卡片上设置，持久化）和**镜像会话**（该会话的每条 assistant 消息都转发到微信，默认没有）。镜像通过订阅 `message.created` 事件实现，不用 Hook，所以不依赖会话开关。
-> - 不再自动转发回复：去掉 `turn.end` / `message.generated` Hook 和 `reply_mode`，Agent 用 `wechat__send` 回复。
-> - 微信命令 `\cmd bind <会话>` 临时把收件和镜像都设为该会话，`\cmd unbind` 恢复原收件会话、取消镜像（只在内存中）。没有收件会话时，在微信里回复提示。
-> - `command_prefix`、`message_prefix` 改为全局配置；会话 schema 为空，只用开关决定卡片是否出现。
-> - 测试：`scripts/test_plugin_wechat.py`（用假的 `wechatbot` 模拟扫码、收发消息、重启重连）。
+> 已实现：`backend/plugins/wechat/`（`plugin.py`、`plugin.json`、`README.md`）。下面是最初的草图（0.2 的每会话一个登录）；现在的 0.4 已改为：
+> - 多个微信账号：`bridge` 是全局服务（`autostart=True`），在里面为每个已连接账号起一个任务、各自退避重连；`accounts.json` 记录每个账号的别名、微信 id、`auto_connect`、收件会话和最近联系人，凭据在 `accounts/<id>/`。0.3 的单账号数据自动迁移为第一个账号。
+> - 每个账号一个**收件会话**（会话卡片上设置，持久化），一个会话也只收一个账号；**镜像会话**只能用微信命令 `\cmd bind <会话>` 临时设置（同时作为收件），`\cmd unbind` 恢复。镜像通过订阅 `message.created` 实现。
+> - 不再自动转发回复，Agent 用 `wechat__send`，经会话所属的账号发送；会话不属于任何账号时工具返回错误。
+> - 卡片用 §5.4 的 `sections`（每个账号一块）、按钮 `data`（`{"account": id}`）和 `input`（改名）。
+> - 测试：`scripts/test_plugin_wechat.py`（假的 `wechatbot`：两个账号、迁移、重复扫码、重启重连）。
 
 ```python
 # ~/.augentia/plugins/wechat/plugin.py

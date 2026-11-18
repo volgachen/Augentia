@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { api } from "../../api/client";
 import { errorText } from "../../api/errors";
-import type { PluginLogEntry, PluginUIState, ServiceState } from "../../api/types";
+import type { PluginLogEntry, PluginUIAction, PluginUISection, PluginUIState, ServiceState } from "../../api/types";
 
 // Shared plugin widgets: the UI card a plugin pushes (ctx.ui.update), a
 // service row with start / stop / restart, and a log list.
@@ -19,6 +19,92 @@ const BUTTON_STYLE = {
   danger: "bg-red-700 text-white hover:bg-red-600",
 };
 
+// Buttons are told apart by id + data (several sections may show the same id).
+const actionKey = (a: PluginUIAction) => `${a.id}:${JSON.stringify(a.data ?? {})}`;
+
+function CardBody({
+  block,
+  busy,
+  run,
+}: {
+  block: Pick<PluginUISection, "message" | "qr" | "link" | "actions">;
+  busy: string | null;
+  run: (a: PluginUIAction, text?: string) => void;
+}) {
+  const plain = block.actions.filter((a) => !a.input);
+  const withInput = block.actions.filter((a) => a.input);
+  return (
+    <>
+      {block.message && <div className="text-gray-200 whitespace-pre-wrap break-words">{block.message}</div>}
+      {block.qr && (
+        // No QR library yet (README §10.4): show the QR payload as a link.
+        <a href={block.qr} target="_blank" rel="noreferrer" className="text-indigo-300 underline break-all">
+          Open QR code
+        </a>
+      )}
+      {block.link && (
+        <a href={block.link} target="_blank" rel="noreferrer" className="text-indigo-300 underline break-all">
+          {block.link}
+        </a>
+      )}
+      {withInput.map((a) => (
+        <InputAction key={`${actionKey(a)}:${a.input?.value ?? ""}`} action={a} busy={busy} run={run} />
+      ))}
+      {plain.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {plain.map((a) => (
+            <button
+              key={actionKey(a)}
+              type="button"
+              disabled={busy !== null}
+              onClick={() => run(a)}
+              className={`rounded px-2 py-0.5 text-[11px] disabled:opacity-50 ${BUTTON_STYLE[a.style ?? "default"]}`}
+            >
+              {busy === actionKey(a) ? "…" : a.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function InputAction({
+  action,
+  busy,
+  run,
+}: {
+  action: PluginUIAction;
+  busy: string | null;
+  run: (a: PluginUIAction, text?: string) => void;
+}) {
+  const [text, setText] = useState(action.input?.value ?? "");
+  const submit = () => run(action, text);
+  return (
+    <form
+      className="flex gap-1.5"
+      onSubmit={(e) => {
+        e.preventDefault();
+        submit();
+      }}
+    >
+      <input
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        placeholder={action.input?.placeholder}
+        className="flex-1 min-w-0 rounded border border-gray-600 bg-gray-950 px-1.5 py-0.5 text-[11px] text-gray-100"
+      />
+      <button
+        type="submit"
+        disabled={busy !== null}
+        className={`rounded px-2 py-0.5 text-[11px] disabled:opacity-50 ${BUTTON_STYLE[action.style ?? "default"]}`}
+      >
+        {busy === actionKey(action) ? "…" : action.label}
+      </button>
+    </form>
+  );
+}
+
 export function PluginUICard({
   pluginId,
   sessionId,
@@ -31,47 +117,31 @@ export function PluginUICard({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (actionId: string) => {
-    setBusy(actionId);
+  const run = async (a: PluginUIAction, text?: string) => {
+    setBusy(actionKey(a));
     setError(null);
+    const data: Record<string, unknown> = { ...(a.data ?? {}) };
+    if (a.input) data[a.input.name] = text ?? "";
     try {
-      await api.plugins.action(pluginId, actionId, sessionId);
+      await api.plugins.action(pluginId, a.id, sessionId, data);
     } catch (e) {
       setError(errorText(e));
     } finally {
       setBusy(null);
     }
   };
+  const runVoid = (a: PluginUIAction, text?: string) => void run(a, text);
 
   return (
     <div className={`rounded border px-2 py-1.5 flex flex-col gap-1.5 text-[11px] ${UI_STYLE[ui.status]}`}>
-      {ui.message && <div className="text-gray-200 whitespace-pre-wrap break-words">{ui.message}</div>}
-      {ui.qr && (
-        // No QR library yet (README §10.4): show the QR payload as a link.
-        <a href={ui.qr} target="_blank" rel="noreferrer" className="text-indigo-300 underline break-all">
-          Open QR code
-        </a>
-      )}
-      {ui.link && (
-        <a href={ui.link} target="_blank" rel="noreferrer" className="text-indigo-300 underline break-all">
-          {ui.link}
-        </a>
-      )}
-      {ui.actions.length > 0 && (
-        <div className="flex flex-wrap gap-1.5">
-          {ui.actions.map((a) => (
-            <button
-              key={a.id}
-              type="button"
-              disabled={busy !== null}
-              onClick={() => void run(a.id)}
-              className={`rounded px-2 py-0.5 text-[11px] disabled:opacity-50 ${BUTTON_STYLE[a.style ?? "default"]}`}
-            >
-              {busy === a.id ? "…" : a.label}
-            </button>
-          ))}
+      <CardBody block={ui} busy={busy} run={runVoid} />
+      {(ui.sections ?? []).map((s, i) => (
+        <div key={`${s.title ?? ""}-${i}`}
+             className={`rounded border px-2 py-1.5 flex flex-col gap-1.5 ${UI_STYLE[s.status]}`}>
+          {s.title && <div className="font-semibold text-gray-100 break-words">{s.title}</div>}
+          <CardBody block={s} busy={busy} run={runVoid} />
         </div>
-      )}
+      ))}
       {error && <div className="text-red-300">{error}</div>}
     </div>
   );
