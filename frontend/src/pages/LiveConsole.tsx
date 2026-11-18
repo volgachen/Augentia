@@ -1,7 +1,8 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { messageToEvent, useStore } from "../store/sessions";
 import { CompressedLoaderContext } from "../components/console/compressedLoader";
+import { MessageFocusContext, type MessageFocus } from "../components/console/messageFocus";
 import { api } from "../api/client";
 import { agentAcceptsImages } from "../api/types";
 import type { AgentTemplate } from "../api/types";
@@ -24,7 +25,6 @@ import {
   isToolCallView,
   itemBorrowedFrom,
   itemMessageId,
-  itemMessageIds,
 } from "../components/console/items";
 import { statusLabel, statusTitle } from "../components/statusLabel";
 
@@ -113,22 +113,44 @@ export default function LiveConsole() {
     if (sessionId) openSession(sessionId);
   }, [sessionId, openSession]);
 
-  // Scroll to ?m= once its row has rendered (history may still be loading).
-  const eventsLoaded = entry?.events.length ?? 0;
+  // ?m= may name a row the transcript doesn't list directly: compressed
+  // under a summary, or inside a joined fork-dispatch result. Ask where it
+  // is; the summaries to open go into the focus context, and the row that
+  // renders the target scrolls to it (as on the share page).
+  const [located, setLocated] = useState<
+    { key: string; expand: string[]; missing: boolean } | null
+  >(null);
+  const jumpLocateKey = sessionId && jumpTarget ? `${sessionId}/${jumpTarget}` : null;
   useEffect(() => {
-    if (!sessionId || !jumpTarget) return;
-    const key = `${sessionId}/${jumpTarget}`;
-    if (jumpedFor.current === key) return;
-    const index = buildConsoleItems(entry?.events ?? []).findIndex((item) =>
-      itemMessageIds(item).includes(jumpTarget),
-    );
-    if (index < 0) return;
-    const node = itemRefs.current[index];
-    if (!node) return;
-    jumpedFor.current = key;
-    setFocusedItemIndex(index);
-    node.scrollIntoView({ block: "center" });
-  }, [sessionId, jumpTarget, eventsLoaded, entry?.events]);
+    if (!sessionId || !jumpTarget || !jumpLocateKey) return;
+    let cancelled = false;
+    api.sessions
+      .locate(sessionId, jumpTarget)
+      .then((loc) => {
+        if (cancelled) return;
+        if (loc.deleted && sessionId) void setShowDeleted(sessionId, true);
+        setLocated({ key: jumpLocateKey, expand: loc.expand, missing: false });
+      })
+      .catch(() => {
+        if (!cancelled) setLocated({ key: jumpLocateKey, expand: [], missing: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, jumpTarget, jumpLocateKey, setShowDeleted]);
+  const location = located?.key === jumpLocateKey ? located : null;
+  const focus = useMemo<MessageFocus>(
+    () => ({
+      targetId: location && !location.missing ? jumpTarget : null,
+      expand: new Set(location?.expand ?? []),
+      claimScroll: () => {
+        if (!jumpLocateKey || jumpedFor.current === jumpLocateKey) return false;
+        jumpedFor.current = jumpLocateKey;
+        return true;
+      },
+    }),
+    [location, jumpTarget, jumpLocateKey],
+  );
 
   useEffect(() => {
     // Opened at a message (?m=): stay there instead of following the tail.
@@ -224,13 +246,10 @@ export default function LiveConsole() {
   const ownHistoryStart = lastBorrowed >= 0 ? lastBorrowed + 1 : -1;
   const borrowsHistory = lastBorrowed >= 0;
 
-  const jumpKey = sessionId && jumpTarget ? `${sessionId}/${jumpTarget}` : null;
-  const jumpIndex = jumpTarget
-    ? consoleItems.findIndex((item) => itemMessageIds(item).includes(jumpTarget))
-    : -1;
-  // Rows the transcript doesn't show (deleted, or compressed into a summary)
-  // can't be scrolled to; say so instead of jumping silently nowhere.
-  const jumpMissing = !!jumpTarget && jumpIndex < 0 && events.length > 0;
+  const jumpKey = jumpLocateKey;
+  // Rows the transcript can't show (a rewrite discarded them, a framework
+  // mark, an unknown id): say so instead of jumping silently nowhere.
+  const jumpMissing = !!location?.missing;
 
   const scrollToConsoleItem = (index: number) => {
     const nextIndex = Math.max(0, Math.min(index, consoleItems.length - 1));
@@ -371,6 +390,7 @@ export default function LiveConsole() {
 
   return (
     <CompressedLoaderContext.Provider value={loadCompressed}>
+    <MessageFocusContext.Provider value={focus}>
     <div className="relative flex flex-col h-full p-4 gap-3">
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -398,7 +418,7 @@ export default function LiveConsole() {
           )}
           {jumpKey && jumpMissing && (
             <p className="mt-0.5 text-xs text-amber-400/80">
-              要定位的消息不在当前显示的记录里（可能已被删除或压缩进摘要）
+              要定位的消息不在这个会话的记录里（可能已被重写丢弃，或者不存在）
             </p>
           )}
         </div>
@@ -799,6 +819,7 @@ export default function LiveConsole() {
         </div>
       </div>
     </div>
+    </MessageFocusContext.Provider>
     </CompressedLoaderContext.Provider>
   );
 }

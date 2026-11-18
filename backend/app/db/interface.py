@@ -152,6 +152,10 @@ class IAgentDatabase(ABC):
         written later for an earlier span); last_message_at only moves forward."""
 
     @abstractmethod
+    async def get_message(self, message_id: str) -> Message:
+        """One row by id, from any session, deleted or not; KeyError if unknown."""
+
+    @abstractmethod
     async def get_own_messages(
         self, session_id: str, *, include_deleted: bool = False,
         before: datetime | None = None,

@@ -201,5 +201,29 @@ async def joined_turn_rows(db: IAgentDatabase, summary: Message) -> list[Message
             and (m.deleted_at is None or (m.metadata or {}).get("compressed_by"))]
 
 
+async def joined_result_for(db: IAgentDatabase, rows: list[Message], message_id: str) -> Message | None:
+    """The branch_summary among `rows` (one session's, deleted ones included)
+    whose expanded turn shows `message_id`, a row of a joined branch.
+
+    Looks the row up by id to learn its branch, then only that branch's
+    results are checked: the cost doesn't grow with the number of branches.
+    Only rows of branches joined into this session directly; a branch of a
+    branch isn't followed.
+    """
+    try:
+        row = await db.get_message(message_id)
+    except KeyError:
+        return None
+    for summary in rows:
+        if not is_branch_summary(summary):
+            continue
+        if ((summary.metadata or {}).get(JOINED_FROM) or {}).get("session_id") != row.session_id:
+            continue
+        shown = await joined_turn_rows(db, summary)
+        if any(m.id == message_id for m in shown):
+            return summary
+    return None
+
+
 def _undeleted(message: Message) -> Message:
     return message.model_copy(update={"deleted_at": None})

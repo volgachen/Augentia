@@ -194,6 +194,10 @@ export const api = {
         body: JSON.stringify({ working_dir, update_prompt }),
       }),
     model: (id: string) => request<SessionModelView>(`/sessions/${id}/model`),
+    locate: (id: string, messageId: string) =>
+      request<SharedMessageLocation>(
+        `/sessions/${encodeURIComponent(id)}/locate/${encodeURIComponent(messageId)}`,
+      ),
     updateModel: (
       id: string,
       model: string | null,

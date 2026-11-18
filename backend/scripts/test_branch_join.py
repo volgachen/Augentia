@@ -210,6 +210,40 @@ async def main() -> int:
             check(MessageRole.TOOL in roles and MessageRole.USER in roles,
                   f"compressed branch turn: the originals the turn_summary replaced ({[r.value for r in roles]})")
 
+            section("share page: locate a branch's message")
+            from app.core.session_share import write_share
+            from app.routers.share import locate_shared_message
+            write_share("src", True)
+            tool_row = next(m for m in rows_t if m.role == MessageRole.TOOL)
+            loc = await locate_shared_message("src", tool_row.id, db=db)
+            check(loc["expand"] == [by_task["task tool"].id] and loc["role"] == MessageRole.TOOL,
+                  f"a row of a joined branch turn: expand that result ({loc})")
+            plain_user = next(m for m in rows_a if m.role == MessageRole.USER)
+            loc = await locate_shared_message("src", plain_user.id, db=db)
+            check(loc["expand"] == [by_task["task a"].id], "also for a branch turn without turn compression")
+            own = next(m for m in await db.get_own_messages("src") if m.content == "hello")
+            loc = await locate_shared_message("src", own.id, db=db)
+            check(loc["expand"] == [], "the session's own rows locate as before")
+            # A row of the branch that its joined result doesn't show: 404.
+            later = await db.add_message(ids[0], MessageRole.USER, "after the join")
+            for mid, label in ((later.id, "a branch row after the joined turn"),
+                               ("no-such-id", "an unknown id")):
+                try:
+                    await locate_shared_message("src", mid, db=db)
+                except HTTPException as e:
+                    check(e.status_code == 404, f"{label} -> 404")
+                else:
+                    check(False, f"{label} was located")
+            write_share("src", False)
+            try:
+                await locate_shared_message("src", tool_row.id, db=db)
+            except HTTPException as e:
+                check(e.status_code == 404, "not shared -> the share locate is 404")
+            from app.routers.sessions import locate_session_message
+            loc = await locate_session_message("src", tool_row.id, db=db)
+            check(loc["expand"] == [by_task["task tool"].id],
+                  "the console's locate (owner, no share needed) finds it the same way")
+
             section("a join waits for a running source turn")
             gate.set()
             runner = registry.get("src")
