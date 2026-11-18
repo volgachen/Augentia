@@ -301,6 +301,8 @@ export interface PluginUIAction {
   data?: Record<string, unknown>;
   // A text box in front of the button; its text is sent as data[name].
   input?: { name: string; placeholder?: string; value?: string };
+  // Shown but not clickable (e.g. "can't bind").
+  disabled?: boolean;
 }
 
 // A sub-card inside a plugin card (e.g. one per account).

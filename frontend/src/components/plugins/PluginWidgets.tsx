@@ -13,6 +13,13 @@ const UI_STYLE: Record<PluginUIState["status"], string> = {
   error: "border-red-800 bg-red-950/40",
 };
 
+const DOT_STYLE: Record<PluginUIState["status"], string> = {
+  idle: "bg-gray-500",
+  waiting: "bg-amber-400",
+  ok: "bg-green-500",
+  error: "bg-red-500",
+};
+
 const BUTTON_STYLE = {
   default: "border border-gray-600 bg-gray-800 text-gray-200 hover:border-gray-400",
   primary: "bg-indigo-600 text-white hover:bg-indigo-500",
@@ -52,20 +59,74 @@ function CardBody({
       ))}
       {plain.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
-          {plain.map((a) => (
-            <button
-              key={actionKey(a)}
-              type="button"
-              disabled={busy !== null}
-              onClick={() => run(a)}
-              className={`rounded px-2 py-0.5 text-[11px] disabled:opacity-50 ${BUTTON_STYLE[a.style ?? "default"]}`}
-            >
-              {busy === actionKey(a) ? "…" : a.label}
-            </button>
-          ))}
+          {plain.map((a) => <ActionButton key={actionKey(a)} action={a} busy={busy} run={run} />)}
         </div>
       )}
     </>
+  );
+}
+
+function ActionButton({
+  action: a,
+  busy,
+  run,
+}: {
+  action: PluginUIAction;
+  busy: string | null;
+  run: (a: PluginUIAction, text?: string) => void;
+}) {
+  if (a.disabled) {
+    return <span className="px-1 py-0.5 text-[11px] text-gray-500 whitespace-nowrap">{a.label}</span>;
+  }
+  return (
+    <button
+      type="button"
+      disabled={busy !== null}
+      onClick={() => run(a)}
+      className={`rounded px-2 py-0.5 text-[11px] whitespace-nowrap disabled:opacity-50 ${BUTTON_STYLE[a.style ?? "default"]}`}
+    >
+      {busy === actionKey(a) ? "…" : a.label}
+    </button>
+  );
+}
+
+// One section as a compact row: status dot, title, message, buttons; a QR
+// code or link (and input buttons) go on the lines below.
+function SectionRow({
+  section: s,
+  busy,
+  run,
+}: {
+  section: PluginUISection;
+  busy: string | null;
+  run: (a: PluginUIAction, text?: string) => void;
+}) {
+  const plain = s.actions.filter((a) => !a.input);
+  const withInput = s.actions.filter((a) => a.input);
+  return (
+    <div className="flex flex-col gap-1 py-1">
+      <div className="flex items-center gap-1.5 min-w-0">
+        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${DOT_STYLE[s.status]}`} title={s.status} />
+        {s.title && <span className="font-semibold text-gray-100 truncate">{s.title}</span>}
+        {s.message && <span className="text-gray-400 truncate" title={s.message}>{s.message}</span>}
+        <span className="ml-auto flex shrink-0 gap-1">
+          {plain.map((a) => <ActionButton key={actionKey(a)} action={a} busy={busy} run={run} />)}
+        </span>
+      </div>
+      {s.qr && (
+        <a href={s.qr} target="_blank" rel="noreferrer" className="pl-3 text-indigo-300 underline break-all">
+          Open QR code
+        </a>
+      )}
+      {s.link && (
+        <a href={s.link} target="_blank" rel="noreferrer" className="pl-3 text-indigo-300 underline break-all">
+          {s.link}
+        </a>
+      )}
+      {withInput.map((a) => (
+        <InputAction key={`${actionKey(a)}:${a.input?.value ?? ""}`} action={a} busy={busy} run={run} />
+      ))}
+    </div>
   );
 }
 
@@ -135,13 +196,13 @@ export function PluginUICard({
   return (
     <div className={`rounded border px-2 py-1.5 flex flex-col gap-1.5 text-[11px] ${UI_STYLE[ui.status]}`}>
       <CardBody block={ui} busy={busy} run={runVoid} />
-      {(ui.sections ?? []).map((s, i) => (
-        <div key={`${s.title ?? ""}-${i}`}
-             className={`rounded border px-2 py-1.5 flex flex-col gap-1.5 ${UI_STYLE[s.status]}`}>
-          {s.title && <div className="font-semibold text-gray-100 break-words">{s.title}</div>}
-          <CardBody block={s} busy={busy} run={runVoid} />
+      {(ui.sections?.length ?? 0) > 0 && (
+        <div className="flex flex-col divide-y divide-gray-800">
+          {ui.sections!.map((s, i) => (
+            <SectionRow key={`${s.title ?? ""}-${i}`} section={s} busy={busy} run={runVoid} />
+          ))}
         </div>
-      ))}
+      )}
       {error && <div className="text-red-300">{error}</div>}
     </div>
   );

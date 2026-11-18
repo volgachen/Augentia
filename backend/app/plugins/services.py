@@ -101,14 +101,14 @@ UI_MAX_SECTIONS = 50
 
 
 def _validate_action(item: Any) -> dict:
-    """One button: id, label, optional style, data (passed to the action) and input.
+    """One button: id, label, optional style, data (passed to the action), input and disabled.
 
     ``input`` adds a text box next to the button; its text is sent as
     ``data[input.name]``. ``input`` is ``{"name", "placeholder"?, "value"?}``.
     """
     if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not isinstance(item.get("label"), str):
         raise ValueError("each ui action needs string id and label")
-    unknown = set(item) - {"id", "label", "style", "data", "input"}
+    unknown = set(item) - {"id", "label", "style", "data", "input", "disabled"}
     if unknown:
         raise ValueError(f"unknown ui action keys: {sorted(unknown)}")
     clean: dict[str, Any] = {"id": item["id"], "label": item["label"]}
@@ -137,6 +137,11 @@ def _validate_action(item: Any) -> dict:
             if field_.get(key) is not None and not isinstance(field_[key], str):
                 raise ValueError(f"ui action input {key} must be a string")
         clean["input"] = {k: field_[k] for k in ("name", "placeholder", "value") if field_.get(k) is not None}
+    if item.get("disabled") is not None:
+        if not isinstance(item["disabled"], bool):
+            raise ValueError("ui action disabled must be a boolean")
+        if item["disabled"]:
+            clean["disabled"] = True
     return clean
 
 
