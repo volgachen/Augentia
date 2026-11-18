@@ -62,23 +62,28 @@ missing package.
 
 1. In a session, open the sidebar's **Plugins** tab and switch WeChat Bridge
    on. Give the session's agent the `wechat__send` tool.
-2. Press **Add WeChat account** and scan the QR code with that WeChat.
-   Added from a session card that has no account yet, the new account sends
-   to that session.
-3. Each account has its own block on the card: **Receive here** /
-   **Stop receiving here** (session cards), **Connect** / **Disconnect**,
-   and on the Plugins page **Rename** (with a text box) and **Remove**.
+2. Type a name (optional) next to **Add WeChat account**, press it and scan
+   the QR code with that WeChat. Added from a session card that has no
+   account yet, the new account is bound to that session.
 
-Connected accounts reconnect by themselves when the backend starts, until
-you press Disconnect. Scanning a WeChat that is already added drops the new
-entry. Remove deletes the account's saved login.
+The cards show one row per account and the connection state only when it
+needs you (QR code, connecting, error):
+
+- **Plugins page**: name, the bound session (with **Unbind**), **Remove**.
+- **Session card, bound**: just its account, with **Unbind**.
+- **Session card, not bound**: every account with **Bind**, or a greyed
+  "Bound to …" when the account already has a session.
+
+Every added account stays connected and reconnects by itself (also when the
+backend starts). There is no disconnect: **Remove** deletes the account and
+its saved login. Scanning a WeChat that is already added drops the new entry.
 
 ## Files
 
 In `~/.augentia/plugin_data/wechat/`:
 
 - `accounts.json`: per account (keyed by a local id) its `alias`,
-  `wechat_id`, `auto_connect`, `inbound` session and last `contact`.
+  `wechat_id`, `inbound` (bound) session and last `contact`.
 - `accounts/<id>/credentials.json`: the WeChat login, so reconnects skip
   the QR code.
 
@@ -94,7 +99,8 @@ the card (and the inbound role) is offered in that session.
 
 ## Changes
 
-- **0.4**: several accounts. The 0.3 `state.json` + `wechat_credentials.json`
+- **0.4**: several accounts, compact one-row-per-account cards (name set when
+  adding; no connect / disconnect / rename). The 0.3 `state.json` + `wechat_credentials.json`
   are migrated into the first account (`state.json` is renamed
   `state.json.migrated`). Uses the host's card sections, action `data` and
   text inputs.

@@ -2,9 +2,10 @@
 
 Several WeChat accounts can be logged in at once. Each account has:
 
-- an **inbound session**: its WeChat messages are sent into it. Set from a
-  session's plugin card; persisted. One account has at most one inbound
-  session, and a session receives from at most one account.
+- an **inbound session** (its "bound" session): its WeChat messages are sent
+  into it. Set with Bind on a session's plugin card; persisted. One account
+  has at most one inbound session, and a session receives from at most one
+  account. Unbind (plugin page or the session card) clears it.
 - an optional **mirror session**, only set by ``\\cmd bind``: everything the
   agent writes there (every assistant message, including text before tool
   calls) is forwarded to that account's WeChat.
@@ -18,11 +19,13 @@ sends through the account the session is bound to (bind first, else saved
 inbound) to that account's last contact. A session bound to no account gets
 an error from the tool.
 
-The global ``bridge`` service runs one task per connected account (each with
-its own reconnect backoff); stopping the service disconnects them all.
+Every added account stays connected: the global ``bridge`` service runs one
+task per account (each with its own reconnect backoff). Remove deletes an
+account and its login. The cards only show the connection state when it
+needs attention (QR code, connecting, error).
 
 Files in ``ctx.data_dir``: ``accounts.json`` (per account: alias, wechat_id,
-auto_connect, inbound, contact) and ``accounts/<key>/credentials.json``
+inbound, contact) and ``accounts/<key>/credentials.json``
 (the WeChatBot login). ``key`` is a local id: the WeChat id is only known
 after the QR login. 0.3's single-account ``state.json`` +
 ``wechat_credentials.json`` are migrated into the first account.
@@ -205,7 +208,7 @@ class WeChatPlugin(Plugin):
         key = self._new_key()
         shutil.move(str(old_creds), str(self._cred_path(key)))
         self._accounts[key] = {
-            "alias": None, "wechat_id": None, "auto_connect": bool(state.get("auto_connect")),
+            "alias": None, "wechat_id": None,
             "inbound": state.get("inbound"), "contact": state.get("contact"),
         }
         self._write_accounts()
@@ -294,64 +297,54 @@ class WeChatPlugin(Plugin):
         for sid, sctx in list(self._session_ctxs.items()):
             sctx.ui.update_nowait(self._session_card(sid))
 
-    def _conn_actions(self, key: str) -> list[dict]:
-        rt = self._rt_of(key)
-        if not self._logged_in_before(key) and rt.task is None:
-            return [_act("connect", "Scan to connect", key, "primary"),
-                    _act("remove_account", "Remove", key, "danger")]
-        if not self._logged_in_before(key):
-            return [_act("remove_account", "Cancel", key, "danger")]
-        if rt.task is not None:
-            return [_act("disconnect", "Disconnect", key, "danger")]
-        return [_act("connect", "Connect", key, "primary")]
-
-    def _section(self, key: str, actions: list[dict], extra: str = "") -> dict:
+    def _state_text(self, key: str) -> str | None:
+        """Connection state, only when it needs attention (QR, connecting, error)."""
         conn = self._rt_of(key).conn
-        section = {"title": self._name(key), "status": conn["status"],
-                   "message": " ".join(p for p in (conn["message"], extra, self._routing_text(key)) if p),
-                   "actions": actions}
+        return None if conn["status"] == "ok" else conn["message"]
+
+    def _row(self, key: str, message: str | None, actions: list[dict]) -> dict:
+        conn = self._rt_of(key).conn
+        row = {"title": self._name(key), "status": conn["status"], "message": message, "actions": actions}
         if conn.get("qr"):
-            section["qr"] = conn["qr"]
-        return section
+            row["qr"] = conn["qr"]
+        return row
+
+    def _bound_session(self, key: str) -> dict | None:
+        return self._rt_of(key).bind or (self._accounts.get(key) or {}).get("inbound")
 
     def _page_card(self) -> dict:
-        sections = []
+        """One row per account: name, bound session (with Unbind), Remove."""
+        rows = []
         for key in self._accounts:
-            acc = self._accounts[key]
-            actions = self._conn_actions(key)
-            if self._logged_in_before(key):
-                actions = [_act("rename", "Rename", key, input={
-                    "name": "alias", "placeholder": "Name for this account", "value": acc.get("alias") or ""})
-                ] + actions + [_act("remove_account", "Remove", key, "danger")]
-            sections.append(self._section(key, actions))
-        statuses = [s["status"] for s in sections]
-        status = "error" if "error" in statuses else "waiting" if "waiting" in statuses else (
-            "ok" if "ok" in statuses else "idle")
-        message = self._notice or (f"{len(sections)} WeChat account(s)." if sections else "No WeChat account yet.")
-        return {"status": status, "message": message, "sections": sections,
-                "actions": [_act("add_account", "Add WeChat account", style="primary")]}
+            bound = self._bound_session(key)
+            parts = [f"→ {_describe(bound)}" if bound else None, self._state_text(key)]
+            actions = [_act("unbind", "Unbind", key)] if bound else []
+            actions.append(_act("remove_account", "Remove", key, "danger"))
+            rows.append(self._row(key, " · ".join(p for p in parts if p) or None, actions))
+        return {"status": "idle", "message": self._notice, "sections": rows,
+                "actions": [_act("add_account", "Add WeChat account", style="primary",
+                                 input={"name": "alias", "placeholder": "Name (optional)"})]}
 
     def _session_card(self, session_id: str) -> dict:
+        """Bound: just that account (with Unbind). Else every account with Bind / can't bind."""
         mine = self._account_for_session(session_id)
-        sections = []
-        for key in self._accounts:
-            acc = self._accounts[key]
-            receiving = (acc.get("inbound") or {}).get("id") == session_id
-            actions = self._conn_actions(key)
-            if receiving:
-                actions.append(_act("clear_inbound", "Stop receiving here", key))
-            elif self._logged_in_before(key) and (mine is None or mine == key):
-                actions.append(_act("set_inbound", "Receive here", key))
-            extra = "Sends to this session." if receiving else ""
-            sections.append(self._section(key, actions, extra))
         if mine is not None:
-            message = f"This session uses WeChat account {self._name(mine)}."
-            status = self._rt_of(mine).conn["status"]
-        else:
-            message = "No WeChat account sends messages to this session."
-            status = "idle"
-        return {"status": status, "message": message, "sections": sections,
-                "actions": [_act("add_account", "Add WeChat account", style="primary")]}
+            return {"status": "idle", "message": None,
+                    "sections": [self._row(mine, self._state_text(mine), [_act("unbind", "Unbind", mine)])]}
+        rows = []
+        for key in self._accounts:
+            bound = self._bound_session(key)
+            if bound:
+                action = _act("set_inbound", f"Bound to {bound.get('title') or _short(bound['id'])}", key,
+                              disabled=True)
+            elif not self._logged_in_before(key):
+                action = _act("set_inbound", "Logging in", key, disabled=True)
+            else:
+                action = _act("set_inbound", "Bind", key, "primary")
+            rows.append(self._row(key, self._state_text(key), [action]))
+        return {"status": "idle", "message": None if rows else "No WeChat account yet.", "sections": rows,
+                "actions": [_act("add_account", "Add WeChat account", input={
+                    "name": "alias", "placeholder": "Name (optional)"})]}
 
     def _set_conn(self, key: str, status: str, message: str, qr: str | None = None) -> None:
         conn: dict[str, Any] = {"status": status, "message": message}
@@ -364,14 +357,10 @@ class WeChatPlugin(Plugin):
 
     @service("bridge", scope="global", autostart=True, restart="on-failure")
     async def bridge(self, ctx: PluginContext) -> None:
-        """Hold one task per connected account until stopped.
-
-        Accounts that were connected (auto_connect) reconnect at startup.
-        """
+        """Hold one task per account until stopped: every added account stays connected."""
         try:
-            for key, acc in list(self._accounts.items()):
-                if acc.get("auto_connect"):
-                    self._start_account(key)
+            for key in list(self._accounts):
+                self._start_account(key)
             self._render()
             await asyncio.Event().wait()
         finally:
@@ -426,8 +415,7 @@ class WeChatPlugin(Plugin):
                         self._drop_account(key)
                         return
                     self._set_conn(key, "error", f"WeChat error: {exc}")
-                acc = self._accounts.get(key)
-                if acc is None or not acc.get("auto_connect"):
+                if key not in self._accounts:
                     return
                 self._set_conn(key, "waiting", f"Reconnecting in {backoff:g}s…")
                 await asyncio.sleep(backoff)
@@ -506,38 +494,20 @@ class WeChatPlugin(Plugin):
 
     @action("add_account")
     async def add_account(self, ctx: PluginContext, data: dict) -> str:
-        """Start a QR login for a new account. From a session card with no
-        account yet, the new account sends to that session."""
+        """Start a QR login for a new account (optionally named). From a
+        session card with no account yet, the new account binds that session."""
         key = self._new_key()
         inbound = None
         if isinstance(ctx, SessionContext) and self._account_for_session(ctx.session_id) is None:
             info = await ctx.session()
             inbound = {"id": info.id, "title": info.title}
-        self._accounts[key] = {"alias": None, "wechat_id": None, "auto_connect": True,
-                               "inbound": inbound, "contact": None}
+        alias = str(data.get("alias") or "").strip()[:40] or None
+        self._accounts[key] = {"alias": alias, "wechat_id": None, "inbound": inbound, "contact": None}
         self._write_accounts()
         self._notice = None
         await self._ensure_bridge(ctx)
         self._start_account(key)
         return key
-
-    @action("connect")
-    async def connect(self, ctx: PluginContext, data: dict) -> str:
-        key = self._account_key(data)
-        self._accounts[key]["auto_connect"] = True
-        self._write_accounts()
-        await self._ensure_bridge(ctx)
-        self._start_account(key)
-        return "connecting"
-
-    @action("disconnect")
-    async def disconnect(self, ctx: PluginContext, data: dict) -> str:
-        key = self._account_key(data)
-        self._accounts[key]["auto_connect"] = False
-        self._write_accounts()
-        await self._stop_account(key)
-        self._set_conn(key, "idle", "Not connected.")
-        return "disconnected"
 
     @action("remove_account")
     async def remove_account(self, ctx: PluginContext, data: dict) -> str:
@@ -545,15 +515,6 @@ class WeChatPlugin(Plugin):
         await self._stop_account(key)
         self._drop_account(key)
         return "removed"
-
-    @action("rename")
-    async def rename(self, ctx: PluginContext, data: dict) -> str:
-        key = self._account_key(data)
-        alias = str(data.get("alias") or "").strip()[:40] or None
-        self._accounts[key]["alias"] = alias
-        self._write_accounts()
-        self._render()
-        return alias or ""
 
     @action("set_inbound")
     async def set_inbound(self, ctx: PluginContext, data: dict) -> str:
@@ -571,16 +532,15 @@ class WeChatPlugin(Plugin):
         self._render()
         return "inbound"
 
-    @action("clear_inbound")
-    async def clear_inbound(self, ctx: PluginContext, data: dict) -> str:
+    @action("unbind")
+    async def unbind(self, ctx: PluginContext, data: dict) -> str:
+        """Unbind the account from its session: the \\cmd bind target and the saved inbound session."""
         key = self._account_key(data)
-        acc = self._accounts[key]
-        if isinstance(ctx, SessionContext) and (acc.get("inbound") or {}).get("id") != ctx.session_id:
-            return "not inbound"
-        acc["inbound"] = None
+        self._rt_of(key).bind = None
+        self._accounts[key]["inbound"] = None
         self._write_accounts()
         self._render()
-        return "cleared"
+        return "unbound"
 
     # ---- WeChat -> Augentia ----
 
