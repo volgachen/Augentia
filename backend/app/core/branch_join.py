@@ -15,8 +15,11 @@ so the original continues as if that work were one completed turn:
   replaced, or the whole turn when it has none).
 
 What the result is: the branch's turn_summary for that turn when turn
-compression ran, else its last model reply; a failed or cancelled turn joins
-a note saying so.
+compression ran, else its last model reply; a failed turn joins a note
+saying so. A turn someone stopped (cancelled / interrupted) has nothing to
+report: its summary row is still written, so the branch counts as joined and
+a repeat finds it, but it is soft-deleted at once (metadata.dropped = the
+stop reason) and gets no turn_end, so the target's model never sees it.
 
 The join runs on the original session's runner queue, between its turns, so
 it never lands inside a turn. Branches record join_into_session_id; once
@@ -47,6 +50,9 @@ DEFAULT_TEMPLATE = (
     "结果：{result}"
 )
 FAILED_RESULT = "（这项任务没有完成：{reason}）"
+# Stop reasons of a turn a person stopped: joined but kept out of context.
+DROPPED_STOP_REASONS = ("cancelled", "interrupted")
+DROPPED = "dropped"
 
 
 def is_branch_summary(message: Message) -> bool:
@@ -139,18 +145,29 @@ async def write_join(db: IAgentDatabase, branch: Session, *, template: str | Non
         return existing
     result, summary_id, succeeded = turn_result(turn, end)
     task = turn_task(turn)
+    stop = (end.get("metadata") or {}).get("stop_reason")
+    joined_from = {
+        "session_id": branch.id,
+        "turn_id": turn_id,
+        "summary_id": summary_id,
+        "task": task,
+        "ok": succeeded,
+    }
+    if stop in DROPPED_STOP_REASONS:
+        # Stopped by someone: record the join, keep it out of the target's
+        # context (soft-deleted, no turn_end, so no turn is counted either).
+        row = await db.add_message(
+            target_id, MessageRole.USER, render(template, task, result),
+            metadata={NAME_KEY: BRANCH_SUMMARY, JOINED_FROM: joined_from, DROPPED: stop},
+        )
+        await db.soft_delete_messages(target_id, [row.id], metadata={DROPPED: stop})
+        await db.set_joined_message(branch.id, row.id)
+        logger.info("dropped %s branch=%s turn=%s (not joined into session=%s context) row=%s",
+                    stop, branch.id, turn_id, target_id, row.id)
+        return row
     row = await db.add_message(
         target_id, MessageRole.USER, render(template, task, result),
-        metadata={
-            NAME_KEY: BRANCH_SUMMARY,
-            JOINED_FROM: {
-                "session_id": branch.id,
-                "turn_id": turn_id,
-                "summary_id": summary_id,
-                "task": task,
-                "ok": succeeded,
-            },
-        },
+        metadata={NAME_KEY: BRANCH_SUMMARY, JOINED_FROM: joined_from},
     )
     # One completed turn in the target, so turn counting, compression
     # boundaries and the next turn all treat the joined work as finished.

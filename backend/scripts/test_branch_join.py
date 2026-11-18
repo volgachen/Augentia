@@ -16,7 +16,8 @@ Covers:
   - joins are idempotent and redone for pending branches (restart)
   - while results are pending the source reports pending_joins and refuses
     new messages / another dispatch (409); deleting
-    a pending branch joins what it did and releases the source
+    a pending branch releases the source; a cancelled turn is recorded as
+    joined but kept out of the source's context
 
 Run from backend/:  python scripts/test_branch_join.py
 """
@@ -284,16 +285,32 @@ async def main() -> int:
             stuck = r["branches"][0]["session_id"]
             await asyncio.sleep(0.1)
             check((await get_session("src", db=db)).pending_joins == 1, "one join pending on a stuck branch")
+            live_before = await db.get_own_messages("src")
             await delete_session(stuck, db=db, registry=registry)
             shown = await get_session("src", db=db)
             check(shown.status.value == "WAITING_USER" and shown.pending_joins == 0,
                   f"deleting the branch releases the source ({shown.status.value})")
-            rows = await db.get_own_messages("src")
-            stuck_row = next((m for m in rows if is_branch_summary(m)
+            all_rows = await db.get_own_messages("src", include_deleted=True)
+            stuck_row = next((m for m in all_rows if is_branch_summary(m)
                               and m.metadata[JOINED_FROM]["session_id"] == stuck), None)
-            check(stuck_row is not None and stuck_row.metadata[JOINED_FROM]["ok"] is False,
-                  "the cancelled turn joined a note")
+            check(stuck_row is not None and stuck_row.deleted_at is not None
+                  and stuck_row.metadata.get("dropped") == "cancelled",
+                  "the cancelled turn's join is recorded but soft-deleted (dropped)")
+            check((await db.get_session(stuck, include_deleted=True)).joined_message_id == stuck_row.id,
+                  "the cancelled branch counts as joined")
+            live_after = await db.get_own_messages("src")
+            check([m.id for m in live_after] == [m.id for m in live_before],
+                  "nothing new in the source's live history (no summary, no turn_end)")
             gate.set()
+            await turn("src", "after cancel")
+            sent = json.dumps(source_seen[-1], ensure_ascii=False)
+            check("task stuck" not in sent and "cancelled" not in sent,
+                  "the cancelled branch is not in the source model's context")
+            again = await write_join(db, await db.get_session(stuck, include_deleted=True))
+            check(again.id == stuck_row.id and sum(
+                is_branch_summary(m) and m.metadata[JOINED_FROM]["session_id"] == stuck
+                for m in await db.get_own_messages("src", include_deleted=True)) == 1,
+                "re-joining a dropped branch adds nothing")
 
             section("idempotent; pending joins redone at startup")
             b = await db.get_session(ids[0])
