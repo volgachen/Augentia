@@ -162,7 +162,6 @@ class P(Plugin):
                 raise
 """)
 
-
 def wait_for(cond, timeout=3.0, step=0.02):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -401,7 +400,88 @@ def main() -> None:
         check(any(r["id"] != "leftover" and r["status"] == "running" for r in runs),
               "and the service starts again")
 
+def shutdown_with_deaf_service() -> None:
+    """ServiceManager.shutdown on its own loop (no TestClient to cancel leftovers).
+
+    The body swallows the first cancel and keeps logging, like a client
+    library that catches CancelledError and reconnects.
+    """
+    import asyncio
+    import logging
+
+    from app.plugins.sdk import ServiceSpec
+    from app.plugins.services import ServiceManager
+
+    section("shutdown with a service that ignores cancel")
+    errors: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record):
+            if record.levelno >= logging.ERROR:
+                errors.append(record.getMessage())
+
+    class FakeDB:
+        """Fails like the real one once closed."""
+        closed = False
+        writes_after_close = 0
+
+        async def create_service_run(self, *a, **k):
+            return type("Run", (), {"id": "r1"})()
+
+        async def update_service_run(self, *a, **k):
+            if self.closed:
+                FakeDB.writes_after_close += 1
+                raise RuntimeError("Cannot operate on a closed database.")
+
+        async def add_service_log(self, plugin_id, line, **k):
+            if self.closed:
+                FakeDB.writes_after_close += 1
+                raise RuntimeError("Cannot operate on a closed database.")
+            return type("Log", (), {"id": 1, "ts": None})()
+
+        async def prune_service_logs(self, *a):
+            pass
+
+    handler = Collect()
+    logging.getLogger("augentia.plugins").addHandler(handler)
+    cancels = []
+
+    async def scenario():
+        manager = ServiceManager()
+        db = FakeDB()
+        manager.bind_db(db)
+
+        async def body():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancels.append(1)  # swallowed: 'reconnects'
+            try:
+                while True:
+                    manager.log_nowait("deaf", "still going")
+                    await asyncio.sleep(0.02)
+            except asyncio.CancelledError:
+                cancels.append(2)
+                raise
+
+        await manager.start(ServiceSpec("loop"), "deaf", None, body)
+        await asyncio.sleep(0.05)
+        await manager.shutdown()
+        db.closed = True  # what close_db() does next
+        await asyncio.sleep(0.2)  # anything left running would write now
+        leftovers = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        return leftovers
+
+    leftovers = asyncio.run(scenario())
+    logging.getLogger("augentia.plugins").removeHandler(handler)
+    check(cancels == [1, 2], f"the service got a second cancel at shutdown: {cancels}")
+    check(not leftovers, f"nothing left running after shutdown: {leftovers}")
+    check(FakeDB.writes_after_close == 0 and not errors,
+          f"no database writes or errors after shutdown: writes={FakeDB.writes_after_close} errors={errors[:3]}")
+
+
 main()
+shutdown_with_deaf_service()
 print()
 if failures:
     fail(f"{failures} check(s) failed")

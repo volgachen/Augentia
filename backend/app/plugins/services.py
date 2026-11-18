@@ -42,6 +42,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("augentia.plugins.services")
 
 STOP_GRACE = 5.0
+# At shutdown, service bodies that ignored the first cancel get one more
+# cancel and this long before the database is let go.
+SHUTDOWN_GRACE = 2.0
 BACKOFF_START = 1.0
 BACKOFF_MAX = 60.0
 RESTART_WINDOW = 600.0
@@ -229,9 +232,20 @@ class ServiceManager:
         self._ui: dict[tuple[str, str | None], UIState] = {}
         self._subscribers: set[_Subscriber] = set()
         self._log_tasks: set[asyncio.Task] = set()
+        # Service bodies still running after their STOP_GRACE (they ignored
+        # the cancel); shutdown() tries them once more.
+        self._stragglers: set[asyncio.Task] = set()
+        # Set by shutdown(): no database writes after this (the backend
+        # closes it next); logs still reach the console and live views.
+        self._closed = False
 
     def bind_db(self, db: "IAgentDatabase | None") -> None:
         self._db = db
+        self._closed = False
+
+    @property
+    def _live_db(self) -> "IAgentDatabase | None":
+        return None if self._closed else self._db
 
     # ---- queries ----
 
@@ -303,9 +317,25 @@ class ServiceManager:
             del self._ui[key]
 
     async def shutdown(self) -> None:
+        """Stop every service, then stop using the database (closed right after).
+
+        A service body that ignored its cancel for STOP_GRACE gets one more
+        cancel and SHUTDOWN_GRACE seconds; whatever still runs after that is
+        named in the backend log and can no longer write to the database.
+        """
         await self.stop_where()
+        stragglers = [t for t in self._stragglers if not t.done()]
+        if stragglers:
+            for task in stragglers:
+                task.cancel()
+            await asyncio.wait(stragglers, timeout=SHUTDOWN_GRACE)
+            for task in stragglers:
+                if not task.done():
+                    logger.warning("plugin task %s is still running at shutdown; it is abandoned",
+                                   task.get_name())
         if self._log_tasks:
             await asyncio.wait(list(self._log_tasks), timeout=2.0)
+        self._closed = True
 
     async def _stop_instance(self, inst: _Instance) -> None:
         task = inst.task
@@ -351,6 +381,8 @@ class ServiceManager:
                     service_task.cancel()
                     done, _ = await asyncio.wait({service_task}, timeout=STOP_GRACE)
                     if not done:
+                        self._stragglers.add(service_task)
+                        service_task.add_done_callback(self._stragglers.discard)
                         logger.warning("service %s did not stop within %ss", inst.key, STOP_GRACE)
                         await self.log(plugin_id, f"service '{name}' did not stop within {STOP_GRACE:g}s",
                                        level="warning", run_id=run_id, session_id=session_id)
@@ -408,11 +440,12 @@ class ServiceManager:
 
     async def _record_start(self, inst: _Instance) -> str | None:
         plugin_id, name, session_id = inst.key
-        if self._db is None:
+        db = self._live_db
+        if db is None:
             inst.state.run_id = None
             return None
         try:
-            run = await self._db.create_service_run(plugin_id, name, session_id=session_id,
+            run = await db.create_service_run(plugin_id, name, session_id=session_id,
                                                     restart_count=inst.state.restart_count)
         except Exception:
             logger.exception("could not record service run %s", inst.key)
@@ -422,10 +455,11 @@ class ServiceManager:
         return run.id
 
     async def _update_run(self, run_id: str | None, **fields: Any) -> None:
-        if run_id is None or self._db is None:
+        db = self._live_db
+        if run_id is None or db is None:
             return
         try:
-            await self._db.update_service_run(run_id, **fields)
+            await db.update_service_run(run_id, **fields)
         except Exception:
             logger.exception("could not update service run %s", run_id)
 
@@ -436,15 +470,16 @@ class ServiceManager:
         """Persist, buffer and broadcast one plugin log line. Never raises."""
         entry = LogLine(plugin_id=plugin_id, run_id=run_id, session_id=session_id,
                         ts=datetime.now(timezone.utc), level=level, line=line)
-        if self._db is not None:
+        db = self._live_db
+        if db is not None:
             try:
-                saved = await self._db.add_service_log(plugin_id, line, level=level, run_id=run_id,
-                                                       session_id=session_id)
+                saved = await db.add_service_log(plugin_id, line, level=level, run_id=run_id,
+                                                 session_id=session_id)
                 entry.id, entry.ts = saved.id, saved.ts
                 count = self._log_counts.get(plugin_id, 0) + 1
                 self._log_counts[plugin_id] = count
                 if count % PRUNE_EVERY == 0:
-                    await self._db.prune_service_logs(plugin_id, LOG_KEEP)
+                    await db.prune_service_logs(plugin_id, LOG_KEEP)
             except Exception:
                 logger.exception("could not persist plugin log for %s", plugin_id)
         self._logs.setdefault(plugin_id, deque(maxlen=LOG_BUFFER)).append(entry)
