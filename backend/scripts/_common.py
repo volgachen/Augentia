@@ -33,7 +33,10 @@ def use_isolated_state(prefix: str = "augentia-test-") -> Path:
     backend/.env usually names the developer's real database; hermetic scripts
     that drive the app in-process (TestClient / ASGITransport) must never write
     into it. Redirects the DB (temp SQLite), AUGENTIA_HOME (session configs,
-    attachments) and the worktree root into a fresh temp dir.
+    attachments) and the worktree root into a fresh temp dir, and drops
+    AUGENTIA_PLUGIN_PATH (.env may point it at the repo's plugins for
+    development), so only plugins under the temp home load. Scripts that
+    need extra plugin dirs set it again after calling this.
     """
     import tempfile
 
@@ -42,6 +45,7 @@ def use_isolated_state(prefix: str = "augentia-test-") -> Path:
     os.environ["SQLITE_PATH"] = str(root / "test.db")
     os.environ["AUGENTIA_HOME"] = str(root / "home")
     os.environ["AUGENTIA_WORKTREE_ROOT"] = str(root / "worktrees")
+    os.environ.pop("AUGENTIA_PLUGIN_PATH", None)
     from app.config import get_settings
     get_settings.cache_clear()
     return root
