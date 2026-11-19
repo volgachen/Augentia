@@ -23,10 +23,12 @@ import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAtta
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
 import {
   buildConsoleItems,
+  isCompressionGroup,
   isToolCallView,
   itemBorrowedFrom,
   itemMessageId,
 } from "../components/console/items";
+import type { ConsoleItem } from "../components/console/items";
 import { statusLabel, statusTitle } from "../components/statusLabel";
 
 export default function LiveConsole() {
@@ -43,6 +45,7 @@ export default function LiveConsole() {
   const retryMessage = useStore((s) => s.retryMessage);
   const divergeFromMessage = useStore((s) => s.divergeFromMessage);
   const deleteMessage = useStore((s) => s.deleteMessage);
+  const deleteMessages = useStore((s) => s.deleteMessages);
   const setShowDeleted = useStore((s) => s.setShowDeleted);
   const setDispatchMode = useStore((s) => s.setDispatchMode);
   const [modeError, setModeError] = useState<{ scope: string; text: string } | null>(null);
@@ -69,6 +72,15 @@ export default function LiveConsole() {
   // compression, earlier history kept) and a replacement instruction.
   const [compressHours, setCompressHours] = useState("");
   const [compressInstruction, setCompressInstruction] = useState("");
+  // Multi-select: pick transcript entries (checkbox; Shift extends a range)
+  // to delete together or to compress as one span. Keys are item keys, so
+  // a streamed-in event doesn't shift the selection. Scoped to the session.
+  const [selecting, setSelecting] = useState(false);
+  const [selection, setSelection] = useState<{ scope: string; keys: string[]; anchor: string | null }>(
+    { scope: "", keys: [], anchor: null },
+  );
+  const [selectBusy, setSelectBusy] = useState(false);
+  const [selectNote, setSelectNote] = useState<{ scope: string; ok: boolean; text: string } | null>(null);
   // Follow-the-tail while the agent streams; persisted so the choice survives reloads.
   const [autoScroll, setAutoScroll] = useState(
     () => localStorage.getItem("liveConsole.autoScroll") !== "false",
@@ -247,6 +259,53 @@ export default function LiveConsole() {
   const ownHistoryStart = lastBorrowed >= 0 ? lastBorrowed + 1 : -1;
   const borrowsHistory = lastBorrowed >= 0;
 
+  // Multi-select. An entry is selectable when it is a stored row of this
+  // session that is still live (not borrowed, not a deleted one shown on
+  // request).
+  const selectable = consoleItems.map(
+    (item) => !itemBorrowedFrom(item) && !itemDeleted(item) && itemRowIds(item).length > 0,
+  );
+  const selectedKeys = new Set(selection.scope === sessionId ? selection.keys : []);
+  const selectedIndexes = consoleItems
+    .map((item, i) => (selectable[i] && selectedKeys.has(selectKey(item, i)) ? i : -1))
+    .filter((i) => i >= 0);
+  // Compressing needs one contiguous run (no unselected entry in between);
+  // the backend then checks it is whole completed turns.
+  const selectionIsContiguous =
+    selectedIndexes.length > 0 &&
+    selectable.every(
+      (ok, i) =>
+        !ok || i < selectedIndexes[0] || i > selectedIndexes[selectedIndexes.length - 1]
+        || selectedKeys.has(selectKey(consoleItems[i], i)),
+    );
+  const busyForSelection = generating || session.status === "WAITING_CONFIRM";
+  const selectMessage = selectNote && selectNote.scope === sessionId ? selectNote : null;
+  const toggleSelect = (index: number, extend: boolean) => {
+    if (!sessionId) return;
+    const key = selectKey(consoleItems[index], index);
+    const keys = new Set(selectedKeys);
+    const anchorIndex =
+      selection.scope === sessionId && selection.anchor
+        ? consoleItems.findIndex((item, i) => selectKey(item, i) === selection.anchor)
+        : -1;
+    if (extend && anchorIndex >= 0) {
+      const [lo, hi] = anchorIndex < index ? [anchorIndex, index] : [index, anchorIndex];
+      for (let i = lo; i <= hi; i++) if (selectable[i]) keys.add(selectKey(consoleItems[i], i));
+    } else if (keys.has(key)) {
+      keys.delete(key);
+    } else {
+      keys.add(key);
+    }
+    setSelection({ scope: sessionId, keys: [...keys], anchor: key });
+    setSelectNote(null);
+  };
+  const clearSelection = () => setSelection({ scope: sessionId ?? "", keys: [], anchor: null });
+  const exitSelecting = () => {
+    setSelecting(false);
+    clearSelection();
+    setSelectNote(null);
+  };
+
   const jumpKey = jumpLocateKey;
   // Rows the transcript can't show (a rewrite discarded them, a framework
   // mark, an unknown id): say so instead of jumping silently nowhere.
@@ -261,6 +320,10 @@ export default function LiveConsole() {
   };
 
   const handleConsoleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Escape" && selecting) {
+      exitSelecting();
+      return;
+    }
     if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
     if (consoleItems.length === 0) return;
 
@@ -346,6 +409,68 @@ export default function LiveConsole() {
       await deleteMessage(sessionId, messageId);
     } catch (e) {
       window.alert(`删除失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleDeleteSelected = async () => {
+    if (!sessionId || busyForSelection || selectBusy || selectedIndexes.length === 0) return;
+    // The first row of each entry: a tool call's is its model output, which
+    // takes the result along.
+    const ids = [...new Set(selectedIndexes.map((i) => itemRowIds(consoleItems[i])[0]))];
+    const count = selectedIndexes.length;
+    if (!window.confirm(`删除选中的 ${count} 条消息？模型之后将看不到它们（模型输出会连同它的工具调用和结果一起删除）。`)) return;
+    setSelectBusy(true);
+    try {
+      await deleteMessages(sessionId, ids);
+      clearSelection();
+      setSelectNote({ scope: sessionId, ok: true, text: `已删除 ${count} 条` });
+    } catch (e) {
+      setSelectNote({ scope: sessionId, ok: false, text: `删除失败：${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setSelectBusy(false);
+    }
+  };
+
+  const handleCompressSelected = async () => {
+    if (!sessionId || busyForSelection || selectBusy || compressing || selectedIndexes.length === 0) return;
+    if (!selectionIsContiguous) {
+      setSelectNote({ scope: sessionId, ok: false, text: "压缩需要选中连续的一段消息，中间不能有没选的" });
+      return;
+    }
+    const first = itemRowIds(consoleItems[selectedIndexes[0]])[0];
+    const lastIds = itemRowIds(consoleItems[selectedIndexes[selectedIndexes.length - 1]]);
+    const last = lastIds[lastIds.length - 1];
+    const instruction = compressInstruction.trim() || undefined;
+    const ask =
+      `把选中的 ${selectedIndexes.length} 条消息压缩成一条摘要？\n` +
+      "只能压缩完整的轮次：从某轮的用户输入开始，到某轮的最后一条回复结束。" +
+      (instruction ? "\n会使用侧栏里填的压缩指令。" : "");
+    if (!window.confirm(ask)) return;
+    setSelectBusy(true);
+    setCompressing(true);
+    try {
+      const r = await compressSession(sessionId, {
+        from_message_id: first,
+        through_message_id: last,
+        instruction,
+      });
+      const est = r.token_count_is_estimate ? "≈" : "";
+      if (r.status === "compressed") clearSelection();
+      setSelectNote({
+        scope: sessionId,
+        ok: r.status === "compressed",
+        text:
+          r.status === "compressed"
+            ? `已压缩选中的消息：上下文 ${est}${r.num_tokens_before ?? "?"} → ${est}${r.num_tokens_after ?? "?"} tokens`
+            : r.status === "skipped"
+              ? `没有压缩：${compressSkipText(r.reason)}`
+              : `压缩失败：${r.reason ?? ""}`,
+      });
+    } catch (e) {
+      setSelectNote({ scope: sessionId, ok: false, text: `压缩失败：${(e as Error).message}` });
+    } finally {
+      setSelectBusy(false);
+      setCompressing(false);
     }
   };
 
@@ -532,6 +657,17 @@ export default function LiveConsole() {
               />
               显示已删除消息
             </label>
+            <label
+              className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none"
+              title="勾选多条消息，一起删除，或把连续的一段压缩成一条摘要（按住 Shift 点击可选中一个区间，Esc 退出）"
+            >
+              <input
+                type="checkbox"
+                checked={selecting}
+                onChange={(e) => (e.target.checked ? setSelecting(true) : exitSelecting())}
+              />
+              多选
+            </label>
             {session.status === "RUNNING" && (
               <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
                 <input
@@ -587,6 +723,25 @@ export default function LiveConsole() {
               }
               onClick={() => setFocusedItemIndex(i)}
             >
+              <div className="flex items-start gap-2">
+              {selecting && (
+                <span className="w-4 shrink-0 pt-1">
+                  {selectable[i] && (
+                    <input
+                      type="checkbox"
+                      checked={selectedKeys.has(selectKey(item, i))}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSelect(i, e.shiftKey);
+                      }}
+                      onChange={() => {}}
+                      className="cursor-pointer"
+                      aria-label="选择这条消息"
+                    />
+                  )}
+                </span>
+              )}
+              <div className="flex-1 min-w-0">
               <ConsoleItemLine
                 item={item}
                 editingMessageId={editingMessageId}
@@ -609,6 +764,8 @@ export default function LiveConsole() {
                 onDiverge={handleDiverge}
                 onDelete={handleDelete}
               />
+              </div>
+              </div>
             </div>
             </Fragment>
           ))}
@@ -626,6 +783,60 @@ export default function LiveConsole() {
             </div>
           )}
           <div ref={bottomRef} />
+          {selecting && (
+            <div className="sticky bottom-0 z-20 mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-indigo-800 bg-gray-950/95 px-3 py-2 text-xs text-gray-300 shadow-xl backdrop-blur">
+              <span>
+                已选 {selectedIndexes.length} 条
+                {selectedIndexes.length === 0 && "（勾选消息，按住 Shift 点击可选中一个区间）"}
+              </span>
+              <span className="flex-1" />
+              <button
+                type="button"
+                onClick={() => void handleDeleteSelected()}
+                disabled={selectedIndexes.length === 0 || busyForSelection || selectBusy}
+                className="rounded bg-red-800 px-2.5 py-1 font-medium text-white hover:bg-red-700 disabled:opacity-40"
+                title="删除选中的消息（可以不连续）"
+              >
+                删除
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCompressSelected()}
+                disabled={
+                  selectedIndexes.length === 0 || !selectionIsContiguous || busyForSelection || selectBusy
+                }
+                className="rounded bg-emerald-800 px-2.5 py-1 font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+                title={
+                  selectedIndexes.length > 0 && !selectionIsContiguous
+                    ? "压缩需要选中连续的一段消息"
+                    : "把选中的这一段压缩成一条摘要（只能是完整的轮次）"
+                }
+              >
+                {selectBusy && compressing ? "压缩中…" : "压缩选中段"}
+              </button>
+              <button
+                type="button"
+                onClick={clearSelection}
+                disabled={selectedIndexes.length === 0 || selectBusy}
+                className="rounded bg-gray-800 px-2.5 py-1 hover:bg-gray-700 disabled:opacity-40"
+              >
+                清空
+              </button>
+              <button
+                type="button"
+                onClick={exitSelecting}
+                disabled={selectBusy}
+                className="rounded bg-gray-800 px-2.5 py-1 hover:bg-gray-700 disabled:opacity-40"
+              >
+                退出多选
+              </button>
+              {selectMessage && (
+                <p className={`basis-full break-words ${selectMessage.ok ? "text-emerald-400" : "text-red-400"}`}>
+                  {selectMessage.text}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Status sidebar (hidden on narrow screens) */}
@@ -824,4 +1035,41 @@ export default function LiveConsole() {
     </MessageFocusContext.Provider>
     </CompressedLoaderContext.Provider>
   );
+}
+
+// Stored rows an entry stands for, in order. A tool call: the model output
+// row that issued it (deleting that removes the call and its result), then
+// its result row; any other entry: its own row.
+function itemRowIds(item: ConsoleItem): string[] {
+  if (isToolCallView(item)) {
+    return [item.messageId, item.resultMessageId].filter((id): id is string => !!id);
+  }
+  const id = itemMessageId(item);
+  return id ? [id] : [];
+}
+
+function itemDeleted(item: ConsoleItem): boolean {
+  return isCompressionGroup(item) ? !!item.event.deleted : !!item.deleted;
+}
+
+function selectKey(item: ConsoleItem, index: number): string {
+  return isToolCallView(item) ? `call:${item.callId}` : itemMessageId(item) ?? `i:${index}`;
+}
+
+// The backend explains a refused span in English; say it in Chinese.
+function compressSkipText(reason: string | undefined): string {
+  if (!reason) return "";
+  if (reason.includes("whole turns only")) {
+    return "选中的不是完整的轮次。请从某轮的用户输入开始，选到某轮的最后一条回复（含中间的工具调用）";
+  }
+  if (reason.includes("did not complete normally")) {
+    return "选中的里面有没有正常结束的轮次（失败、取消或还在运行），或者借用的历史";
+  }
+  if (reason.includes("whole-history summary")) {
+    return "选中的消息已经在整段压缩的范围里，不能再单独压缩";
+  }
+  if (reason.includes("not in this session")) {
+    return "选中的消息不在这个会话的记录里，请刷新后重选";
+  }
+  return reason;
 }

@@ -138,6 +138,12 @@ class CompressRequest(BaseModel):
     # turns stay, and the summary row is placed right after what it covers
     # (before them). For summarizing a past day after the next one started.
     until: datetime | None = None
+    # Compress exactly the messages from_message_id..through_message_id (a
+    # multi-select). They must be whole completed turns: the first message of
+    # a turn through the last one of a turn; otherwise nothing is compressed
+    # and the result says why. Excludes since / hours / until.
+    from_message_id: str | None = None
+    through_message_id: str | None = None
 
 
 class RetryMessageRequest(BaseModel):
@@ -1136,6 +1142,33 @@ async def delete_message(
       stay gone: the whole compressed span disappears from the model's view.
     The live runner is rebuilt so its in-memory context drops the rows too.
     """
+    return await _delete_entries(session_id, [message_id], db, registry)
+
+
+class DeleteMessagesRequest(BaseModel):
+    message_ids: list[str]
+
+
+@router.post("/{session_id}/messages/delete")
+async def delete_messages(
+    session_id: str,
+    body: DeleteMessagesRequest,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Delete several transcript entries at once (multi-select).
+
+    Each id is handled like DELETE .../messages/{id} (with what belongs to
+    it). All ids are checked first: one unknown or borrowed id fails the
+    whole request and nothing is deleted. The runner is rebuilt once.
+    """
+    if not body.message_ids:
+        raise HTTPException(status_code=422, detail="message_ids must not be empty")
+    return await _delete_entries(session_id, body.message_ids, db, registry)
+
+
+async def _delete_entries(session_id: str, message_ids: list[str], db: IAgentDatabase,
+                          registry: AdapterRegistry) -> dict:
     try:
         session = await db.get_session(session_id)
         messages = await db.get_messages(session_id)
@@ -1149,14 +1182,18 @@ async def delete_message(
         SessionStatus.RUNNING, SessionStatus.WAITING_CONFIRM, SessionStatus.COMPRESSING,
     ):
         raise HTTPException(status_code=409, detail="session is running; delete after the turn finishes")
-    index = next((i for i, m in enumerate(messages) if m.id == message_id), None)
-    if index is None:
-        raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
-    if is_borrowed(messages[index]):
-        raise HTTPException(status_code=400, detail=_BORROWED_READ_ONLY)
-    ids = _deletion_group(messages, index)
+    position = {m.id: i for i, m in enumerate(messages)}
+    ids: list[str] = []
+    for message_id in dict.fromkeys(message_ids):
+        index = position.get(message_id)
+        if index is None:
+            raise HTTPException(status_code=404, detail=f"Message '{message_id}' not found")
+        if is_borrowed(messages[index]):
+            raise HTTPException(status_code=400, detail=_BORROWED_READ_ONLY)
+        ids.extend(_deletion_group(messages, index))
+    ids = list(dict.fromkeys(ids))
     deleted = await db.soft_delete_messages(session_id, ids, metadata={DELETED_BY: "user"})
-    logger.info("delete message session=%s message=%s rows=%d", session_id, message_id, deleted)
+    logger.info("delete messages session=%s entries=%d rows=%d", session_id, len(message_ids), deleted)
     if runner is not None:
         await registry.remove(session_id)
         await get_or_rehydrate(session, db, registry)
@@ -1319,8 +1356,19 @@ async def compress_session(
     Optional body: {"since": ISO time} or {"hours": 24} compresses only the
     turns from then on into one summary (a range_summary row), keeping
     earlier history; "instruction" replaces the summarizer instruction.
+    {"from_message_id", "through_message_id"} compresses exactly that span
+    of whole turns into a range summary in its place.
     """
     body = body or CompressRequest()
+    span = None
+    if body.from_message_id is not None or body.through_message_id is not None:
+        if not (body.from_message_id and body.through_message_id):
+            raise HTTPException(status_code=422,
+                                detail="give both from_message_id and through_message_id")
+        if body.since is not None or body.hours is not None or body.until is not None:
+            raise HTTPException(status_code=422,
+                                detail="a message span excludes since / hours / until")
+        span = (body.from_message_id, body.through_message_id)
     if body.since is not None and body.hours is not None:
         raise HTTPException(status_code=422, detail="give either since or hours, not both")
     if body.hours is not None and body.hours <= 0:
@@ -1346,6 +1394,8 @@ async def compress_session(
         options["until"] = until
     if instruction:
         options["instruction"] = instruction
+    if span is not None:
+        options["span"] = span
     try:
         session = await db.get_session(session_id)
         agent = await db.get_agent(session.agent_id)

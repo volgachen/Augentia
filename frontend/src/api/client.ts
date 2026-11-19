@@ -258,6 +258,12 @@ export const api = {
       request<{ deleted_ids: string[] }>(`/sessions/${id}/messages/${messageId}`, {
         method: "DELETE",
       }),
+    // Several entries at once (multi-select); all or nothing.
+    deleteMessages: (id: string, messageIds: string[]) =>
+      request<{ deleted_ids: string[] }>(`/sessions/${id}/messages/delete`, {
+        method: "POST",
+        body: JSON.stringify({ message_ids: messageIds }),
+      }),
     share: (id: string) => request<ShareState>(`/sessions/${id}/share`),
     updateShare: (id: string, enabled: boolean) =>
       request<ShareState>(`/sessions/${id}/share`, {

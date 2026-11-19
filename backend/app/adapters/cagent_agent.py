@@ -14,7 +14,9 @@ overrides runs on a throwaway subclass (``with_turn_overrides``).
 from __future__ import annotations
 
 import inspect
+from datetime import timedelta
 
+from cagent.context import is_compressible_turn_end
 from cagent import BaseAgent, Tool
 from cagent.images import Image
 from cagent.tools.base import ToolResult
@@ -336,6 +338,9 @@ def make_agent_class(
 
         @classmethod
         def select_compression_range(cls, ctx, since):
+            span = adapter.compress_span
+            if span is not None:
+                return cls.select_span(ctx, *span)
             borrowed = borrowed_ids() if borrowed_ids is not None else set()
             if borrowed:
                 # Never start inside the borrowed history: from the branch's
@@ -363,6 +368,80 @@ def make_agent_class(
                 return super().select_compression_range(ctx, since)
             finally:
                 ctx.messages = full
+
+        @classmethod
+        def select_span(cls, ctx, first_id, last_id):
+            """(start, end) indexes for compressing exactly first_id..last_id.
+
+            The span must be whole segments of the active history (after the
+            whole-history summary): completed turns, each through its
+            turn_end, or earlier range summaries. first_id must start one and
+            last_id end one (a turn ends at its last visible row; its turn_end
+            mark comes right after). Anything else is refused with
+            ctx.compression_skip_reason, never widened.
+            """
+            borrowed = borrowed_ids() if borrowed_ids is not None else set()
+            _, records = ctx.active_history()
+            offset = len(ctx.messages) - len(records)
+            covered = set()
+            for message in records:
+                if (message["role"] == "user" and message.get("name") == "range_summary"
+                        and message.get("deleted_at") is None):
+                    covered.update((message.get("metadata") or {}).get("replaced_message_ids") or [])
+            # Segments: (first index, last index, id of first visible row,
+            # id of last visible row, compressible). Rows a range summary
+            # covers, and deleted rows, are not visible on their own.
+            segments, turn = [], []
+            for index in range(offset, len(ctx.messages)):
+                message = ctx.messages[index]
+                visible = message["role"] != "mark" and message.get("deleted_at") is None
+                if (message["role"] == "user" and message.get("name") == "range_summary"
+                        and visible and not turn):
+                    segments.append((index, index, message["id"], message["id"], True))
+                    continue
+                if message["role"] != "mark":
+                    turn.append(index)
+                if not (message["role"] == "mark" and message.get("name") == "turn_end"
+                        and message.get("deleted_at") is None):
+                    continue
+                rows, turn = turn, []
+                shown = [i for i in rows if ctx.messages[i].get("deleted_at") is None
+                         and ctx.messages[i]["id"] not in covered]
+                if not shown:
+                    continue
+                complete = is_compressible_turn_end(message) and not any(
+                    ctx.messages[i]["id"] in borrowed for i in rows)
+                segments.append((rows[0], index, ctx.messages[shown[0]]["id"],
+                                 ctx.messages[shown[-1]]["id"], complete))
+            ids = {m["id"]: i for i, m in enumerate(ctx.messages)}
+            if first_id not in ids or last_id not in ids:
+                ctx.compression_skip_reason = "the selected messages are not in this session's history"
+                return None
+            if ids[first_id] < offset or ids[last_id] < offset:
+                ctx.compression_skip_reason = (
+                    "the selection reaches into history a whole-history summary already replaced")
+                return None
+            if ids[first_id] > ids[last_id]:
+                first_id, last_id = last_id, first_id
+            begin = next((k for k, seg in enumerate(segments) if seg[2] == first_id), None)
+            finish = next((k for k, seg in enumerate(segments) if seg[3] == last_id), None)
+            if begin is None or finish is None or finish < begin:
+                ctx.compression_skip_reason = (
+                    "the selection must start at the first message of a turn and end at "
+                    "the last message of a turn (whole turns only)")
+                return None
+            if not all(seg[4] for seg in segments[begin:finish + 1]):
+                ctx.compression_skip_reason = (
+                    "the selection includes a turn that did not complete normally "
+                    "(failed, cancelled or still running) or borrowed history")
+                return None
+            start, end = segments[begin][0], segments[finish][1]
+            # The summary goes right after what it covers, before later rows.
+            if end + 1 < len(ctx.messages):
+                stamp = cls._created_at(ctx.messages[end])
+                if stamp is not None and adapter._store is not None:
+                    adapter._store.pending_summary_at = stamp + timedelta(milliseconds=1)
+            return start, end
 
         @classmethod
         async def resolve_image(cls, store, ctx, image):

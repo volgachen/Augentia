@@ -222,6 +222,7 @@ interface Store {
   retryMessage: (sessionId: string, messageId: string, content: string) => Promise<void>;
   divergeFromMessage: (sessionId: string, messageId: string) => Promise<string>;
   deleteMessage: (sessionId: string, messageId: string) => Promise<void>;
+  deleteMessages: (sessionId: string, messageIds: string[]) => Promise<void>;
   setShowDeleted: (sessionId: string, show: boolean) => Promise<void>;
   compressSession: (sessionId: string, options?: CompressOptions) => Promise<CompressResult>;
   resolveConfirm: (sessionId: string, callId: string, approved: boolean, message?: string) => void;
@@ -744,12 +745,15 @@ export const useStore = create<Store>((set, get) => {
       await reloadHistory(sessionId);
     },
 
-    deleteMessage: async (sessionId, messageId) => {
+    deleteMessage: (sessionId, messageId) => get().deleteMessages(sessionId, [messageId]),
+
+    deleteMessages: async (sessionId, messageIds) => {
       // The backend rebuilds the live runner, which closes this socket; drop
       // it first and reconnect after reloading the trimmed history.
       get().sessions[sessionId]?.socket?.close();
       try {
-        await api.sessions.deleteMessage(sessionId, messageId);
+        if (messageIds.length === 1) await api.sessions.deleteMessage(sessionId, messageIds[0]);
+        else await api.sessions.deleteMessages(sessionId, messageIds);
       } finally {
         const [session, messages] = await Promise.all([
           api.sessions.get(sessionId),

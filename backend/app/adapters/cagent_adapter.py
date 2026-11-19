@@ -27,7 +27,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from openai import AsyncOpenAI
 
@@ -241,6 +241,9 @@ class CAgentAdapter(BaseAgentAdapter):
         # A manual compression's upper bound (see compress(until=...)); read
         # by the agent class's select_compression_range.
         self.compress_until: datetime | None = None
+        # Manual compression of an exact span (first_id, last_id) of whole
+        # turns; SessionAgent.select_span picks it.
+        self.compress_span: tuple[str, str] | None = None
         self._turn_task: asyncio.Task | None = None
         self._announced_assistant_id: str | None = None
         self._call_info: dict[str, dict] = {}
@@ -639,7 +642,8 @@ class CAgentAdapter(BaseAgentAdapter):
 
     async def compress(self, *, since: datetime | None = None,
                        instruction: str | None = None,
-                       until: datetime | None = None) -> dict:
+                       until: datetime | None = None,
+                       span: tuple[str, str] | None = None) -> dict:
         """Manually compress this session's history in place (CAgent compress_session).
 
         Same summarizer and image handling as threshold-triggered compression.
@@ -648,6 +652,9 @@ class CAgentAdapter(BaseAgentAdapter):
         until (needs since) stops at the last turn that ended before it: later
         turns stay as they are, and the summary row is placed right after the
         turns it covers, before them.
+        span (first_id, last_id) compresses exactly those whole turns into a
+        range summary placed right after them; a span that is not whole
+        completed turns is skipped with the reason (never widened).
         The caller (SessionRunner) guarantees no turn is running.
         Returns {"status": "compressed"|"skipped"|"failed", "kind", "reason", tokens...}.
         """
@@ -657,6 +664,13 @@ class CAgentAdapter(BaseAgentAdapter):
         # no such parameters, and plain compression must keep working there.
         options = {k: v for k, v in (("since", since), ("instruction", instruction))
                    if v is not None}
+        if span is not None:
+            if since is not None or until is not None:
+                return {"status": "failed", "reason": "span excludes since / until"}
+            # CAgent only takes the range path with a since; select_span
+            # ignores it and picks the span.
+            options["since"] = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            self.compress_span = span
         if until is not None:
             if since is None:
                 return {"status": "failed", "reason": "until needs since"}
@@ -671,6 +685,7 @@ class CAgentAdapter(BaseAgentAdapter):
             return {"status": "skipped", "reason": str(exc)}
         finally:
             self.compress_until = None
+            self.compress_span = None
             self._store.pending_summary_at = None
         if ctx.compression_applied:
             kind = getattr(ctx, "compression_kind", None) or "session"

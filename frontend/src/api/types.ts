@@ -194,6 +194,10 @@ export interface CompressOptions {
   hours?: number;
   // Replaces the summarizer instruction.
   instruction?: string;
+  // Compress exactly this span (multi-select). It must be whole completed
+  // turns; otherwise the result is "skipped" with the reason.
+  from_message_id?: string;
+  through_message_id?: string;
 }
 
 export interface CompressResult {
