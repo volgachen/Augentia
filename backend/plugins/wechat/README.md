@@ -22,8 +22,8 @@ Per account:
   since it connected, so after a reconnect or backend restart, send any
   message from WeChat first.
 - **Files**: `wechat__send_file` sends a file from the session's working
-  directory through the same account to the same contact, with an optional
-  caption. Images (png, jpg, jpeg, gif, webp, bmp, svg) arrive as pictures,
+  directory through the same account to the same contact (just the file;
+  text goes with `wechat__send`). Images (png, jpg, jpeg, gif, webp, bmp, svg) arrive as pictures,
   videos (mp4, mov, webm, mkv, avi) as videos, anything else as a file
   attachment. Paths are relative to the working directory or absolute inside
   it; anything outside it is refused, as are empty files and files over

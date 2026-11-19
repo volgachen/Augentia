@@ -107,7 +107,7 @@ class FakeBot:
         self.sent.append((user_id, text))
 
     async def send_media(self, user_id, content):
-        # Like wechatbot-sdk: bytes plus file_name (and an optional caption).
+        # Like wechatbot-sdk: bytes plus file_name (the plugin sends no caption).
         assert isinstance(content["file"], bytes)
         self.media.append((user_id, content))
 
@@ -136,11 +136,8 @@ def _call(text):
     return {"id": f"t{time.monotonic_ns()}", "name": "wechat__send", "arguments": {"text": text}}
 
 
-def _file_call(path, caption=None):
-    args = {"path": path}
-    if caption:
-        args["caption"] = caption
-    return {"id": f"f{time.monotonic_ns()}", "name": "wechat__send_file", "arguments": args}
+def _file_call(path):
+    return {"id": f"f{time.monotonic_ns()}", "name": "wechat__send_file", "arguments": {"path": path}}
 
 
 def model_factory():
@@ -148,11 +145,9 @@ def model_factory():
         last = messages[-1]
         names = [t["name"] for t in tools]
         content = str(last["content"])
-        # "send file <path> [| caption]" -> wechat__send_file
+        # "send file <path>" -> wechat__send_file
         if last["role"] == "user" and "send file " in content and "wechat__send_file" in names:
-            spec = content.split("send file ", 1)[1]
-            path, _, caption = spec.partition(" | ")
-            return {"content": "", "tool_calls": [_file_call(path.strip(), caption.strip() or None)]}
+            return {"content": "", "tool_calls": [_file_call(content.split("send file ", 1)[1].strip())]}
         if last["role"] == "user" and "please reply" in content and "wechat__send" in names:
             return {"content": "Replying on WeChat.", "tool_calls": [_call("hi from the agent")]}
         if last["role"] == "user" and "use a tool" in content and "wechat__send" in names:
@@ -356,14 +351,17 @@ def main() -> None:
         act("set_inbound", sid_f, account=key2)
         home = bot_of("wx-bot-2")
         home.media.clear()
-        result = run_file(sid_f, "send file out/chart.png | the chart")
+        result = run_file(sid_f, "send file out/chart.png")
         check(result.startswith("Sent chart.png"), f"image sent: {result}")
         check(home.media and home.media[-1][0] == "wx-mom" and home.media[-1][1] == {
-            "file": png, "file_name": "chart.png", "caption": "the chart"},
-            f"through the session's account to its contact, bytes + name + caption: {home.media[-1:]}")
+            "file": png, "file_name": "chart.png"},
+            f"through the session's account to its contact, just bytes + name: {home.media[-1:]}")
         result = run_file(sid_f, f"send file {workdir / 'report.pdf'}")
-        check(result.startswith("Sent report.pdf") and home.media[-1][1]["file_name"] == "report.pdf"
-              and "caption" not in home.media[-1][1], f"absolute path inside the dir, no caption: {result}")
+        check(result.startswith("Sent report.pdf") and home.media[-1][1]["file_name"] == "report.pdf",
+              f"absolute path inside the dir: {result}")
+        tool_spec = next(t for t in api("get", "/plugins/wechat").json()["capabilities"]["tools"]
+                         if t["name"] == "send_file")
+        check(set(tool_spec["parameters"]["properties"]) == {"path"}, f"send_file takes only a path: {tool_spec}")
 
         n_media = len(home.media)
         for line, expect in [("send file ../secret.txt", "outside this session's working directory"),

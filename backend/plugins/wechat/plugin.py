@@ -38,8 +38,9 @@ on_error=...)``, ``@bot.on_message`` (handler gets ``msg.user_id`` /
 ``msg.text``), ``await bot.login()`` (returns credentials with
 ``account_id``), ``await bot.start()`` (runs until stopped), ``bot.stop()``,
 ``await bot.send(user_id, text)``, ``await bot.send_media(user_id,
-{"file": bytes, "file_name": ..., "caption"?: ...})`` (sent as image /
-video / file by extension). Sending needs a message from that user
+{"file": bytes, "file_name": ...})`` (sent as image / video / file by
+extension). No caption: the server rejects an image with one ("invalid
+arguments"); the agent sends text with wechat__send instead. Sending needs a message from that user
 received by this bot instance (its context token is kept in memory), else it
 raises ``NoContextError``.
 """
@@ -816,21 +817,21 @@ class WeChatPlugin(Plugin):
         description="Send a file from this session's working directory to the user on WeChat, through the "
                     "WeChat account bound to this session. Images (png, jpg, jpeg, gif, webp, bmp, svg) arrive as "
                     "pictures, videos (mp4, mov, webm, mkv, avi) as videos, anything else as a file "
-                    f"attachment. At most {SEND_FILE_LIMIT_MB} MB.",
+                    f"attachment. At most {SEND_FILE_LIMIT_MB} MB. Only the file is sent; to add a message, "
+                    "use wechat__send.",
         parameters={
             "type": "object",
             "properties": {
                 "path": {"type": "string",
                          "description": "File path, relative to the session's working directory or absolute "
                                         "inside it."},
-                "caption": {"type": "string", "description": "Optional text sent with the file."},
             },
             "required": ["path"],
             "additionalProperties": False,
         },
         requires_approval=False,
     )
-    async def send_file(self, ctx: ToolContext, path: str, caption: str | None = None) -> str:
+    async def send_file(self, ctx: ToolContext, path: str) -> str:
         key, error = self._session_account(ctx.session_id)
         if key is None:
             return error or ""
@@ -839,8 +840,6 @@ class WeChatPlugin(Plugin):
             return error or ""
         data = await asyncio.to_thread(file.read_bytes)
         content: dict[str, Any] = {"file": data, "file_name": file.name}
-        if caption and caption.strip():
-            content["caption"] = caption.strip()
         error = await self._deliver(key, lambda bot, contact: bot.send_media(contact, content))
         if error:
             return error
