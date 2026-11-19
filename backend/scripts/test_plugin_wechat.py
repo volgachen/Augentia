@@ -72,6 +72,7 @@ class FakeBot:
         self.callbacks = dict(qr=on_qr_url, scanned=on_scanned, expired=on_expired, error=on_error)
         self.handler = None
         self.sent: list[tuple[str, str]] = []
+        self.media: list[tuple[str, dict]] = []
         self.allow_login = asyncio.Event()
         self.stopped = asyncio.Event()
         self.loop = asyncio.get_running_loop()
@@ -105,6 +106,11 @@ class FakeBot:
     async def send(self, user_id, text):
         self.sent.append((user_id, text))
 
+    async def send_media(self, user_id, content):
+        # Like wechatbot-sdk: bytes plus file_name (and an optional caption).
+        assert isinstance(content["file"], bytes)
+        self.media.append((user_id, content))
+
     async def deliver(self, user_id, text):
         await self.handler(FakeMsg(user_id, text))
 
@@ -130,11 +136,23 @@ def _call(text):
     return {"id": f"t{time.monotonic_ns()}", "name": "wechat__send", "arguments": {"text": text}}
 
 
+def _file_call(path, caption=None):
+    args = {"path": path}
+    if caption:
+        args["caption"] = caption
+    return {"id": f"f{time.monotonic_ns()}", "name": "wechat__send_file", "arguments": args}
+
+
 def model_factory():
     async def model(*, messages, tools, tool_choice=None):
         last = messages[-1]
         names = [t["name"] for t in tools]
         content = str(last["content"])
+        # "send file <path> [| caption]" -> wechat__send_file
+        if last["role"] == "user" and "send file " in content and "wechat__send_file" in names:
+            spec = content.split("send file ", 1)[1]
+            path, _, caption = spec.partition(" | ")
+            return {"content": "", "tool_calls": [_file_call(path.strip(), caption.strip() or None)]}
         if last["role"] == "user" and "please reply" in content and "wechat__send" in names:
             return {"content": "Replying on WeChat.", "tool_calls": [_call("hi from the agent")]}
         if last["role"] == "user" and "use a tool" in content and "wechat__send" in names:
@@ -214,8 +232,9 @@ def main() -> None:
         info = api("get", "/plugins/wechat").json()
         check(info["state"] == "loaded", f"plugin loads: {info['state']} {info['error']}")
         caps = info["capabilities"]
-        check([t["full_name"] for t in caps["tools"]] == ["wechat__send"] and not caps["hooks"]
-              and caps["services"][0]["scope"] == "global", "one tool, no hooks, a global bridge")
+        check(sorted(t["full_name"] for t in caps["tools"]) == ["wechat__send", "wechat__send_file"]
+              and not caps["hooks"] and caps["services"][0]["scope"] == "global",
+              "two tools (send, send_file), no hooks, a global bridge")
         check(set(caps["actions"]) == {"add_account", "remove_account", "set_inbound", "unbind"},
               f"actions: {caps['actions']}")
         accounts = saved()
@@ -304,6 +323,59 @@ def main() -> None:
         client.post(f"/api/v1/sessions/{sid_c}/messages", json={"content": "please reply"})
         check(wait_for(lambda: any(m["role"] == "tool" and "not bound to a WeChat account" in m["content"]
                                    for m in messages(sid_c))), "unbound session: the tool says so")
+
+        section("wechat__send_file")
+        workdir = ROOT / "wx-workdir"
+        (workdir / "out").mkdir(parents=True)
+        png = bytes([0x89]) + b"PNG" + bytes([13, 10, 26, 10]) + b"0" * 32
+        (workdir / "out" / "chart.png").write_bytes(png)
+        (workdir / "report.pdf").write_bytes(b"%PDF-1.4 report")
+        (workdir / "empty.txt").write_bytes(b"")
+        (ROOT / "secret.txt").write_text("outside the working dir")
+        check(any(t["name"] == "wechat__send_file" for t in api("get", "/tools").json()), "send_file is listed")
+        agent_f = api("post", "/agents", json={
+            "name": "wxf", "description": "", "agent_type": "tool_use", "system_prompt": "",
+            "tool_names": ["wechat__send", "wechat__send_file"], "openai_model": "m", "config": {}}).json()
+        sid_f = api("post", "/sessions", json={"agent_id": agent_f["id"], "title": "Files",
+                                                "source_dir": str(workdir)}).json()["id"]
+        api("put", f"/sessions/{sid_f}/plugins/wechat", json={"enabled": True})
+
+        def file_result(sid, n_before):
+            rows = [m for m in messages(sid) if m["role"] == "tool"]
+            return json.loads(rows[-1]["content"])["content"] if len(rows) > n_before else None
+
+        def run_file(sid, line):
+            n = len([m for m in messages(sid) if m["role"] == "tool"])
+            client.post(f"/api/v1/sessions/{sid}/messages", json={"content": line})
+            check(wait_for(lambda: file_result(sid, n) is not None), f"tool ran for {line!r}")
+            return file_result(sid, n)
+
+        result = run_file(sid_f, "send file out/chart.png")
+        check("not bound to a WeChat account" in result, f"unbound session can't send files: {result}")
+
+        act("set_inbound", sid_f, account=key2)
+        home = bot_of("wx-bot-2")
+        home.media.clear()
+        result = run_file(sid_f, "send file out/chart.png | the chart")
+        check(result.startswith("Sent chart.png"), f"image sent: {result}")
+        check(home.media and home.media[-1][0] == "wx-mom" and home.media[-1][1] == {
+            "file": png, "file_name": "chart.png", "caption": "the chart"},
+            f"through the session's account to its contact, bytes + name + caption: {home.media[-1:]}")
+        result = run_file(sid_f, f"send file {workdir / 'report.pdf'}")
+        check(result.startswith("Sent report.pdf") and home.media[-1][1]["file_name"] == "report.pdf"
+              and "caption" not in home.media[-1][1], f"absolute path inside the dir, no caption: {result}")
+
+        n_media = len(home.media)
+        for line, expect in [("send file ../secret.txt", "outside this session's working directory"),
+                             (f"send file {ROOT / 'secret.txt'}", "outside this session's working directory"),
+                             ("send file missing.png", "does not exist"),
+                             ("send file out", "is not a file"),
+                             ("send file empty.txt", "is empty")]:
+            result = run_file(sid_f, line)
+            check(expect in result, f"{line!r} -> {result}")
+        check(len(home.media) == n_media, "nothing sent for rejected paths")
+        act("unbind", sid_f, account=key2)
+        act("set_inbound", sid_b, account=key2)
 
         section("\\cmd bind per account")
         w = bot_of("wx-bot-1")

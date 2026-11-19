@@ -21,6 +21,13 @@ Per account:
   wrote last. WeChat only lets the bot write to someone who has messaged it
   since it connected, so after a reconnect or backend restart, send any
   message from WeChat first.
+- **Files**: `wechat__send_file` sends a file from the session's working
+  directory through the same account to the same contact, with an optional
+  caption. Images (png, jpg, jpeg, gif, webp, bmp, svg) arrive as pictures,
+  videos (mp4, mov, webm, mkv, avi) as videos, anything else as a file
+  attachment. Paths are relative to the working directory or absolute inside
+  it; anything outside it is refused, as are empty files and files over
+  25 MB. A session without a working directory can't send files.
 - **Mirror session** (none by default): every assistant message written
   there, including text before tool calls and turns started from the web
   console, is forwarded to the account's WeChat. Only `\cmd bind` sets it.
@@ -61,7 +68,8 @@ missing package.
 ## Use
 
 1. In a session, open the sidebar's **Plugins** tab and switch WeChat Bridge
-   on. Give the session's agent the `wechat__send` tool.
+   on. Give the session's agent the `wechat__send` tool (and
+   `wechat__send_file` to send pictures and files).
 2. Type a name (optional) next to **Add WeChat account**, press it and scan
    the QR code with that WeChat. Added from a session card that has no
    account yet, the new account is bound to that session.

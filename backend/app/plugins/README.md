@@ -643,7 +643,7 @@ Agent 模板的 `agent.config.plugins.<id>` 是**新建会话时的初始值**�
 > 已实现：`backend/plugins/wechat/`（`plugin.py`、`plugin.json`、`README.md`）。下面是最初的草图（0.2 的每会话一个登录）；现在的 0.4 已改为：
 > - 多个微信账号：`bridge` 是全局服务（`autostart=True`），在里面为每个账号起一个任务、各自退避重连；`accounts.json` 记录每个账号的别名、微信 id、收件会话和最近联系人，凭据在 `accounts/<id>/`。0.3 的单账号数据自动迁移为第一个账号。
 > - 每个账号一个**收件会话**（会话卡片上设置，持久化），一个会话也只收一个账号；**镜像会话**只能用微信命令 `\cmd bind <会话>` 临时设置（同时作为收件），`\cmd unbind` 恢复。镜像通过订阅 `message.created` 实现。
-> - 不再自动转发回复，Agent 用 `wechat__send`，经会话所属的账号发送；会话不属于任何账号时工具返回错误。
+> - 不再自动转发回复，Agent 用 `wechat__send`，经会话所属的账号发送；会话不属于任何账号时工具返回错误。`wechat__send_file` 发送会话工作目录里的文件（图片、视频按类型发送，其余作为文件；工作目录外的路径、空文件、超过 25 MB 的文件被拒绝）。
 > - 卡片用 §5.4 的 `sections`（每个账号一行）、按钮 `data`（`{"account": id}`）、`disabled`（“不可绑定”）和 `input`（添加账号时填名称）。插件页每行：名称、已绑定会话 + Unbind、Remove；会话卡片已绑定时只显示那个账号，未绑定时列出所有账号的 Bind。账号加入后始终保持连接，没有 connect / disconnect。
 > - 测试：`scripts/test_plugin_wechat.py`（假的 `wechatbot`：两个账号、迁移、重复扫码、重启重连）。
 

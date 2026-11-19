@@ -16,8 +16,10 @@ to the saved inbound session and no mirror. Bindings are in memory only.
 
 Outside the mirror the agent answers with the ``wechat__send`` tool, which
 sends through the account the session is bound to (bind first, else saved
-inbound) to that account's last contact. A session bound to no account gets
-an error from the tool.
+inbound) to that account's last contact. ``wechat__send_file`` sends a file
+from the session's working directory the same way (images and videos arrive
+as such; paths outside the working directory are refused). A session bound
+to no account gets an error from the tools.
 
 Every added account stays connected: the global ``bridge`` service runs one
 task per account (each with its own reconnect backoff). Remove deletes an
@@ -35,7 +37,9 @@ WeChatBot API used (pip ``wechatbot-sdk``, imported as ``wechatbot``):
 on_error=...)``, ``@bot.on_message`` (handler gets ``msg.user_id`` /
 ``msg.text``), ``await bot.login()`` (returns credentials with
 ``account_id``), ``await bot.start()`` (runs until stopped), ``bot.stop()``,
-``await bot.send(user_id, text)``. ``send`` needs a message from that user
+``await bot.send(user_id, text)``, ``await bot.send_media(user_id,
+{"file": bytes, "file_name": ..., "caption"?: ...})`` (sent as image /
+video / file by extension). Sending needs a message from that user
 received by this bot instance (its context token is kept in memory), else it
 raises ``NoContextError``.
 """
@@ -50,11 +54,13 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from app.plugins.sdk import Plugin, PluginContext, SessionContext, ToolContext, action, service, tool
 
 BIND_LIST_LIMIT = 10
+# wechat__send_file: largest file sent (the CDN upload is held in memory).
+SEND_FILE_LIMIT_MB = 25
 BACKOFF_START = 1.0
 BACKOFF_MAX = 60.0
 
@@ -76,6 +82,47 @@ def _describe(ref: dict | None) -> str:
         return "none"
     title = ref.get("title")
     return f"\"{title}\" ({_short(ref['id'])})" if title else _short(ref["id"])
+
+
+def _size_text(size: int) -> str:
+    if size < 1024:
+        return f"{size} bytes"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _resolve_in_dir(path: str, working_dir: str | None) -> tuple[Path | None, str | None]:
+    """The file path inside working_dir, or (None, error message for the agent).
+
+    Relative paths resolve against working_dir; absolute ones must lie inside
+    it (after resolving symlinks and ".."), so an agent can't send arbitrary
+    files from the machine.
+    """
+    if not working_dir:
+        return None, "This session has no working directory, so there is nothing to send files from."
+    if not isinstance(path, str) or not path.strip():
+        return None, "path is empty."
+    root = Path(working_dir).resolve()
+    candidate = Path(path.strip()).expanduser()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        file = candidate.resolve()
+    except OSError as exc:
+        return None, f"Can't read {path}: {exc}"
+    if not file.is_relative_to(root):
+        return None, f"{path} is outside this session's working directory ({root}); only files in it can be sent."
+    if not file.exists():
+        return None, f"{path} does not exist."
+    if not file.is_file():
+        return None, f"{path} is not a file."
+    size = file.stat().st_size
+    if size == 0:
+        return None, f"{path} is empty."
+    if size > SEND_FILE_LIMIT_MB * 1024 * 1024:
+        return None, f"{path} is {_size_text(size)}; files over {SEND_FILE_LIMIT_MB} MB can't be sent."
+    return file, None
 
 
 def _render_prefix(template: str, *, contact: str, account: str, now: datetime | None = None) -> str:
@@ -710,6 +757,10 @@ class WeChatPlugin(Plugin):
 
     async def _send_to_contact(self, key: str, text: str) -> str | None:
         """Send to the account's last contact; returns an error message, or None when sent."""
+        return await self._deliver(key, lambda bot, contact: bot.send(contact, text.strip()))
+
+    async def _deliver(self, key: str, send: Callable[[Any, str], Awaitable[Any]]) -> str | None:
+        """Run send(bot, contact) for the account's last contact; an error message, or None."""
         bot = self._rt_of(key).bot
         if bot is None:
             return f"WeChat account {self._name(key)} is not connected."
@@ -717,23 +768,32 @@ class WeChatPlugin(Plugin):
         if not contact:
             return "No WeChat contact has written to this account yet, so there is nobody to send to."
         try:
-            await bot.send(contact, text.strip())
+            await send(bot, contact)
         except Exception as exc:
             if type(exc).__name__ == "NoContextError":
                 return ("WeChat only allows replying after the user has written since the account "
                         "(re)connected; ask them to send any message on WeChat first.")
             if self.ctx is not None:
-                self.ctx.log.error(f"could not send to WeChat: {exc}", account=key)
+                self.ctx.log.error(f"could not send to WeChat: {type(exc).__name__}: {exc}", account=key)
             return "Sending to WeChat failed; see the plugin logs."
         return None
 
-    # ---- agent tool ----
+    def _session_account(self, session_id: str) -> tuple[str | None, str | None]:
+        """(account key, None) or (None, error message for the agent)."""
+        key = self._account_for_session(session_id)
+        if key is None:
+            return None, ("This session is not bound to a WeChat account. Set it as an account's inbound "
+                          "session on its WeChat plugin card, or bind it from WeChat with \\cmd bind.")
+        return key, None
+
+    # ---- agent tools ----
 
     @tool(
         "send",
         description="Send a WeChat message to the user through the WeChat account bound to this session. "
                     "Messages that start with \"[from WeChat\" came from WeChat: answer them with this tool, "
-                    "since your normal replies are not forwarded there.",
+                    "since your normal replies are not forwarded there. For images and files use "
+                    "wechat__send_file.",
         parameters={
             "type": "object",
             "properties": {"text": {"type": "string", "description": "Message text."}},
@@ -745,9 +805,45 @@ class WeChatPlugin(Plugin):
     async def send(self, ctx: ToolContext, text: str) -> str:
         if not text.strip():
             return "Nothing to send: the text is empty."
-        key = self._account_for_session(ctx.session_id)
+        key, error = self._session_account(ctx.session_id)
         if key is None:
-            return ("This session is not bound to a WeChat account. Set it as an account's inbound "
-                    "session on its WeChat plugin card, or bind it from WeChat with \\cmd bind.")
+            return error or ""
         error = await self._send_to_contact(key, text)
         return error or "Sent."
+
+    @tool(
+        "send_file",
+        description="Send a file from this session's working directory to the user on WeChat, through the "
+                    "WeChat account bound to this session. Images (png, jpg, jpeg, gif, webp, bmp, svg) arrive as "
+                    "pictures, videos (mp4, mov, webm, mkv, avi) as videos, anything else as a file "
+                    f"attachment. At most {SEND_FILE_LIMIT_MB} MB.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "File path, relative to the session's working directory or absolute "
+                                        "inside it."},
+                "caption": {"type": "string", "description": "Optional text sent with the file."},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        requires_approval=False,
+    )
+    async def send_file(self, ctx: ToolContext, path: str, caption: str | None = None) -> str:
+        key, error = self._session_account(ctx.session_id)
+        if key is None:
+            return error or ""
+        file, error = _resolve_in_dir(path, ctx.working_dir)
+        if file is None:
+            return error or ""
+        data = await asyncio.to_thread(file.read_bytes)
+        content: dict[str, Any] = {"file": data, "file_name": file.name}
+        if caption and caption.strip():
+            content["caption"] = caption.strip()
+        error = await self._deliver(key, lambda bot, contact: bot.send_media(contact, content))
+        if error:
+            return error
+        if self.ctx is not None:
+            self.ctx.log.info("file sent to WeChat", account=key, file=file.name, size=len(data))
+        return f"Sent {file.name} ({_size_text(len(data))})."
