@@ -193,10 +193,28 @@ class MockMemoryDatabase(IAgentDatabase):
                 counts[s.join_into_session_id] = counts.get(s.join_into_session_id, 0) + 1
         return counts
 
-    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+    async def set_joined_message(self, session_id: str, message_id: str,
+                                 outcome: str | None = None) -> Session:
         session = await self.get_session(session_id, include_deleted=True)
         session.joined_message_id = message_id
+        if outcome is not None:
+            session.join_outcome = outcome
         return session
+
+    async def failed_joins(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for s in self._sessions.values():
+            if s.join_into_session_id and s.join_outcome == "failed" and s.deleted_at is None:
+                counts[s.join_into_session_id] = counts.get(s.join_into_session_id, 0) + 1
+        return counts
+
+    async def ack_failed_joins(self, session_id: str) -> int:
+        n = 0
+        for s in self._sessions.values():
+            if s.join_into_session_id == session_id and s.join_outcome == "failed":
+                s.join_outcome = "failed_acked"
+                n += 1
+        return n
 
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         session = await self.get_session(session_id)

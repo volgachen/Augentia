@@ -27,6 +27,18 @@ class SessionStatus(str, Enum):
     DISPATCHING = "DISPATCHING"
 
 
+class JoinOutcome(str, Enum):
+    """Session.join_outcome: how a fork-dispatch branch was joined back."""
+    # Result appended to the target's context.
+    OK = "ok"
+    # Someone stopped the branch (cancelled / interrupted): kept out of context.
+    DROPPED = "dropped"
+    # The branch's turn failed: kept out of context, counted in the target's
+    # failed_joins until acknowledged.
+    FAILED = "failed"
+    FAILED_ACKED = "failed_acked"
+
+
 class MessageRole(str, Enum):
     SYSTEM = "system"
     USER = "user"
@@ -109,6 +121,10 @@ class Session(BaseModel):
     # until then the join is pending (and is retried after a restart).
     join_into_session_id: Optional[str] = None
     joined_message_id: Optional[str] = None
+    # How that join went (see JoinOutcome); None until joined. A failed
+    # branch is joined but kept out of the target's context, and counts in
+    # the target's failed_joins until someone acknowledges it.
+    join_outcome: Optional[str] = None
     # Dispatch mode (PUT /sessions/{id}/dispatching): every message sent to
     # the session (POST /messages) runs in a new branch of it, and the
     # branch's result is joined back. The session runs no turns of its own.
@@ -116,6 +132,9 @@ class Session(BaseModel):
     # Not stored: how many branches dispatched from this session haven't been
     # joined back yet (filled in by the API; 0 = all results are in).
     pending_joins: int = 0
+    # Not stored: branches dispatched from this session whose turn failed and
+    # nobody has acknowledged yet (join_outcome == "failed").
+    failed_joins: int = 0
     # Per-session add-ons to the AgentTemplate's base system_prompt. Persisted so
     # a session rehydrated after a backend restart sees the exact same effective
     # prompt it was launched with. The router applies them at adapter.start()

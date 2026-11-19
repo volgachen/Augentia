@@ -121,8 +121,19 @@ class IAgentDatabase(ABC):
         """
 
     @abstractmethod
-    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
-        """Record that this fork-dispatch branch was joined back (row id in its target)."""
+    async def set_joined_message(self, session_id: str, message_id: str,
+                                 outcome: str | None = None) -> Session:
+        """Record that this fork-dispatch branch was joined back (row id in its
+        target) and how (a JoinOutcome value; None leaves join_outcome as is)."""
+
+    @abstractmethod
+    async def failed_joins(self) -> dict[str, int]:
+        """{session id: live branches joined into it as failed, not acknowledged}."""
+
+    @abstractmethod
+    async def ack_failed_joins(self, session_id: str) -> int:
+        """Mark the failed branches joined into session_id as acknowledged;
+        returns how many were."""
 
     @abstractmethod
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:

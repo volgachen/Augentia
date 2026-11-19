@@ -11,6 +11,9 @@ itself is idle (never stored: the stored status keeps saying what the session
 itself is doing, so turns and compression can't overwrite the switch).
 pending_joins, reported for every session, counts branches whose results
 haven't been joined back yet (dispatch mode or a one-off fork-dispatch).
+failed_joins counts branches whose turn failed: they are joined but kept out
+of the session's context, so this is where a person sees them, until
+POST /sessions/{id}/failed-joins/ack. Neither changes the status itself.
 """
 
 from __future__ import annotations
@@ -29,21 +32,24 @@ MODE_DETAIL = (
 PENDING_DETAIL = "{n} dispatched branch(es) not joined back yet; wait until they are"
 
 
-def with_pending(session: Session, pending: int) -> Session:
-    """A copy reporting `pending` joins, and DISPATCHING when the mode is on."""
-    session = session.model_copy(update={"pending_joins": pending})
+def with_pending(session: Session, pending: int, failed: int = 0) -> Session:
+    """A copy reporting `pending` / `failed` joins, and DISPATCHING when the
+    mode is on."""
+    session = session.model_copy(update={"pending_joins": pending, "failed_joins": failed})
     if session.dispatch_mode and session.status in _IDLE:
         session.status = SessionStatus.DISPATCHING
     return session
 
 
 async def view(db: IAgentDatabase, session: Session) -> Session:
-    return with_pending(session, (await db.pending_joins()).get(session.id, 0))
+    return with_pending(session, (await db.pending_joins()).get(session.id, 0),
+                        (await db.failed_joins()).get(session.id, 0))
 
 
 async def view_all(db: IAgentDatabase, sessions: list[Session]) -> list[Session]:
-    counts = await db.pending_joins()
-    return [with_pending(s, counts.get(s.id, 0)) for s in sessions]
+    pending = await db.pending_joins()
+    failed = await db.failed_joins()
+    return [with_pending(s, pending.get(s.id, 0), failed.get(s.id, 0)) for s in sessions]
 
 
 async def pending_for(db: IAgentDatabase, session_id: str) -> int:

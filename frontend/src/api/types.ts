@@ -111,14 +111,29 @@ export interface Session {
   // joined row once it is (null while it still runs).
   join_into_session_id?: string | null;
   joined_message_id?: string | null;
+  // On a dispatched branch: how its join went ("failed_acked" = a failure
+  // someone acknowledged); null until joined.
+  join_outcome?: "ok" | "dropped" | "failed" | "failed_acked" | null;
   // Dispatched branches of this session not joined back yet.
   pending_joins?: number;
+  // Dispatched branches of this session that failed (kept out of its
+  // context) and nobody acknowledged yet.
+  failed_joins?: number;
   status: SessionStatus;
   created_at: string;
   updated_at: string;
   // created_at of the newest message; null for a session with no messages yet.
   last_message_at: string | null;
   deleted_at: string | null;
+}
+
+// GET /sessions/{id}/failed-joins: a dispatched branch that failed.
+export interface FailedJoin {
+  session_id: string;
+  message_id: string;
+  task: string;
+  error: { type?: string; message?: string; step?: number };
+  joined_at: string;
 }
 
 // GET/PUT /sessions/{id}/model: the session's values (null = not set) and
