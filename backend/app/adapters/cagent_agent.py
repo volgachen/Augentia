@@ -13,12 +13,8 @@ overrides runs on a throwaway subclass (``with_turn_overrides``).
 
 from __future__ import annotations
 
-import asyncio
 import inspect
-from datetime import timedelta
 
-from cagent.context import Context, is_compressible_turn_end
-from cagent.storage import maybe_await
 from cagent import BaseAgent, Tool
 from cagent.images import Image
 from cagent.tools.base import ToolResult
@@ -339,58 +335,7 @@ def make_agent_class(
             return await super().launch_compression_task(store, ctx, model, **kwargs)
 
         @classmethod
-        async def compress_session(cls, *, session_id, store, model, count_tokens=None,
-                                   system_prompt=None, since=None, instruction=None):
-            if adapter.compress_span is None:
-                return await super().compress_session(
-                    session_id=session_id, store=store, model=model, count_tokens=count_tokens,
-                    system_prompt=system_prompt, since=since, instruction=instruction)
-            return await cls.compress_selected_span(
-                session_id=session_id, store=store, model=model, count_tokens=count_tokens,
-                system_prompt=system_prompt, instruction=instruction)
-
-        @classmethod
-        async def compress_selected_span(cls, *, session_id, store, model, count_tokens=None,
-                                         system_prompt=None, instruction=None):
-            """compress_session for an exact span (adapter.compress_span).
-
-            CAgent's compress_session only runs when the session's newest turn
-            completed, since its ranges always end at the newest turn. A span
-            ends where it ends: only its own last turn must have completed
-            (select_span checks), so the newest turn being cancelled or failed
-            doesn't matter here. Otherwise the same steps: idle check, select,
-            compress_range, status back to IDLE.
-            """
-            if instruction is not None and (not isinstance(instruction, str) or not instruction.strip()):
-                raise ValueError("instruction must be a non-empty string or None")
-            system_prompt = cls.resolve_system_prompt(system_prompt)
-            session = await maybe_await(store.get_session(session_id))
-            if session["deleted_at"] is not None or session["status"] != "IDLE":
-                raise ValueError("External compression requires an idle, live session")
-            ctx = Context(session_id, force_compression=True,
-                          token_count_is_estimate=count_tokens is None, system_prompt=system_prompt,
-                          tool_image_limit=cls.resolve_tool_image_limit())
-            ctx.add_messages(await maybe_await(store.list_messages(session_id, include_deleted=True)))
-            selected = cls.select_span(ctx, *adapter.compress_span)
-            if selected is None:
-                return ctx
-            ctx.stop("completed")
-            await maybe_await(store.set_status(session_id, "RUNNING"))
-            try:
-                await cls.compress_range(store, ctx, model, *selected,
-                                         count_tokens=count_tokens, instruction=instruction)
-            except asyncio.CancelledError:
-                ctx.stop("cancelled")
-                raise
-            finally:
-                await cls.post_run_turn(store, ctx)
-            return ctx
-
-        @classmethod
-        def select_compression_range(cls, ctx, since):
-            span = adapter.compress_span
-            if span is not None:
-                return cls.select_span(ctx, *span)
+        def select_compression_range(cls, ctx, since, until=None):
             borrowed = borrowed_ids() if borrowed_ids is not None else set()
             if borrowed:
                 # Never start inside the borrowed history: from the branch's
@@ -402,104 +347,19 @@ def make_agent_class(
                         "nothing to compress: this branch has no turns of its own yet")
                     return None
                 own_start = cls._created_at(first_own)
-                if own_start is not None and (since is None or since < own_start):
+                if own_start is not None and since < own_start:
                     since = own_start
-            until = adapter.compress_until
-            if until is None:
-                return super().select_compression_range(ctx, since)
-            # Stop at the last turn that ended before `until`: hide the later
-            # records from CAgent's pick, then map the indexes back.
-            cut = next((i for i, m in enumerate(ctx.messages)
-                        if (stamp := cls._created_at(m)) is not None and stamp >= until),
-                       len(ctx.messages))
-            full = ctx.messages
-            ctx.messages = full[:cut]
-            try:
-                return super().select_compression_range(ctx, since)
-            finally:
-                ctx.messages = full
+            return super().select_compression_range(ctx, since, until)
 
         @classmethod
-        def select_span(cls, ctx, first_id, last_id):
-            """(start, end) indexes for compressing exactly first_id..last_id.
-
-            The span must be whole segments of the active history (after the
-            whole-history summary): turns, each through its turn_end, or
-            earlier range summaries. first_id must start one and last_id end
-            one (a turn ends at its last visible row; its turn_end mark comes
-            right after). Like CAgent's since-range, turns inside may have been
-            cancelled or failed (read repair pairs their tool calls), but the
-            last one must have completed normally; borrowed turns never go in.
-            Anything else is refused with ctx.compression_skip_reason, never
-            widened.
-            """
+        def select_compression_span(cls, ctx, first_id, last_id):
+            selected = super().select_compression_span(ctx, first_id, last_id)
             borrowed = borrowed_ids() if borrowed_ids is not None else set()
-            _, records = ctx.active_history()
-            offset = len(ctx.messages) - len(records)
-            covered = set()
-            for message in records:
-                if (message["role"] == "user" and message.get("name") == "range_summary"
-                        and message.get("deleted_at") is None):
-                    covered.update((message.get("metadata") or {}).get("replaced_message_ids") or [])
-            # Segments: (first index, last index, id of first visible row,
-            # id of last visible row, ends a compressible turn, borrowed).
-            # Rows a range summary covers, and deleted rows, are not visible
-            # on their own.
-            segments, turn = [], []
-            for index in range(offset, len(ctx.messages)):
-                message = ctx.messages[index]
-                visible = message["role"] != "mark" and message.get("deleted_at") is None
-                if (message["role"] == "user" and message.get("name") == "range_summary"
-                        and visible and not turn):
-                    segments.append((index, index, message["id"], message["id"], True, False))
-                    continue
-                if message["role"] != "mark":
-                    turn.append(index)
-                if not (message["role"] == "mark" and message.get("name") == "turn_end"
-                        and message.get("deleted_at") is None):
-                    continue
-                rows, turn = turn, []
-                shown = [i for i in rows if ctx.messages[i].get("deleted_at") is None
-                         and ctx.messages[i]["id"] not in covered]
-                if not shown:
-                    continue
-                segments.append((rows[0], index, ctx.messages[shown[0]]["id"],
-                                 ctx.messages[shown[-1]]["id"],
-                                 is_compressible_turn_end(message),
-                                 any(ctx.messages[i]["id"] in borrowed for i in rows)))
-            ids = {m["id"]: i for i, m in enumerate(ctx.messages)}
-            if first_id not in ids or last_id not in ids:
-                ctx.compression_skip_reason = "the selected messages are not in this session's history"
-                return None
-            if ids[first_id] < offset or ids[last_id] < offset:
-                ctx.compression_skip_reason = (
-                    "the selection reaches into history a whole-history summary already replaced")
-                return None
-            if ids[first_id] > ids[last_id]:
-                first_id, last_id = last_id, first_id
-            begin = next((k for k, seg in enumerate(segments) if seg[2] == first_id), None)
-            finish = next((k for k, seg in enumerate(segments) if seg[3] == last_id), None)
-            if begin is None or finish is None or finish < begin:
-                ctx.compression_skip_reason = (
-                    "the selection must start at the first message of a turn and end at "
-                    "the last message of a turn (whole turns only)")
-                return None
-            if any(seg[5] for seg in segments[begin:finish + 1]):
+            if selected is not None and borrowed and any(
+                    m["id"] in borrowed for m in ctx.messages[selected[0]:selected[1] + 1]):
                 ctx.compression_skip_reason = "the selection includes borrowed history"
                 return None
-            if not segments[finish][4]:
-                stamp = cls._created_at(ctx.messages[segments[finish][0]])
-                ctx.compression_skip_reason = (
-                    "the last selected turn did not complete normally (failed, cancelled or "
-                    "still running)" + (f"; it started at {stamp.isoformat()}" if stamp else ""))
-                return None
-            start, end = segments[begin][0], segments[finish][1]
-            # The summary goes right after what it covers, before later rows.
-            if end + 1 < len(ctx.messages):
-                stamp = cls._created_at(ctx.messages[end])
-                if stamp is not None and adapter._store is not None:
-                    adapter._store.pending_summary_at = stamp + timedelta(milliseconds=1)
-            return start, end
+            return selected
 
         @classmethod
         async def resolve_image(cls, store, ctx, image):

@@ -27,7 +27,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from openai import AsyncOpenAI
 
@@ -48,7 +48,6 @@ from app.plugins.hooks import HookFailed, HookRejected, HookRunner
 from app.plugins.host import get_plugin_host
 from app.plugins.sdk import IncomingMessage, ModelRequest, ToolCall, TurnSummary
 from app.models.domain import SessionStatus
-from app.core.borrowed import aware as attachments_aware
 
 logger = logging.getLogger("augentia.adapter.cagent")
 
@@ -240,10 +239,6 @@ class CAgentAdapter(BaseAgentAdapter):
         self.on_status = None
         # A manual compression's upper bound (see compress(until=...)); read
         # by the agent class's select_compression_range.
-        self.compress_until: datetime | None = None
-        # Manual compression of an exact span (first_id, last_id) of whole
-        # turns; SessionAgent.select_span picks it.
-        self.compress_span: tuple[str, str] | None = None
         self._turn_task: asyncio.Task | None = None
         self._announced_assistant_id: str | None = None
         self._call_info: dict[str, dict] = {}
@@ -623,17 +618,6 @@ class CAgentAdapter(BaseAgentAdapter):
                     pass
             await self._status_event(COMPRESSING_ENDED)
 
-    async def _summary_slot(self, since: datetime, until: datetime) -> datetime | None:
-        """Where a range summary bounded by `until` goes: just after the last
-        row before `until` (1 ms later), so rows from `until` on follow it.
-        None (now) when nothing precedes `until`."""
-        rows = await self._db.get_messages(self.session_id)
-        before = [m.created_at for m in rows
-                  if attachments_aware(m.created_at) < until]
-        if not before:
-            return None
-        return attachments_aware(max(before)) + timedelta(milliseconds=1)
-
     async def _status_event(self, data: str) -> None:
         if self._turn_task is not None and self._events is not None:
             await self._emit(StreamEventType.STATUS, data)
@@ -647,34 +631,20 @@ class CAgentAdapter(BaseAgentAdapter):
         """Manually compress this session's history in place (CAgent compress_session).
 
         Same summarizer and image handling as threshold-triggered compression.
-        since limits it to the turns from that time on (a range_summary row,
-        earlier history kept); instruction replaces the summarizer instruction.
-        until (needs since) stops at the last turn that ended before it: later
-        turns stay as they are, and the summary row is placed right after the
-        turns it covers, before them.
-        span (first_id, last_id) compresses exactly those whole turns into a
-        range summary placed right after them; a span that is not whole
-        completed turns is skipped with the reason (never widened).
+        since / until / span go to CAgent's compress_session: since limits it
+        to the turns from that time on (a range_summary row, earlier history
+        kept); until (needs since) stops at the last completed turn that ended
+        before it; span (first_id, last_id) compresses exactly those whole
+        turns. A range summary takes the place of what it covers. instruction
+        replaces the summarizer instruction. A branch never compresses the
+        history it borrows (SessionAgent).
         The caller (SessionRunner) guarantees no turn is running.
         Returns {"status": "compressed"|"skipped"|"failed", "kind", "reason", tokens...}.
         """
         if self._agent_cls is None or self._store is None or self._compression_model is None:
             return {"status": "failed", "reason": "engine is not started"}
-        # Only pass the options when set: CAgent before range compression has
-        # no such parameters, and plain compression must keep working there.
-        options = {k: v for k, v in (("since", since), ("instruction", instruction))
-                   if v is not None}
-        if span is not None:
-            if since is not None or until is not None:
-                return {"status": "failed", "reason": "span excludes since / until"}
-            # SessionAgent.compress_session sees compress_span and takes
-            # its own path (CAgent's needs the newest turn completed).
-            self.compress_span = span
-        if until is not None:
-            if since is None:
-                return {"status": "failed", "reason": "until needs since"}
-            self.compress_until = until
-            self._store.pending_summary_at = await self._summary_slot(since, until)
+        options = {k: v for k, v in (("since", since), ("until", until), ("span", span),
+                                     ("instruction", instruction)) if v is not None}
         try:
             ctx = await self._agent_cls.compress_session(
                 session_id=self.session_id, store=self._store, model=self._compression_model,
@@ -682,10 +652,6 @@ class CAgentAdapter(BaseAgentAdapter):
             )
         except ValueError as exc:
             return {"status": "skipped", "reason": str(exc)}
-        finally:
-            self.compress_until = None
-            self.compress_span = None
-            self._store.pending_summary_at = None
         if ctx.compression_applied:
             kind = getattr(ctx, "compression_kind", None) or "session"
             role, name = (("user", "range_summary") if kind == "range"
@@ -707,17 +673,10 @@ class CAgentAdapter(BaseAgentAdapter):
             }
         if ctx.compression_error:
             return {"status": "failed", "reason": ctx.compression_error}
-        if getattr(ctx, "compression_skip_reason", None):
-            return {"status": "skipped", "reason": ctx.compression_skip_reason}
-        if ctx.stop_reason != "completed":
-            has_turn = any(
-                m["role"] == "mark" and m.get("name") == "turn_end" for m in ctx.messages
-            )
-            reason = ("the last turn did not complete normally" if has_turn
-                      else "no completed turns to compress yet")
-        else:
-            reason = "no new completed turns since the last compression"
-        return {"status": "skipped", "reason": reason}
+        if ctx.stop_reason in ("interrupted", "cancelled"):
+            return {"status": "skipped", "reason": "compression was interrupted"}
+        return {"status": "skipped",
+                "reason": ctx.compression_skip_reason or "nothing to compress"}
 
     @property
     def context_tokens(self) -> int:

@@ -145,10 +145,6 @@ class AugentiaStore:
         self.pending_turn_overrides: dict | None = None
         # Extra metadata merged into the next turn input row (plugin_label, ...).
         self.pending_user_metadata: dict | None = None
-        # Set by the adapter for a compression with `until`: the next
-        # range_summary row is placed at this time (right after what it
-        # covers) instead of now, so later rows stay after it.
-        self.pending_summary_at: datetime | None = None
         # Set by the adapter's model wrapper after each agent-model call: that
         # response's details (usage, model, finish_reason, id, latency_ms).
         # CAgent saves the reply right after the call, so the next saved row
@@ -265,9 +261,11 @@ class AugentiaStore:
             if self.pending_user_metadata:
                 metadata.update(self.pending_user_metadata)
                 self.pending_user_metadata = None
+        # CAgent dates a range summary just after what it covers when later
+        # rows follow (until / span), so it takes the range's place.
         placed_at = None
-        if message.get("name") == "range_summary" and self.pending_summary_at is not None:
-            placed_at, self.pending_summary_at = self.pending_summary_at, None
+        if message.get("name") == "range_summary" and message.get("created_at"):
+            placed_at = _utc(datetime.fromisoformat(message["created_at"]))
         row = await self._db.add_message(
             session_id, MessageRole.USER, message.get("content", ""),
             from_session_id=from_session,

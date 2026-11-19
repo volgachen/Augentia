@@ -176,6 +176,16 @@ async def main() -> int:
             r = await compress_session(branch.id, CompressRequest(), db=db, registry=registry)
             check(r.get("status") == "skipped" and "borrows" in r.get("reason", ""),
                   f"whole-history compression skipped ({r})")
+            # A selected span that reaches into the borrowed rows is refused.
+            b_rows = await rows(branch.id)
+            first_borrowed = next(m for m in b_rows if m.metadata.get("borrowed_from")
+                                  and m.role == MessageRole.USER)
+            last_own = [m for m in b_rows if m.role != MessageRole.MARK][-1]
+            r = await compress_session(branch.id, CompressRequest(
+                from_message_id=first_borrowed.id, through_message_id=last_own.id),
+                db=db, registry=registry)
+            check(r.get("status") == "skipped" and "borrowed" in r.get("reason", ""),
+                  f"span over borrowed rows refused ({r.get('reason')})")
             r = await compress_session(branch.id, CompressRequest(hours=1000), db=db, registry=registry)
             check(r.get("status") == "compressed" and r.get("kind") == "range",
                   f"range compression of the branch's own turns ({r})")
