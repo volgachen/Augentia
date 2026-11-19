@@ -14,7 +14,9 @@ tool call), a failed turn, then:
       they were (later turns follow it); the summarizer sees only them
     - a span that does not start at a turn's first message or end at a turn's
       last message is refused (skipped with a reason), never widened
-    - a span covering a failed turn is refused
+    - a span ending at a failed / cancelled turn is refused; one with such a
+      turn inside (ending at a completed turn) is compressed, like CAgent's
+      since-range
     - an earlier range summary can be part of a new span
     - only one of the ids, or mixing with since/hours/until -> 422
 
@@ -138,7 +140,7 @@ async def main() -> int:
                 ("starts mid-turn", q["q1"]["call"], q["q2"]["reply"]),
                 ("ends mid-turn", q["q1"]["user"], q["q1"]["call"]),
                 ("ends at a turn's first row", q["q0"]["user"], q["q1"]["user"]),
-                ("covers a failed turn", q["q4"]["user"], q["q6"]["reply"]),
+                ("ends at a failed turn", q["q4"]["user"], q["bad"]["reply"]),
                 ("unknown id", q["q0"]["user"], type("X", (), {"id": "nope"})()),
             ):
                 r = await compress(first, last)
@@ -167,10 +169,18 @@ async def main() -> int:
             check(users(rows) == ["q0", "SUMMARY 2", "q4", "bad", "q6", "q7"],
                   f"nested: one summary replaces summary 1 and q3 ({users(rows)})")
 
+            section("compress: a failed turn inside the span")
+            r = await compress(q["bad"]["user"], q["q6"]["reply"], "inside")
+            check(r.get("status") == "compressed",
+                  f"failed turn inside, completed last turn: compressed ({r.get('reason')})")
+            rows = await db.get_messages("s")
+            check(users(rows) == ["q0", "SUMMARY 2", "q4", "SUMMARY 3", "q7"],
+                  f"bad..q6 replaced by one summary ({users(rows)})")
+
             section("compress: a single turn, the last one")
             r = await compress(q["q7"]["user"], q["q7"]["reply"], "c")
             check(r.get("status") == "compressed", f"last turn compressed ({r.get('reason')})")
-            check(users(await db.get_messages("s"))[-1] == "SUMMARY 3", "summary is last")
+            check(users(await db.get_messages("s"))[-1] == "SUMMARY 4", "summary is last")
 
             section("batch delete")
             await expect_status(delete_messages("s", DeleteMessagesRequest(message_ids=[]),
@@ -183,12 +193,12 @@ async def main() -> int:
 
             runner_before = registry.get("s")
             r = await delete_messages("s", DeleteMessagesRequest(
-                message_ids=[q["q0"]["user"].id, q["q6"]["user"].id, q["q6"]["reply"].id]),
+                message_ids=[q["q0"]["user"].id, q["q4"]["user"].id, q["q4"]["reply"].id]),
                 db=db, registry=registry)
-            check(set(r["deleted_ids"]) == {q["q0"]["user"].id, q["q6"]["user"].id, q["q6"]["reply"].id},
+            check(set(r["deleted_ids"]) == {q["q0"]["user"].id, q["q4"]["user"].id, q["q4"]["reply"].id},
                   "deleted exactly the selected rows")
             rows = await db.get_messages("s")
-            check(users(rows) == ["SUMMARY 2", "q4", "bad", "SUMMARY 3"], f"rows gone ({users(rows)})")
+            check(users(rows) == ["SUMMARY 2", "SUMMARY 3", "SUMMARY 4"], f"rows gone ({users(rows)})")
             check(registry.get("s") is not runner_before, "runner rebuilt")
 
             # A model output with tool calls takes its results along.
@@ -199,7 +209,7 @@ async def main() -> int:
 
             await db.update_session_status("s", SessionStatus.RUNNING)
             await expect_status(delete_messages("s", DeleteMessagesRequest(
-                message_ids=[q["q4"]["user"].id]), db=db, registry=registry), 409, "while running")
+                message_ids=[q["q8"]["user"].id]), db=db, registry=registry), 409, "while running")
             await db.update_session_status("s", SessionStatus.WAITING_USER)
     finally:
         cagent_adapter_module._make_model = original

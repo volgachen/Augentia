@@ -1076,7 +1076,12 @@ function compressSkipText(reason: string | undefined): string {
     return "选中的不是完整的轮次。请从某轮的用户输入开始，选到某轮的最后一条回复（含中间的工具调用）";
   }
   if (reason.includes("did not complete normally")) {
-    return "选中的里面有没有正常结束的轮次（失败、取消或还在运行），或者借用的历史";
+    const at = reason.match(/started at (\S+)/)?.[1];
+    const when = at ? `（${new Date(at).toLocaleString()} 开始的那一轮）` : "";
+    return `选中的最后一轮没有正常结束${when}，是失败、取消或者还在运行的。请把选区的结尾移到某个正常结束的轮次`;
+  }
+  if (reason.includes("borrowed history")) {
+    return "选中的里面有从原会话借用的历史，借用的部分在分支里只读，不能压缩";
   }
   if (reason.includes("whole-history summary")) {
     return "选中的消息已经在整段压缩的范围里，不能再单独压缩";

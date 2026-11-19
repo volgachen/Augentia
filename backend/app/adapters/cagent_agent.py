@@ -374,11 +374,14 @@ def make_agent_class(
             """(start, end) indexes for compressing exactly first_id..last_id.
 
             The span must be whole segments of the active history (after the
-            whole-history summary): completed turns, each through its
-            turn_end, or earlier range summaries. first_id must start one and
-            last_id end one (a turn ends at its last visible row; its turn_end
-            mark comes right after). Anything else is refused with
-            ctx.compression_skip_reason, never widened.
+            whole-history summary): turns, each through its turn_end, or
+            earlier range summaries. first_id must start one and last_id end
+            one (a turn ends at its last visible row; its turn_end mark comes
+            right after). Like CAgent's since-range, turns inside may have been
+            cancelled or failed (read repair pairs their tool calls), but the
+            last one must have completed normally; borrowed turns never go in.
+            Anything else is refused with ctx.compression_skip_reason, never
+            widened.
             """
             borrowed = borrowed_ids() if borrowed_ids is not None else set()
             _, records = ctx.active_history()
@@ -389,15 +392,16 @@ def make_agent_class(
                         and message.get("deleted_at") is None):
                     covered.update((message.get("metadata") or {}).get("replaced_message_ids") or [])
             # Segments: (first index, last index, id of first visible row,
-            # id of last visible row, compressible). Rows a range summary
-            # covers, and deleted rows, are not visible on their own.
+            # id of last visible row, ends a compressible turn, borrowed).
+            # Rows a range summary covers, and deleted rows, are not visible
+            # on their own.
             segments, turn = [], []
             for index in range(offset, len(ctx.messages)):
                 message = ctx.messages[index]
                 visible = message["role"] != "mark" and message.get("deleted_at") is None
                 if (message["role"] == "user" and message.get("name") == "range_summary"
                         and visible and not turn):
-                    segments.append((index, index, message["id"], message["id"], True))
+                    segments.append((index, index, message["id"], message["id"], True, False))
                     continue
                 if message["role"] != "mark":
                     turn.append(index)
@@ -409,10 +413,10 @@ def make_agent_class(
                          and ctx.messages[i]["id"] not in covered]
                 if not shown:
                     continue
-                complete = is_compressible_turn_end(message) and not any(
-                    ctx.messages[i]["id"] in borrowed for i in rows)
                 segments.append((rows[0], index, ctx.messages[shown[0]]["id"],
-                                 ctx.messages[shown[-1]]["id"], complete))
+                                 ctx.messages[shown[-1]]["id"],
+                                 is_compressible_turn_end(message),
+                                 any(ctx.messages[i]["id"] in borrowed for i in rows)))
             ids = {m["id"]: i for i, m in enumerate(ctx.messages)}
             if first_id not in ids or last_id not in ids:
                 ctx.compression_skip_reason = "the selected messages are not in this session's history"
@@ -430,10 +434,14 @@ def make_agent_class(
                     "the selection must start at the first message of a turn and end at "
                     "the last message of a turn (whole turns only)")
                 return None
-            if not all(seg[4] for seg in segments[begin:finish + 1]):
+            if any(seg[5] for seg in segments[begin:finish + 1]):
+                ctx.compression_skip_reason = "the selection includes borrowed history"
+                return None
+            if not segments[finish][4]:
+                stamp = cls._created_at(ctx.messages[segments[finish][0]])
                 ctx.compression_skip_reason = (
-                    "the selection includes a turn that did not complete normally "
-                    "(failed, cancelled or still running) or borrowed history")
+                    "the last selected turn did not complete normally (failed, cancelled or "
+                    "still running)" + (f"; it started at {stamp.isoformat()}" if stamp else ""))
                 return None
             start, end = segments[begin][0], segments[finish][1]
             # The summary goes right after what it covers, before later rows.
