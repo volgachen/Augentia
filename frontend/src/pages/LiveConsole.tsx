@@ -657,17 +657,6 @@ export default function LiveConsole() {
               />
               显示已删除消息
             </label>
-            <label
-              className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none"
-              title="勾选多条消息，一起删除，或把连续的一段压缩成一条摘要（按住 Shift 点击可选中一个区间，Esc 退出）"
-            >
-              <input
-                type="checkbox"
-                checked={selecting}
-                onChange={(e) => (e.target.checked ? setSelecting(true) : exitSelecting())}
-              />
-              多选
-            </label>
             {session.status === "RUNNING" && (
               <label className="flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
                 <input
@@ -692,9 +681,33 @@ export default function LiveConsole() {
           className="flex-1 bg-gray-900 rounded-xl border border-gray-700 p-4 overflow-y-auto flex flex-col gap-1 min-h-0 focus:outline-none focus:ring-1 focus:ring-indigo-500"
           aria-label="Event log. Use arrow up and arrow down to jump between messages."
         >
-          {consoleItems.length > 1 && (
-            <div className="sticky top-0 z-10 self-end rounded bg-gray-950/80 px-2 py-1 text-[11px] text-gray-500 backdrop-blur">
-              聚焦日志后，按 ↑ / ↓ 跳到上一条 / 下一条；按 End 跳到最下面
+          {/* Pinned to the top while scrolling: the multi-select toggle on the
+              left, the keyboard hint on the right. The row itself lets clicks
+              through to the messages under it; only its two pills take them. */}
+          {consoleItems.length > 0 && (
+            <div className="pointer-events-none sticky top-0 z-10 flex items-start justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => (selecting ? exitSelecting() : setSelecting(true))}
+                aria-pressed={selecting}
+                className={`pointer-events-auto rounded px-2 py-1 text-[11px] backdrop-blur transition-colors ${
+                  selecting
+                    ? "bg-indigo-600 text-white hover:bg-indigo-500"
+                    : "bg-gray-950/80 text-gray-500 hover:text-gray-300"
+                }`}
+                title={
+                  selecting
+                    ? "退出多选（Esc）"
+                    : "多选消息：一起删除，或把连续的一段压缩成一条摘要（按住 Shift 点击可选中一个区间）"
+                }
+              >
+                多选
+              </button>
+              {consoleItems.length > 1 && (
+                <div className="pointer-events-auto rounded bg-gray-950/80 px-2 py-1 text-[11px] text-gray-500 backdrop-blur">
+                  聚焦日志后，按 ↑ / ↓ 跳到上一条 / 下一条；按 End 跳到最下面
+                </div>
+              )}
             </div>
           )}
           {consoleItems.length === 0 && (
