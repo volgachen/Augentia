@@ -230,6 +230,7 @@ interface Store {
   renameSession: (sessionId: string, title: string) => Promise<void>;
   unlinkParent: (sessionId: string) => Promise<void>;
   setDispatchMode: (sessionId: string, enabled: boolean) => Promise<void>;
+  ackFailedJoins: (sessionId: string) => Promise<void>;
   updateWorkingDir: (
     sessionId: string,
     workingDir: string,
@@ -669,6 +670,15 @@ export const useStore = create<Store>((set, get) => {
 
     setDispatchMode: async (sessionId, enabled) => {
       const updated = await api.sessions.setDispatchMode(sessionId, enabled);
+      set((s) => {
+        const entry = s.sessions[sessionId];
+        if (!entry) return s;
+        return { sessions: { ...s.sessions, [sessionId]: { ...entry, session: updated } } };
+      });
+    },
+
+    ackFailedJoins: async (sessionId) => {
+      const updated = await api.sessions.ackFailedJoins(sessionId);
       set((s) => {
         const entry = s.sessions[sessionId];
         if (!entry) return s;

@@ -17,6 +17,7 @@ import ShareButton from "../components/ShareButton";
 import WorkingDirEditor from "../components/WorkingDirEditor";
 import ModelEditor from "../components/ModelEditor";
 import BranchIcon from "../components/BranchIcon";
+import FailedJoinsBadge from "../components/FailedJoinsBadge";
 import { AttachmentTray } from "../components/ImageAttachments";
 import { ACCEPTED_IMAGE_TYPES, useImageAttachments } from "../hooks/useImageAttachments";
 import ConsoleItemLine from "../components/console/ConsoleItemLine";
@@ -463,6 +464,7 @@ export default function LiveConsole() {
             {statusLabel(session)}
             {session.status !== "DISPATCHING" && pendingJoins > 0 && ` · ${pendingJoins}`}
           </span>
+          <FailedJoinsBadge session={session} />
           <button
             type="button"
             onClick={() => {

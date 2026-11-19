@@ -984,6 +984,36 @@ async def set_dispatch_mode(
     return await dispatching.view(db, session)
 
 
+@router.get("/{session_id}/failed-joins")
+async def list_failed_joins(session_id: str, db: IAgentDatabase = Depends(get_db)):
+    """The failed branches counted in failed_joins: task, error, branch id."""
+    from app.core.branch_join import failed_join_items
+    try:
+        await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return await failed_join_items(db, session_id)
+
+
+@router.post("/{session_id}/failed-joins/ack", response_model=Session)
+async def ack_failed_joins(
+    session_id: str,
+    db: IAgentDatabase = Depends(get_db),
+    registry: AdapterRegistry = Depends(get_registry),
+):
+    """Acknowledge the failed branches joined into this session: failed_joins
+    goes back to 0. The branches themselves are untouched."""
+    try:
+        session = await db.get_session(session_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    n = await db.ack_failed_joins(session_id)
+    if n:
+        logger.info("acked %d failed join(s) session=%s", n, session_id)
+        _announce_state(registry, session_id)
+    return await dispatching.view(db, session)
+
+
 @router.post("/{session_id}/fork-dispatch", status_code=202)
 async def fork_dispatch(
     session_id: str,

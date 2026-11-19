@@ -51,8 +51,10 @@ def main() -> None:
         print("child created:", child["id"], "parent_session_id=", child["parent_session_id"])
         assert child["parent_session_id"] == parent_id, child
 
-        # 3) the child's working dir is the requested source dir
-        assert child["working_dir"] == str(child_source), child
+        # 3) the child's working dir is the requested source dir. The API
+        # stores the resolved path (on Windows the temp dir may be an 8.3
+        # short name like ZHIYAN~1 that resolves to the long one).
+        assert child["working_dir"] == str(child_source.resolve()), child
 
         # 4) unknown parent -> 404
         r = client.post(API, json={"agent_id": agent, "parent_session_id": "does-not-exist"})

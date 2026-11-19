@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     branched_cutoff_at DATETIME(3)  DEFAULT NULL,
     join_into_session_id VARCHAR(36) DEFAULT NULL,
     joined_message_id VARCHAR(36)   DEFAULT NULL,
+    join_outcome      VARCHAR(16)   DEFAULT NULL,
     dispatch_mode     TINYINT(1)    NOT NULL DEFAULT 0,
     additional_prompt LONGTEXT      DEFAULT NULL,
     additional_prompt_path VARCHAR(1000) DEFAULT NULL,
@@ -223,6 +224,12 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
     ),
     (
         "sessions",
+        "join_outcome",
+        ["ALTER TABLE sessions ADD COLUMN join_outcome VARCHAR(16) DEFAULT NULL "
+         "AFTER joined_message_id"],
+    ),
+    (
+        "sessions",
         "model",
         ["ALTER TABLE sessions ADD COLUMN model VARCHAR(200) DEFAULT NULL AFTER system_prompt_id"],
     ),
@@ -287,6 +294,7 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         branched_cutoff_at=row.get("branched_cutoff_at"),
         join_into_session_id=row.get("join_into_session_id"),
         joined_message_id=row.get("joined_message_id"),
+        join_outcome=row.get("join_outcome"),
         dispatch_mode=bool(row.get("dispatch_mode") or 0),
         # `.get` instead of `[]` so a database that hasn't had the additional_*
         # columns ALTER'd in yet still loads. Operators run that ALTER manually
@@ -801,16 +809,40 @@ class MySqlDatabase(IAgentDatabase):
                 rows = await cur.fetchall()
         return {r["target"]: int(r["n"]) for r in rows}
 
-    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+    async def set_joined_message(self, session_id: str, message_id: str,
+                                 outcome: str | None = None) -> Session:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
-                changed = await cur.execute(
-                    "UPDATE sessions SET joined_message_id = %s WHERE id = %s",
-                    (message_id, session_id),
+                # Look the row up first: MySQL counts only changed rows, so a
+                # repeat with the same values would otherwise read as "not found".
+                await cur.execute("SELECT 1 FROM sessions WHERE id = %s", (session_id,))
+                if await cur.fetchone() is None:
+                    raise KeyError(f"Session '{session_id}' not found")
+                await cur.execute(
+                    "UPDATE sessions SET joined_message_id = %s, "
+                    "join_outcome = COALESCE(%s, join_outcome) WHERE id = %s",
+                    (message_id, outcome, session_id),
                 )
-        if changed == 0:
-            raise KeyError(f"Session '{session_id}' not found")
         return await self.get_session(session_id, include_deleted=True)
+
+    async def failed_joins(self) -> dict[str, int]:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(DictCursor) as cur:
+                await cur.execute(
+                    "SELECT join_into_session_id AS target, COUNT(*) AS n FROM sessions "
+                    "WHERE join_into_session_id IS NOT NULL AND join_outcome = 'failed' "
+                    "AND deleted_at IS NULL GROUP BY join_into_session_id")
+                rows = await cur.fetchall()
+        return {r["target"]: int(r["n"]) for r in rows}
+
+    async def ack_failed_joins(self, session_id: str) -> int:
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                return await cur.execute(
+                    "UPDATE sessions SET join_outcome = 'failed_acked' "
+                    "WHERE join_into_session_id = %s AND join_outcome = 'failed'",
+                    (session_id,),
+                )
 
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         session = await self.get_session(session_id)

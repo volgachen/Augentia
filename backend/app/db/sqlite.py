@@ -87,6 +87,7 @@ def _session(row: sqlite3.Row) -> Session:
         branched_cutoff_at=_dt(row["branched_cutoff_at"]),
         join_into_session_id=row["join_into_session_id"],
         joined_message_id=row["joined_message_id"],
+        join_outcome=row["join_outcome"],
         dispatch_mode=bool(row["dispatch_mode"]),
         additional_prompt=row["additional_prompt"],
         additional_prompt_path=row["additional_prompt_path"],
@@ -198,6 +199,7 @@ class SqliteDatabase(IAgentDatabase):
                 branched_cutoff_at TEXT DEFAULT NULL,
                 join_into_session_id TEXT DEFAULT NULL,
                 joined_message_id TEXT DEFAULT NULL,
+                join_outcome TEXT DEFAULT NULL,
                 dispatch_mode INTEGER NOT NULL DEFAULT 0,
                 additional_prompt TEXT DEFAULT NULL,
                 additional_prompt_path TEXT DEFAULT NULL,
@@ -288,7 +290,7 @@ class SqliteDatabase(IAgentDatabase):
         self._migrate_system_prompts(session_columns)
         for column in ("model", "model_params", "branched_from_session_id",
                        "branched_from_message_id", "branched_cutoff_at",
-                       "join_into_session_id", "joined_message_id"):
+                       "join_into_session_id", "joined_message_id", "join_outcome"):
             if column not in session_columns:
                 self._conn.execute(f"ALTER TABLE sessions ADD COLUMN {column} TEXT DEFAULT NULL")
         if "dispatch_mode" not in session_columns:
@@ -543,12 +545,28 @@ class SqliteDatabase(IAgentDatabase):
             "AND deleted_at IS NULL GROUP BY join_into_session_id")
         return {r["target"]: r["n"] for r in rows}
 
-    async def set_joined_message(self, session_id: str, message_id: str) -> Session:
+    async def set_joined_message(self, session_id: str, message_id: str,
+                                 outcome: str | None = None) -> Session:
         cur = self._execute(
-            "UPDATE sessions SET joined_message_id = ? WHERE id = ?", (message_id, session_id))
+            "UPDATE sessions SET joined_message_id = ?, "
+            "join_outcome = COALESCE(?, join_outcome) WHERE id = ?",
+            (message_id, outcome, session_id))
         if cur.rowcount == 0:
             raise KeyError(f"Session '{session_id}' not found")
         return await self.get_session(session_id, include_deleted=True)
+
+    async def failed_joins(self) -> dict[str, int]:
+        rows = self._rows(
+            "SELECT join_into_session_id AS target, COUNT(*) AS n FROM sessions "
+            "WHERE join_into_session_id IS NOT NULL AND join_outcome = 'failed' "
+            "AND deleted_at IS NULL GROUP BY join_into_session_id")
+        return {r["target"]: r["n"] for r in rows}
+
+    async def ack_failed_joins(self, session_id: str) -> int:
+        cur = self._execute(
+            "UPDATE sessions SET join_outcome = 'failed_acked' "
+            "WHERE join_into_session_id = ? AND join_outcome = 'failed'", (session_id,))
+        return cur.rowcount
 
     async def update_session_parent(self, session_id: str, parent_session_id: str | None) -> Session:
         now = datetime.now(timezone.utc)

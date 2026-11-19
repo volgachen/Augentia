@@ -3,6 +3,7 @@ import type {
   AgentType,
   CompressOptions,
   CompressResult,
+  FailedJoin,
   Session,
   SessionCreateMode,
   SessionModelView,
@@ -177,6 +178,9 @@ export const api = {
         method: "PUT",
         body: JSON.stringify({ enabled }),
       }),
+    failedJoins: (id: string) => request<FailedJoin[]>(`/sessions/${id}/failed-joins`),
+    ackFailedJoins: (id: string) =>
+      request<Session>(`/sessions/${id}/failed-joins/ack`, { method: "POST" }),
     unlinkParent: (id: string) =>
       request<Session>(`/sessions/${id}/parent`, { method: "DELETE" }),
     get: (id: string) => request<Session>(`/sessions/${id}`),

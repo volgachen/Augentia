@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Session, SessionStatus } from "../api/types";
-import { statusLabel, statusTitle } from "./statusLabel";
+import { hasFailedJoins, statusLabel, statusTitle } from "./statusLabel";
 
 const STATUS_DOT: Record<SessionStatus, string> = {
   INITIALIZING: "bg-yellow-400",
@@ -66,7 +66,10 @@ export default function SessionListPanel({
                   <span className="min-w-0 flex-1 truncate text-xs text-gray-300">
                     {session.title?.trim() || `${session.id.slice(0, 8)}…`}
                   </span>
-                  <span className="shrink-0 text-[10px] text-gray-500" title={statusTitle(session)}>
+                  <span
+                    className={`shrink-0 text-[10px] ${hasFailedJoins(session) ? "text-amber-400" : "text-gray-500"}`}
+                    title={statusTitle(session)}
+                  >
                     {statusLabel(session)}
                   </span>
                 </button>

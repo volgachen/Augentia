@@ -8,15 +8,18 @@ Covers:
     runs its message; the branches run concurrently
   - each finished branch turn is appended to the source as a branch_summary
     row (+ turn_end), with joined_from; the result is the branch's
-    turn_summary when turn compression ran, else its last reply; a failed
-    turn joins a note
+    turn_summary when turn compression ran, else its last reply
+  - a failed turn is joined but kept out of the source's context (soft-deleted,
+    no turn_end); the source reports it in failed_joins, GET failed-joins
+    lists it with its error, and POST failed-joins/ack clears it
   - the source's next turn sends the joined results to its model
   - a join waits for a running source turn (lands after it, never inside it)
   - expanding a branch_summary returns the branch's turn rows
   - joins are idempotent and redone for pending branches (restart)
   - while results are pending the source reports pending_joins and refuses
     new messages / another dispatch (409); deleting
-    a pending branch joins what it did and releases the source
+    a pending branch releases the source; a cancelled turn is recorded as
+    joined but kept out of the source's context
 
 Run from backend/:  python scripts/test_branch_join.py
 """
@@ -35,8 +38,8 @@ from app.db.mock import MockMemoryDatabase
 from app.models.domain import AgentTemplate, AgentType, MessageRole
 from fastapi import HTTPException
 from app.routers.sessions import (
-    ForkDispatchRequest, PostMessageRequest, compressed_messages, delete_session, fork_dispatch,
-    get_session, list_sessions, post_message,
+    ForkDispatchRequest, PostMessageRequest, ack_failed_joins, compressed_messages, delete_session,
+    fork_dispatch, get_session, list_failed_joins, list_sessions, post_message,
 )
 
 from _common import fail, ok, section
@@ -167,38 +170,69 @@ async def main() -> int:
             gate.set()
 
             async def all_joined():
-                rows = await db.get_own_messages("src")
-                return sum(is_branch_summary(m) for m in rows) == 3
-            check(await wait_for(all_joined), "all three results joined into the source")
+                return all([(await db.get_session(b)).joined_message_id for b in ids])
+            check(await wait_for(all_joined), "all three branches joined")
 
             rows = await db.get_own_messages("src")
             joined = [m for m in rows if is_branch_summary(m)]
             by_task = {m.metadata[JOINED_FROM]["task"]: m for m in joined}
-            check(set(by_task) == {"task a", "task tool", "task fail"}, f"tasks recorded ({list(by_task)})")
+            check(set(by_task) == {"task a", "task tool"},
+                  f"the two finished results are in the source's live history ({list(by_task)})")
             check("done: task a" in by_task["task a"].content and "task a" in by_task["task a"].content,
                   "no tool calls: the last reply is the result (template includes the task)")
             check("SUMMARY" in by_task["task tool"].content
                   and by_task["task tool"].metadata[JOINED_FROM]["summary_id"],
                   "turn compression ran: its turn_summary is the result")
-            check("没有完成" in by_task["task fail"].content
-                  and by_task["task fail"].metadata[JOINED_FROM]["ok"] is False,
-                  "a failed turn joins a note")
+            all_rows = await db.get_own_messages("src", include_deleted=True)
+            fail_row = next((m for m in all_rows if is_branch_summary(m)
+                             and m.metadata[JOINED_FROM]["task"] == "task fail"), None)
+            check(fail_row is not None and fail_row.deleted_at is not None
+                  and fail_row.metadata.get("dropped") == "failed"
+                  and fail_row.metadata[JOINED_FROM]["ok"] is False
+                  and fail_row.metadata[JOINED_FROM]["error"].get("message") == "boom",
+                  "a failed turn's join is recorded (with its error) but soft-deleted")
             ends = [m for m in rows if m.role == MessageRole.MARK
                     and JOINED_FROM in json.loads(m.content).get("metadata", {})]
-            check(len(ends) == 3, "each join adds a turn_end mark")
+            check(len(ends) == 2, "only the finished joins add a turn_end mark")
+            outcomes = {}
             for b in ids:
                 s = await db.get_session(b)
-                check(s.joined_message_id in {m.id for m in joined}, f"branch {b[:8]} records its joined row")
+                check(s.joined_message_id in {m.id for m in all_rows if is_branch_summary(m)},
+                      f"branch {b[:8]} records its joined row")
+                outcomes[s.joined_message_id] = s.join_outcome
+            check(outcomes[fail_row.id] == "failed"
+                  and sorted(outcomes.values()) == ["failed", "ok", "ok"],
+                  f"join_outcome recorded per branch ({sorted(outcomes.values())})")
 
             shown = await get_session("src", db=db)
             check(shown.status.value == "WAITING_USER" and shown.pending_joins == 0,
                   f"after the last join: WAITING_USER again ({shown.status.value})")
 
+            section("failed branches: reported on the source, acknowledged")
+            check(shown.failed_joins == 1, f"GET reports failed_joins=1 ({shown.failed_joins})")
+            listed = {s.id: s for s in await list_sessions(db=db)}
+            check(listed["src"].failed_joins == 1, "the session list reports it too")
+            items = await list_failed_joins("src", db=db)
+            check(len(items) == 1 and items[0]["task"] == "task fail"
+                  and items[0]["error"].get("message") == "boom"
+                  and items[0]["message_id"] == fail_row.id,
+                  f"GET failed-joins lists the task and its error ({items})")
+            acked = await ack_failed_joins("src", db=db, registry=registry)
+            check(acked.failed_joins == 0, "ack -> failed_joins back to 0")
+            check(await list_failed_joins("src", db=db) == [], "nothing left to list after the ack")
+            fail_branch = [b for b in ids if (await db.get_session(b)).joined_message_id == fail_row.id][0]
+            check((await db.get_session(fail_branch)).join_outcome == "failed_acked",
+                  "the branch is marked failed_acked")
+            check((await ack_failed_joins("src", db=db, registry=registry)).failed_joins == 0,
+                  "a second ack is a no-op")
+
             section("the source's next turn sees the results")
             await turn("src", "next")
             sent = json.dumps(source_seen[-1], ensure_ascii=False)
-            check("done: task a" in sent and "SUMMARY" in sent and "没有完成" in sent,
+            check("done: task a" in sent and "SUMMARY" in sent,
                   "joined results are in the source model's context")
+            check("没有完成" not in sent and "task fail" not in sent and "boom" not in sent,
+                  "the failed branch is not in the source model's context")
 
             section("expanding a branch_summary")
             rows_a = await compressed_messages(db, "src", by_task["task a"].id)
@@ -284,16 +318,32 @@ async def main() -> int:
             stuck = r["branches"][0]["session_id"]
             await asyncio.sleep(0.1)
             check((await get_session("src", db=db)).pending_joins == 1, "one join pending on a stuck branch")
+            live_before = await db.get_own_messages("src")
             await delete_session(stuck, db=db, registry=registry)
             shown = await get_session("src", db=db)
             check(shown.status.value == "WAITING_USER" and shown.pending_joins == 0,
                   f"deleting the branch releases the source ({shown.status.value})")
-            rows = await db.get_own_messages("src")
-            stuck_row = next((m for m in rows if is_branch_summary(m)
+            all_rows = await db.get_own_messages("src", include_deleted=True)
+            stuck_row = next((m for m in all_rows if is_branch_summary(m)
                               and m.metadata[JOINED_FROM]["session_id"] == stuck), None)
-            check(stuck_row is not None and stuck_row.metadata[JOINED_FROM]["ok"] is False,
-                  "the cancelled turn joined a note")
+            check(stuck_row is not None and stuck_row.deleted_at is not None
+                  and stuck_row.metadata.get("dropped") == "cancelled",
+                  "the cancelled turn's join is recorded but soft-deleted (dropped)")
+            check((await db.get_session(stuck, include_deleted=True)).joined_message_id == stuck_row.id,
+                  "the cancelled branch counts as joined")
+            live_after = await db.get_own_messages("src")
+            check([m.id for m in live_after] == [m.id for m in live_before],
+                  "nothing new in the source's live history (no summary, no turn_end)")
             gate.set()
+            await turn("src", "after cancel")
+            sent = json.dumps(source_seen[-1], ensure_ascii=False)
+            check("task stuck" not in sent and "cancelled" not in sent,
+                  "the cancelled branch is not in the source model's context")
+            again = await write_join(db, await db.get_session(stuck, include_deleted=True))
+            check(again.id == stuck_row.id and sum(
+                is_branch_summary(m) and m.metadata[JOINED_FROM]["session_id"] == stuck
+                for m in await db.get_own_messages("src", include_deleted=True)) == 1,
+                "re-joining a dropped branch adds nothing")
 
             section("idempotent; pending joins redone at startup")
             b = await db.get_session(ids[0])
