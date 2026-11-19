@@ -27,7 +27,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from openai import AsyncOpenAI
 
@@ -667,9 +667,8 @@ class CAgentAdapter(BaseAgentAdapter):
         if span is not None:
             if since is not None or until is not None:
                 return {"status": "failed", "reason": "span excludes since / until"}
-            # CAgent only takes the range path with a since; select_span
-            # ignores it and picks the span.
-            options["since"] = datetime(1970, 1, 1, tzinfo=timezone.utc)
+            # SessionAgent.compress_session sees compress_span and takes
+            # its own path (CAgent's needs the newest turn completed).
             self.compress_span = span
         if until is not None:
             if since is None:

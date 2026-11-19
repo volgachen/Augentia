@@ -182,6 +182,25 @@ async def main() -> int:
             check(r.get("status") == "compressed", f"last turn compressed ({r.get('reason')})")
             check(users(await db.get_messages("s"))[-1] == "SUMMARY 4", "summary is last")
 
+            section("compress: the newest turn was cancelled")
+            # CAgent's own ranges end at the newest turn and give up when it
+            # didn't complete; a span ends where it ends, so it still works.
+            await turn("q9", t0 + timedelta(minutes=20))
+            await turn("stopped", t0 + timedelta(minutes=21), stop="cancelled")
+            r = await compress(q["q9"]["user"], q["q9"]["reply"], "before-cancelled")
+            check(r.get("status") == "compressed",
+                  f"span before a cancelled newest turn: compressed ({r.get('reason')})")
+            order = users(await db.get_messages("s"))
+            # (SUMMARY 4 replaced the then-newest turn, so it was stamped with
+            # the real current time and sorts after these back-dated turns.)
+            check("q9" not in order and order.index("SUMMARY 5") + 1 == order.index("stopped"),
+                  f"q9 replaced; its summary sits right before the cancelled turn ({order})")
+            check((await db.get_session("s")).status == SessionStatus.WAITING_USER,
+                  "status back to idle after compressing")
+            r = await compress(q["stopped"]["user"], q["stopped"]["reply"], "cancelled")
+            check(r.get("status") == "skipped" and "did not complete" in (r.get("reason") or ""),
+                  f"the cancelled turn itself is refused ({r.get('reason')})")
+
             section("batch delete")
             await expect_status(delete_messages("s", DeleteMessagesRequest(message_ids=[]),
                                                 db=db, registry=registry), 422, "empty list")
@@ -198,11 +217,12 @@ async def main() -> int:
             check(set(r["deleted_ids"]) == {q["q0"]["user"].id, q["q4"]["user"].id, q["q4"]["reply"].id},
                   "deleted exactly the selected rows")
             rows = await db.get_messages("s")
-            check(users(rows) == ["SUMMARY 2", "SUMMARY 3", "SUMMARY 4"], f"rows gone ({users(rows)})")
+            check(sorted(users(rows)) == ["SUMMARY 2", "SUMMARY 3", "SUMMARY 4", "SUMMARY 5", "stopped"],
+                  f"rows gone ({users(rows)})")
             check(registry.get("s") is not runner_before, "runner rebuilt")
 
             # A model output with tool calls takes its results along.
-            await turn("q8", t0 + timedelta(minutes=9), tool=True)
+            await turn("q8", t0 + timedelta(minutes=30), tool=True)
             r = await delete_messages("s", DeleteMessagesRequest(message_ids=[q["q8"]["call"].id]),
                                       db=db, registry=registry)
             check(q["q8"]["result"].id in r["deleted_ids"], "tool result deleted with its call")

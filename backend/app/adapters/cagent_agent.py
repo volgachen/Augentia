@@ -13,10 +13,12 @@ overrides runs on a throwaway subclass (``with_turn_overrides``).
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from datetime import timedelta
 
-from cagent.context import is_compressible_turn_end
+from cagent.context import Context, is_compressible_turn_end
+from cagent.storage import maybe_await
 from cagent import BaseAgent, Tool
 from cagent.images import Image
 from cagent.tools.base import ToolResult
@@ -335,6 +337,54 @@ def make_agent_class(
                     "compress only recent turns (since / hours) instead")
                 return
             return await super().launch_compression_task(store, ctx, model, **kwargs)
+
+        @classmethod
+        async def compress_session(cls, *, session_id, store, model, count_tokens=None,
+                                   system_prompt=None, since=None, instruction=None):
+            if adapter.compress_span is None:
+                return await super().compress_session(
+                    session_id=session_id, store=store, model=model, count_tokens=count_tokens,
+                    system_prompt=system_prompt, since=since, instruction=instruction)
+            return await cls.compress_selected_span(
+                session_id=session_id, store=store, model=model, count_tokens=count_tokens,
+                system_prompt=system_prompt, instruction=instruction)
+
+        @classmethod
+        async def compress_selected_span(cls, *, session_id, store, model, count_tokens=None,
+                                         system_prompt=None, instruction=None):
+            """compress_session for an exact span (adapter.compress_span).
+
+            CAgent's compress_session only runs when the session's newest turn
+            completed, since its ranges always end at the newest turn. A span
+            ends where it ends: only its own last turn must have completed
+            (select_span checks), so the newest turn being cancelled or failed
+            doesn't matter here. Otherwise the same steps: idle check, select,
+            compress_range, status back to IDLE.
+            """
+            if instruction is not None and (not isinstance(instruction, str) or not instruction.strip()):
+                raise ValueError("instruction must be a non-empty string or None")
+            system_prompt = cls.resolve_system_prompt(system_prompt)
+            session = await maybe_await(store.get_session(session_id))
+            if session["deleted_at"] is not None or session["status"] != "IDLE":
+                raise ValueError("External compression requires an idle, live session")
+            ctx = Context(session_id, force_compression=True,
+                          token_count_is_estimate=count_tokens is None, system_prompt=system_prompt,
+                          tool_image_limit=cls.resolve_tool_image_limit())
+            ctx.add_messages(await maybe_await(store.list_messages(session_id, include_deleted=True)))
+            selected = cls.select_span(ctx, *adapter.compress_span)
+            if selected is None:
+                return ctx
+            ctx.stop("completed")
+            await maybe_await(store.set_status(session_id, "RUNNING"))
+            try:
+                await cls.compress_range(store, ctx, model, *selected,
+                                         count_tokens=count_tokens, instruction=instruction)
+            except asyncio.CancelledError:
+                ctx.stop("cancelled")
+                raise
+            finally:
+                await cls.post_run_turn(store, ctx)
+            return ctx
 
         @classmethod
         def select_compression_range(cls, ctx, since):
