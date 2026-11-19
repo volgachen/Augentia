@@ -17,9 +17,11 @@ class SessionSendTool(BaseTool):
     description = (
         "Send a message to another agent session through the gateway. "
         "Use this to deliver results, ask follow-up questions, or hand off "
-        "work to another session. The target session must exist and have a "
-        "live adapter (i.e. be running). The message will be processed "
-        "asynchronously — this call queues the message and returns immediately.\n\n"
+        "work to another session. The target session must exist; a stopped "
+        "session is restarted automatically. The message will be processed "
+        "asynchronously — this call queues the message and returns immediately, "
+        "without the target's reply. If the target is in dispatch mode, the "
+        "message runs in a new branch of it and the result is joined back.\n\n"
         "Use this when you need to communicate cross-session, for example "
         "sending research findings back to a coordinator agent, or delivering "
         "a sub-result to a parent session."
@@ -32,8 +34,7 @@ class SessionSendTool(BaseTool):
                 "target_session_id": {
                     "type": "string",
                     "description": (
-                        "The UUID of the target session to send the message to. "
-                        "Must be a valid session ID for a running agent."
+                        "The UUID of the target session to send the message to."
                     ),
                 },
                 "content": {
@@ -86,6 +87,13 @@ class SessionSendTool(BaseTool):
             return f"Error: Unexpected error sending message: {e}"
 
         if resp.status_code == 202:
+            if _field(resp, "status") == "dispatched":
+                return (
+                    f"Message delivered to session {target_session_id} "
+                    f"({len(content)} chars). It is in dispatch mode, so the "
+                    f"message runs in new branch {_field(resp, 'branch_session_id')} "
+                    "and the result is joined back into it."
+                )
             return (
                 f"Message delivered to session {target_session_id} "
                 f"({len(content)} chars, queued)."
@@ -95,11 +103,23 @@ class SessionSendTool(BaseTool):
                 f"Error: Session {target_session_id} not found."
             )
         if resp.status_code == 409:
+            # The gateway says why: e.g. dispatched branches not joined back
+            # yet (wait and send again), or the session could not be started.
             return (
-                f"Error: Session {target_session_id} exists but has no live "
-                "adapter (it may have been restarted)."
+                f"Error: Session {target_session_id} cannot take the message now: "
+                f"{_field(resp, 'detail') or resp.text[:300]}"
             )
         return (
             f"Error: Gateway returned {resp.status_code}: "
             f"{resp.text[:300]}"
         )
+
+
+def _field(resp: httpx.Response, key: str) -> str | None:
+    """One field of the gateway's JSON response body, or None."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return None
+    value = body.get(key) if isinstance(body, dict) else None
+    return str(value) if value is not None else None

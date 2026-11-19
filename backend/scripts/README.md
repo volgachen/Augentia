@@ -23,6 +23,7 @@ Each exits 0 on success, nonzero on failure — so they compose in CI or a shell
 | `test_tool_bash.py` | `bash` tool branches: normal, timeout, truncation, background | none |
 | `test_tool_read.py` | `read` tool branches: full, offset, limit, truncation, missing file | none |
 | `test_tool_edit.py` | `write` + `edit` branches: create/overwrite, unique/replace_all/rejections | none |
+| `test_tool_session_send.py` | `session_send` replies: queued, dispatched (names the branch), 409 relays the gateway's reason, 404 | none (stub gateway) |
 | `test_spawn_parent.py` | `parent_session_id`: persistence, source working dir, unknown parent → 404 | none (TestClient + mock DB) |
 | `test_tool_subagent.py` | `subagent` tool: git worktree creation + non-git fallback, child spawn through the router | `git` in PATH (TestClient + temp SQLite) |
 | `test_multimodal.py` | Image input: attachment store, per-turn validation, CAgent turns with images, HTTP upload/messages/retry/diverge | none (TestClient + temp SQLite, scripted model) |
