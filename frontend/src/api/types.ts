@@ -53,11 +53,14 @@ export interface AgentTemplate {
     // Accept image input (the model must support vision).
     vision?: boolean;
     image_detail?: ImageDetail;
-    // Extra Chat Completions parameters merged into every model request
-    // (temperature, reasoning_effort, max_tokens, extra_body, ...).
+    // Extra request parameters merged into every model request as they are
+    // (temperature, reasoning_effort, max_tokens, extra_body, ...; never
+    // renamed between API formats).
     model_params?: Record<string, unknown>;
     // Summarizer-only replacement for model_params.
     compression_model_params?: Record<string, unknown>;
+    // Summarizer wire format; unset follows the session's format.
+    compression_api_format?: ApiFormat | null;
     // Append the runtime context block (OS, cwd, session start time, shell
     // notes) to the system prompt when a session starts. Defaults to true.
     append_runtime_context?: boolean;
@@ -65,8 +68,12 @@ export interface AgentTemplate {
   };
   openai_model: string;
   openai_base_url: string | null;
+  openai_api_format: ApiFormat;
   created_at: string;
 }
+
+// Model endpoint wire format: /chat/completions or /responses.
+export type ApiFormat = "chat" | "responses";
 
 export type ImageDetail = "auto" | "low" | "high";
 
@@ -102,9 +109,10 @@ export interface Session {
   branched_from_message_id?: string | null;
   additional_prompt: string | null;
   additional_prompt_path: string | null;
-  // The session's own model / Chat Completions params; null = the agent's.
+  // The session's own model / request params / API format; null = the agent's.
   model?: string | null;
   model_params?: Record<string, unknown> | null;
+  api_format?: ApiFormat | null;
   // Dispatch mode switch (PUT /sessions/{id}/dispatching).
   dispatch_mode?: boolean;
   // On a dispatched branch: the session its result is joined into, and the
@@ -145,6 +153,9 @@ export interface SessionModelView {
   agent_model_params: Record<string, unknown>;
   effective_model: string;
   effective_model_params: Record<string, unknown>;
+  api_format: ApiFormat | null;
+  agent_api_format: ApiFormat;
+  effective_api_format: ApiFormat;
 }
 
 export interface Message {

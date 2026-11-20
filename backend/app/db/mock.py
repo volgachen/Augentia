@@ -74,6 +74,7 @@ class MockMemoryDatabase(IAgentDatabase):
         config: dict | None = None,
         openai_model: str | None = None,
         openai_base_url: str | None = None,
+        openai_api_format: str | None = None,
     ) -> AgentTemplate:
         agent = await self.get_agent(agent_id)
         if name is not None:
@@ -90,6 +91,8 @@ class MockMemoryDatabase(IAgentDatabase):
             agent.openai_model = openai_model
         if openai_base_url is not None:
             agent.openai_base_url = openai_base_url
+        if openai_api_format is not None:
+            agent.openai_api_format = openai_api_format
         return agent
 
     async def delete_agent(self, agent_id: str) -> None:
@@ -110,6 +113,7 @@ class MockMemoryDatabase(IAgentDatabase):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        api_format: str | None = None,
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
         branched_cutoff_at: datetime | None = None,
@@ -126,6 +130,7 @@ class MockMemoryDatabase(IAgentDatabase):
             additional_prompt_path=additional_prompt_path,
             model=model,
             model_params=dict(model_params) if model_params is not None else None,
+            api_format=api_format,
             branched_from_session_id=branched_from_session_id,
             branched_from_message_id=branched_from_message_id,
             branched_cutoff_at=branched_cutoff_at,
@@ -173,10 +178,12 @@ class MockMemoryDatabase(IAgentDatabase):
 
     async def update_session_model(
         self, session_id: str, model: str | None, model_params: dict | None,
+        api_format: str | None = None,
     ) -> Session:
         session = await self.get_session(session_id)
         session.model = model
         session.model_params = dict(model_params) if model_params is not None else None
+        session.api_format = api_format
         session.updated_at = datetime.now(timezone.utc)
         return session
 

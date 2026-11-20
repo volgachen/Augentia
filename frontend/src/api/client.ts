@@ -1,4 +1,5 @@
 import type {
+  ApiFormat,
   AgentTemplate,
   AgentType,
   CompressOptions,
@@ -112,6 +113,7 @@ export interface CreateAgentPayload {
   config?: Record<string, unknown>;
   openai_model: string;
   openai_base_url: string | null;
+  openai_api_format?: ApiFormat;
 }
 
 export type UpdateAgentPayload = Partial<Omit<CreateAgentPayload, "agent_type">>;
@@ -206,10 +208,11 @@ export const api = {
       id: string,
       model: string | null,
       model_params: Record<string, unknown> | null,
+      api_format: ApiFormat | null,
     ) =>
       request<SessionModelView & { session: Session }>(`/sessions/${id}/model`, {
         method: "PUT",
-        body: JSON.stringify({ model, model_params }),
+        body: JSON.stringify({ model, model_params, api_format }),
       }),
     config: (id: string) => request<Record<string, unknown>>(`/sessions/${id}/config`),
     updateConfig: (id: string, config: Record<string, unknown>) =>

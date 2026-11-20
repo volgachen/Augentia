@@ -74,6 +74,7 @@ def _agent(row: sqlite3.Row) -> AgentTemplate:
         system_prompt=row["prompt_text"] or "", system_prompt_id=row["system_prompt_id"],
         tool_names=_json(row["tool_names"], []), config=_json(row["config"], {}) or {},
         openai_model=row["openai_model"], openai_base_url=row["openai_base_url"],
+        openai_api_format=row["openai_api_format"] or "chat",
         created_at=_dt(row["created_at"]),
     )
 
@@ -93,6 +94,7 @@ def _session(row: sqlite3.Row) -> Session:
         additional_prompt_path=row["additional_prompt_path"],
         system_prompt_snapshot=row["prompt_text"], system_prompt_id=row["system_prompt_id"],
         model=row["model"], model_params=_json(row["model_params"], None),
+        api_format=row["api_format"],
         status=SessionStatus(row["status"]), created_at=_dt(row["created_at"]),
         updated_at=_dt(row["updated_at"]), last_message_at=_dt(row["last_message_at"]),
         deleted_at=_dt(row["deleted_at"]),
@@ -186,6 +188,7 @@ class SqliteDatabase(IAgentDatabase):
                 config TEXT DEFAULT NULL,
                 openai_model TEXT NOT NULL DEFAULT 'gpt-4o',
                 openai_base_url TEXT DEFAULT NULL,
+                openai_api_format TEXT NOT NULL DEFAULT 'chat',
                 created_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS sessions (
@@ -206,6 +209,7 @@ class SqliteDatabase(IAgentDatabase):
                 system_prompt_id TEXT DEFAULT NULL,
                 model TEXT DEFAULT NULL,
                 model_params TEXT DEFAULT NULL,
+                api_format TEXT DEFAULT NULL,
                 status TEXT NOT NULL DEFAULT 'INITIALIZING',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -288,7 +292,7 @@ class SqliteDatabase(IAgentDatabase):
             row["name"] for row in self._conn.execute("PRAGMA table_info(sessions)")
         }
         self._migrate_system_prompts(session_columns)
-        for column in ("model", "model_params", "branched_from_session_id",
+        for column in ("model", "model_params", "api_format", "branched_from_session_id",
                        "branched_from_message_id", "branched_cutoff_at",
                        "join_into_session_id", "joined_message_id", "join_outcome"):
             if column not in session_columns:
@@ -296,6 +300,10 @@ class SqliteDatabase(IAgentDatabase):
         if "dispatch_mode" not in session_columns:
             self._conn.execute(
                 "ALTER TABLE sessions ADD COLUMN dispatch_mode INTEGER NOT NULL DEFAULT 0")
+        agent_columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(agents)")}
+        if "openai_api_format" not in agent_columns:
+            self._conn.execute(
+                "ALTER TABLE agents ADD COLUMN openai_api_format TEXT NOT NULL DEFAULT 'chat'")
 
         # v1 plugin tables (instances / runs / logs), replaced by the
         # plugin_service_* tables; they only held test data.
@@ -386,13 +394,14 @@ class SqliteDatabase(IAgentDatabase):
                 self._conn.execute(
                     """INSERT INTO agents
                        (id, name, description, agent_type, system_prompt_id, tool_names,
-                        config, openai_model, openai_base_url, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        config, openai_model, openai_base_url, openai_api_format, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         agent["id"], agent["name"], agent["description"],
                         agent["agent_type"], prompt_id,
                         _dump(agent["tool_names"]), _dump(agent.get("config", {})),
-                        agent["openai_model"], agent["openai_base_url"], now,
+                        agent["openai_model"], agent["openai_base_url"],
+                        agent.get("openai_api_format") or "chat", now,
                     ),
                 )
 
@@ -411,11 +420,12 @@ class SqliteDatabase(IAgentDatabase):
             self._conn.execute(
                 """INSERT INTO agents
                    (id, name, description, agent_type, system_prompt_id, tool_names,
-                    config, openai_model, openai_base_url, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    config, openai_model, openai_base_url, openai_api_format, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (template.id, template.name, template.description, template.agent_type.value,
                  prompt_id, _dump(template.tool_names), _dump(template.config),
-                 template.openai_model, template.openai_base_url, _iso(template.created_at)),
+                 template.openai_model, template.openai_base_url, template.openai_api_format,
+                 _iso(template.created_at)),
             )
         return template.model_copy(update={"system_prompt_id": prompt_id})
 
@@ -450,6 +460,7 @@ class SqliteDatabase(IAgentDatabase):
             additional_prompt_path=kwargs.get("additional_prompt_path"),
             model=kwargs.get("model"),
             model_params=kwargs.get("model_params"),
+            api_format=kwargs.get("api_format"),
             branched_from_session_id=kwargs.get("branched_from_session_id"),
             branched_from_message_id=kwargs.get("branched_from_message_id"),
             branched_cutoff_at=kwargs.get("branched_cutoff_at"),
@@ -467,15 +478,16 @@ class SqliteDatabase(IAgentDatabase):
                    (id, agent_id, title, working_dir, parent_session_id,
                     branched_from_session_id, branched_from_message_id, branched_cutoff_at,
                     join_into_session_id, additional_prompt, additional_prompt_path,
-                    system_prompt_id, model, model_params, status, created_at, updated_at,
-                    last_message_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    system_prompt_id, model, model_params, api_format, status, created_at,
+                    updated_at, last_message_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (session.id, session.agent_id, session.title, session.working_dir,
                  session.parent_session_id, session.branched_from_session_id,
                  session.branched_from_message_id, _iso(session.branched_cutoff_at),
                  session.join_into_session_id,
                  session.additional_prompt, session.additional_prompt_path,
-                 prompt_id, session.model, _dump(session.model_params), session.status.value, _iso(session.created_at),
+                 prompt_id, session.model, _dump(session.model_params), session.api_format,
+                 session.status.value, _iso(session.created_at),
                  _iso(session.updated_at), _iso(session.last_message_at)),
             )
         return await self.get_session(session.id)
@@ -517,12 +529,13 @@ class SqliteDatabase(IAgentDatabase):
 
     async def update_session_model(
         self, session_id: str, model: str | None, model_params: dict | None,
+        api_format: str | None = None,
     ) -> Session:
         now = datetime.now(timezone.utc)
         cur = self._execute(
-            "UPDATE sessions SET model = ?, model_params = ?, updated_at = ? "
+            "UPDATE sessions SET model = ?, model_params = ?, api_format = ?, updated_at = ? "
             "WHERE id = ? AND deleted_at IS NULL",
-            (model, _dump(model_params), _iso(now), session_id),
+            (model, _dump(model_params), api_format, _iso(now), session_id),
         )
         if cur.rowcount == 0:
             raise KeyError(f"Session '{session_id}' not found")

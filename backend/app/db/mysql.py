@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS agents (
     config         JSON          DEFAULT NULL,
     openai_model   VARCHAR(100)  NOT NULL DEFAULT 'gpt-4o',
     openai_base_url VARCHAR(500) DEFAULT NULL,
+    openai_api_format VARCHAR(16) NOT NULL DEFAULT 'chat',
     created_at     DATETIME(3)   NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
     """\
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     system_prompt_id  VARCHAR(36)   DEFAULT NULL,
     model             VARCHAR(200)  DEFAULT NULL,
     model_params      JSON          DEFAULT NULL,
+    api_format        VARCHAR(16)   DEFAULT NULL,
     status            VARCHAR(30)   NOT NULL DEFAULT 'INITIALIZING',
     created_at        DATETIME(3)   NOT NULL,
     updated_at        DATETIME(3)   NOT NULL,
@@ -238,6 +240,17 @@ _COLUMN_MIGRATIONS: list[tuple[str, str, list[str]]] = [
         "model_params",
         ["ALTER TABLE sessions ADD COLUMN model_params JSON DEFAULT NULL AFTER model"],
     ),
+    (
+        "sessions",
+        "api_format",
+        ["ALTER TABLE sessions ADD COLUMN api_format VARCHAR(16) DEFAULT NULL AFTER model_params"],
+    ),
+    (
+        "agents",
+        "openai_api_format",
+        ["ALTER TABLE agents ADD COLUMN openai_api_format VARCHAR(16) NOT NULL DEFAULT 'chat' "
+         "AFTER openai_base_url"],
+    ),
 ]
 
 # v1 plugin tables, replaced by plugin_service_*; children first for the FKs.
@@ -262,6 +275,7 @@ def _row_to_agent(row: dict[str, Any]) -> AgentTemplate:
         config=config or {},
         openai_model=row["openai_model"],
         openai_base_url=row["openai_base_url"],
+        openai_api_format=row.get("openai_api_format") or "chat",
         created_at=row["created_at"],
     )
 
@@ -305,6 +319,7 @@ def _row_to_session(row: dict[str, Any]) -> Session:
         system_prompt_id=row.get("system_prompt_id"),
         model=row.get("model"),
         model_params=_json_col(row.get("model_params"), None),
+        api_format=row.get("api_format"),
         status=SessionStatus(row["status"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
@@ -555,8 +570,9 @@ class MySqlDatabase(IAgentDatabase):
                         await cur.execute(
                         """INSERT IGNORE INTO agents
                            (id, name, description, agent_type, system_prompt_id,
-                            tool_names, config, openai_model, openai_base_url, created_at)
-                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                            tool_names, config, openai_model, openai_base_url,
+                            openai_api_format, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                         (
                             agent["id"],
                             agent["name"],
@@ -567,6 +583,7 @@ class MySqlDatabase(IAgentDatabase):
                             json.dumps(agent.get("config", {})),
                             agent["openai_model"],
                             agent["openai_base_url"],
+                            agent.get("openai_api_format") or "chat",
                             now,
                         ),
                     )
@@ -598,8 +615,9 @@ class MySqlDatabase(IAgentDatabase):
                 await cur.execute(
                     """INSERT INTO agents
                        (id, name, description, agent_type, system_prompt_id,
-                        tool_names, config, openai_model, openai_base_url, created_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        tool_names, config, openai_model, openai_base_url,
+                        openai_api_format, created_at)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         template.id,
                         template.name,
@@ -610,6 +628,7 @@ class MySqlDatabase(IAgentDatabase):
                         json.dumps(template.config),
                         template.openai_model,
                         template.openai_base_url,
+                        template.openai_api_format,
                         template.created_at,
                     ),
                 )
@@ -627,6 +646,7 @@ class MySqlDatabase(IAgentDatabase):
         config: dict | None = None,
         openai_model: str | None = None,
         openai_base_url: str | None = None,
+        openai_api_format: str | None = None,
     ) -> AgentTemplate:
         updates: dict[str, Any] = {}
         await self.get_agent(agent_id)
@@ -644,6 +664,8 @@ class MySqlDatabase(IAgentDatabase):
             updates["openai_model"] = openai_model
         if openai_base_url is not None:
             updates["openai_base_url"] = openai_base_url
+        if openai_api_format is not None:
+            updates["openai_api_format"] = openai_api_format
 
         if not updates:
             return await self.get_agent(agent_id)
@@ -681,6 +703,7 @@ class MySqlDatabase(IAgentDatabase):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        api_format: str | None = None,
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
         branched_cutoff_at: datetime | None = None,
@@ -697,6 +720,7 @@ class MySqlDatabase(IAgentDatabase):
             additional_prompt_path=additional_prompt_path,
             model=model,
             model_params=model_params,
+            api_format=api_format,
             branched_from_session_id=branched_from_session_id,
             branched_from_message_id=branched_from_message_id,
             branched_cutoff_at=branched_cutoff_at,
@@ -720,9 +744,9 @@ class MySqlDatabase(IAgentDatabase):
                         branched_from_session_id, branched_from_message_id, branched_cutoff_at,
                         join_into_session_id,
                         additional_prompt, additional_prompt_path,
-                        system_prompt_id, model, model_params,
+                        system_prompt_id, model, model_params, api_format,
                         status, created_at, updated_at, last_message_at)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
                     (
                         session.id,
                         session.agent_id,
@@ -738,6 +762,7 @@ class MySqlDatabase(IAgentDatabase):
                         prompt_id,
                         session.model,
                         _json_dump(session.model_params),
+                        session.api_format,
                         session.status.value,
                         session.created_at,
                         session.updated_at,
@@ -773,16 +798,19 @@ class MySqlDatabase(IAgentDatabase):
 
     async def update_session_model(
         self, session_id: str, model: str | None, model_params: dict | None,
+        api_format: str | None = None,
     ) -> Session:
         session = await self.get_session(session_id)
         session.model = model
         session.model_params = model_params
+        session.api_format = api_format
         session.updated_at = datetime.now(timezone.utc)
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "UPDATE sessions SET model = %s, model_params = %s, updated_at = %s WHERE id = %s",
-                    (model, _json_dump(model_params), session.updated_at, session_id),
+                    "UPDATE sessions SET model = %s, model_params = %s, api_format = %s, "
+                    "updated_at = %s WHERE id = %s",
+                    (model, _json_dump(model_params), api_format, session.updated_at, session_id),
                 )
         return session
 

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import type { Session, SessionModelView } from "../api/types";
+import type { ApiFormat, Session, SessionModelView } from "../api/types";
 import { useStore } from "../store/sessions";
 
 const BUSY_STATUSES = new Set(["RUNNING", "WAITING_CONFIRM", "COMPRESSING"]);
@@ -26,10 +26,11 @@ export default function ModelEditor({ session }: { session: Session }) {
     return () => {
       cancelled = true;
     };
-  }, [session.id, session.model, paramsKey]);
+  }, [session.id, session.model, session.api_format, paramsKey]);
 
   const data = view?.scope === session.id ? view.data : null;
-  const overridden = session.model != null || session.model_params != null;
+  const overridden =
+    session.model != null || session.model_params != null || session.api_format != null;
 
   return (
     <>
@@ -42,6 +43,9 @@ export default function ModelEditor({ session }: { session: Session }) {
       >
         <span className="text-gray-600">model: </span>
         {data?.effective_model ?? session.model ?? "…"}
+        {data?.effective_api_format === "responses" && (
+          <span className="ml-1 text-gray-600">(responses)</span>
+        )}
         {overridden && <span className="ml-1 text-amber-400/80">（会话设置）</span>}
         {!busy && data && <span className="ml-1 text-gray-600 group-hover:text-indigo-300">✎</span>}
       </button>
@@ -68,6 +72,8 @@ function ModelDialog({
   const [paramsText, setParamsText] = useState(
     pretty(view.model_params ?? view.agent_model_params),
   );
+  // "" = follow the agent's format.
+  const [apiFormat, setApiFormat] = useState<ApiFormat | "">(view.api_format ?? "");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const busy = BUSY_STATUSES.has(session.status);
@@ -94,7 +100,7 @@ function ModelDialog({
     setSaving(true);
     setError(null);
     try {
-      await updateModel(session.id, useOwnModel ? name : null, params);
+      await updateModel(session.id, useOwnModel ? name : null, params, apiFormat || null);
       onClose();
     } catch (e) {
       setError((e as Error).message);
@@ -164,6 +170,23 @@ function ModelDialog({
               {useOwnParams
                 ? "整个替换 agent 的 model_params（不合并），{} 表示不带额外参数。网关特有字段放在 extra_body 里。"
                 : "使用 agent 的 model_params。"}
+            </span>
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <span>接口格式</span>
+            <select
+              value={apiFormat}
+              onChange={(e) => setApiFormat(e.target.value as ApiFormat | "")}
+              className="bg-gray-950 border border-gray-700 rounded px-2 py-1.5 font-mono text-gray-100 focus:outline-none focus:border-indigo-500"
+            >
+              <option value="">跟随 agent（{view.agent_api_format}）</option>
+              <option value="chat">chat（/chat/completions）</option>
+              <option value="responses">responses（/responses）</option>
+            </select>
+            <span className="text-gray-500">
+              模型在网关上支持哪种接口就选哪种。model_params 原样发送，不做转换：用 responses 时请写
+              max_output_tokens、reasoning 等 Responses 的参数名。
             </span>
           </div>
 

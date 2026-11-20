@@ -37,6 +37,7 @@ class IAgentDatabase(ABC):
         config: dict | None = None,
         openai_model: str | None = None,
         openai_base_url: str | None = None,
+        openai_api_format: str | None = None,
     ) -> AgentTemplate: pass
 
     @abstractmethod
@@ -57,6 +58,7 @@ class IAgentDatabase(ABC):
         system_prompt_id: str | None = None,
         model: str | None = None,
         model_params: dict | None = None,
+        api_format: str | None = None,
         branched_from_session_id: str | None = None,
         branched_from_message_id: str | None = None,
         branched_cutoff_at: datetime | None = None,
@@ -64,7 +66,8 @@ class IAgentDatabase(ABC):
     ) -> Session:
         """system_prompt_snapshot stores a new first version; system_prompt_id
         instead shares an existing version (diverge). Neither: no prompt yet.
-        model / model_params: the session's model override (None: the agent's)."""
+        model / model_params / api_format: the session's model override (None:
+        the agent's)."""
 
     @abstractmethod
     async def get_session(self, session_id: str, *, include_deleted: bool = False) -> Session:
@@ -105,8 +108,9 @@ class IAgentDatabase(ABC):
     @abstractmethod
     async def update_session_model(
         self, session_id: str, model: str | None, model_params: dict | None,
+        api_format: str | None = None,
     ) -> Session:
-        """Set both override fields (None clears one); KeyError if unknown."""
+        """Set all override fields (None clears one); KeyError if unknown."""
 
     @abstractmethod
     async def update_session_dispatch_mode(self, session_id: str, enabled: bool) -> Session:

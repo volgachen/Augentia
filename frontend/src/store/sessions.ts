@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { CompressOptions, CompressResult, ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
+import type { ApiFormat, CompressOptions, CompressResult, ImageRef, Message, Session, SessionCreateMode, SessionStatus, StreamEvent, Task } from "../api/types";
 import { api, createSessionSocket } from "../api/client";
 import { useToastStore } from "./toasts";
 
@@ -241,6 +241,7 @@ interface Store {
     sessionId: string,
     model: string | null,
     modelParams: Record<string, unknown> | null,
+    apiFormat: ApiFormat | null,
   ) => Promise<void>;
   refreshSession: (sessionId: string) => Promise<void>;
   fetchTasks: (sessionId: string) => Promise<void>;
@@ -802,13 +803,13 @@ export const useStore = create<Store>((set, get) => {
       }
     },
 
-    updateModel: async (sessionId, model, modelParams) => {
+    updateModel: async (sessionId, model, modelParams, apiFormat) => {
       // Same as updateWorkingDir: a live runner is rebuilt, which closes this
       // socket, so drop it first and reattach once the change is in.
       const hadSocket = !!get().sessions[sessionId]?.socket;
       get().sessions[sessionId]?.socket?.close();
       try {
-        await api.sessions.updateModel(sessionId, model, modelParams);
+        await api.sessions.updateModel(sessionId, model, modelParams, apiFormat);
       } finally {
         const session = await api.sessions.get(sessionId);
         const socket = hadSocket ? attachSocket(sessionId) : null;

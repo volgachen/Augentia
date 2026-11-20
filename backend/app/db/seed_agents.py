@@ -80,6 +80,7 @@ def seed_agent_templates() -> list[AgentTemplate]:
             config=dict(row.get("config", {})),
             openai_model=row.get("openai_model", "gpt-4o"),
             openai_base_url=row.get("openai_base_url"),
+            openai_api_format=row.get("openai_api_format") or "chat",
         )
         for row in SEED_AGENT_ROWS
     ]

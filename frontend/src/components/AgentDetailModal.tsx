@@ -22,13 +22,14 @@ const EMPTY: CreateAgentPayload = {
   openai_model: "gpt-4o",
   config: {},
   openai_base_url: null,
+  openai_api_format: "chat",
 };
 
 // config.model_params is edited as JSON text; reserved keys mirror the backend
 // (app/adapters/model_params.py), which rejects them at session start.
 const RESERVED_PARAM_KEYS = [
   "model", "messages", "tools", "tool_choice", "functions", "function_call",
-  "stream", "stream_options", "n",
+  "stream", "stream_options", "n", "input", "instructions",
 ];
 
 const paramsToText = (value: unknown) =>
@@ -81,6 +82,7 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
             config: agent.config ?? {},
             openai_model: agent.openai_model,
             openai_base_url: agent.openai_base_url,
+            openai_api_format: agent.openai_api_format ?? "chat",
           }
         : EMPTY,
     );
@@ -218,6 +220,24 @@ export default function AgentDetailModal({ open, agent, onClose, onSaved }: Prop
                   patch({ openai_base_url: e.target.value || null })
                 }
               />
+            </label>
+
+            <label className="flex flex-col gap-1 text-sm text-gray-300">
+              API format
+              <select
+                className={inputClass}
+                value={form.openai_api_format ?? "chat"}
+                onChange={(e) =>
+                  patch({ openai_api_format: e.target.value as "chat" | "responses" })
+                }
+              >
+                <option value="chat">chat (/chat/completions)</option>
+                <option value="responses">responses (/responses)</option>
+              </select>
+              <span className="text-xs text-gray-500">
+                Default for this agent&apos;s sessions; a session can pick its own. Use the one the
+                gateway serves for the model. Model params are sent as they are in either format.
+              </span>
             </label>
 
             <label className="flex flex-col gap-1 text-sm text-gray-300">

@@ -90,6 +90,10 @@ class AgentTemplate(BaseModel):
     config: dict = Field(default_factory=dict)
     openai_model: str = "gpt-4o"
     openai_base_url: Optional[str] = None
+    # Wire format of the model endpoint: "chat" (/chat/completions) or
+    # "responses" (/responses). Which one works depends on what the gateway
+    # serves for the model; sessions may override it (Session.api_format).
+    openai_api_format: str = "chat"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -154,6 +158,9 @@ class Session(BaseModel):
     # agent's params as a whole (no merge), like compression_model_params.
     model: Optional[str] = None
     model_params: Optional[dict] = None
+    # Per-session wire format ("chat" / "responses"); None uses the agent's
+    # openai_api_format. Set together with model in PUT /sessions/{id}/model.
+    api_format: Optional[str] = None
     status: SessionStatus = SessionStatus.INITIALIZING
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

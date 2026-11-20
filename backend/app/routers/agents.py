@@ -9,7 +9,7 @@ from app.adapters.tools.registry import is_plugin_tool_name, list_available
 from app.plugins import session_settings
 from app.plugins.host import get_plugin_host
 from app.adapters.tools.permissions import validate_tool_permissions_config
-from app.adapters.model_params import resolve_model_params
+from app.adapters.model_params import resolve_model_params, validate_api_format
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
@@ -23,6 +23,8 @@ class CreateAgentRequest(BaseModel):
     config: dict = Field(default_factory=dict)
     openai_model: str = "gpt-4o"
     openai_base_url: str | None = None
+    # "chat" (/chat/completions) or "responses" (/responses).
+    openai_api_format: str = "chat"
 
 
 class UpdateAgentRequest(BaseModel):
@@ -33,6 +35,14 @@ class UpdateAgentRequest(BaseModel):
     config: dict | None = None
     openai_model: str | None = None
     openai_base_url: str | None = None
+    openai_api_format: str | None = None
+
+
+def _validate_api_format(value) -> None:
+    try:
+        validate_api_format(value, "openai_api_format", nullable=False)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 def _validate_tools(names: list[str]) -> None:
@@ -80,6 +90,8 @@ def _validate_config(config: dict, old_plugins: dict | None = None) -> None:
         # model_params / compression_model_params: same check the engines run
         # at session start, surfaced as a 400 when the agent is saved.
         resolve_model_params(config)
+        # Summarizer wire format; unset follows the session's format.
+        validate_api_format(config.get("compression_api_format"), "config.compression_api_format")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -104,6 +116,7 @@ async def create_agent(
 ):
     _validate_tools(body.tool_names)
     _validate_config(body.config)
+    _validate_api_format(body.openai_api_format)
     template = AgentTemplate(**body.model_dump())
     return _masked(await db.create_agent(template))
 
@@ -131,6 +144,8 @@ async def update_agent(
         _validate_tools(body.tool_names)
     if body.config is not None:
         _validate_config(body.config, session_settings.plugins_section(agent.config))
+    if body.openai_api_format is not None:
+        _validate_api_format(body.openai_api_format)
 
     return _masked(await db.update_agent(agent_id, **body.model_dump(exclude_unset=True)))
 

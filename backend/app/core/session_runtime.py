@@ -52,6 +52,7 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
             "turn_compression_tool_call_threshold", "turn_compression_instruction",
             "turn_compression_marker",
             "compression_instruction", "compression_model", "compression_send_tools",
+            "compression_api_format",
             "model_params", "compression_model_params",
             "vision", "image_detail", "tool_image_limit", "tool_image_mode",
             "step_reminder_at", "step_reminder", "tool_limit_at", "tool_limit_message"))
@@ -65,6 +66,8 @@ def build_adapter(session: Session, agent: AgentTemplate, db: IAgentDatabase | N
             tool_names=agent.tool_names,
             model=session.model or agent.openai_model,
             base_url=agent.openai_base_url,
+            # PUT /sessions/{id}/model may also pick the wire format.
+            api_format=session.api_format or agent.openai_api_format,
             session_id=session.id,
             working_dir=session.working_dir,
             config=config,

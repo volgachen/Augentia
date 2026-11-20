@@ -32,7 +32,7 @@ from app.core.workspace import (
 )
 from app.adapters.tools.permissions import explain_tool_permission, validate_tool_permissions_config
 from app.core.attachments import AttachmentError, normalize_turn_images
-from app.adapters.model_params import validate_model_params
+from app.adapters.model_params import validate_api_format, validate_model_params
 from app.adapters.cagent_agent import validate_turn_overrides
 
 logger = logging.getLogger("augentia.sessions")
@@ -78,6 +78,9 @@ class UpdateSessionModelRequest(BaseModel):
     # reasoning_effort, extra_body, ...), replacing the agent's
     # config.model_params as a whole; null uses the agent's again.
     model_params: dict | None = None
+    # "chat" / "responses" for this session; null uses the agent's
+    # openai_api_format again.
+    api_format: str | None = None
 
 
 class UpdateSystemPromptRequest(BaseModel):
@@ -157,11 +160,12 @@ class RetryMessageRequest(BaseModel):
 
 class DeriveSessionRequest(BaseModel):
     title: str | None = None
-    # The branch's own model / model_params, as in PUT /sessions/{id}/model.
-    # Each field independently: omitted keeps the source's value, null (or a
-    # blank model) uses the agent's, a value sets it.
+    # The branch's own model / model_params / api_format, as in
+    # PUT /sessions/{id}/model. Each field independently: omitted keeps the
+    # source's value, null (or a blank model) uses the agent's, a value sets it.
     model: str | None = None
     model_params: dict | None = None
+    api_format: str | None = None
 
 
 class DispatchModeRequest(BaseModel):
@@ -204,17 +208,18 @@ async def _create_derived_session(
     cutoff: datetime | None = None,
     branched_from_message_id: str | None = None,
     join_into: bool = False,
-    model_override: tuple[str | None, dict | None] | None = None,
+    model_override: tuple[str | None, dict | None, str | None] | None = None,
 ) -> Session:
     """A session continuing `source`'s history.
 
     With a cutoff (diverge) the branch copies nothing: it borrows the source's
     rows created before the cutoff, as they are now (see app.core.borrowed).
     Without one (sub-sessions that only share settings) it starts empty.
-    model_override: (model, model_params) for the branch instead of the
-    source's (see _derive_model).
+    model_override: (model, model_params, api_format) for the branch instead
+    of the source's (see _derive_model).
     """
-    model, model_params = model_override or (source.model, source.model_params)
+    model, model_params, api_format = model_override or (
+        source.model, source.model_params, source.api_format)
     agent = await db.get_agent(source.agent_id)
     if agent.agent_type != AgentType.TOOL_USE:
         raise HTTPException(status_code=409, detail="derived sessions currently support only tool_use sessions")
@@ -239,6 +244,7 @@ async def _create_derived_session(
         # change it on its own later.
         model=model,
         model_params=model_params,
+        api_format=api_format,
     )
     try:
         await build_runner(target, agent, db, registry)
@@ -252,9 +258,11 @@ async def _create_derived_session(
         raise
 
 
-def _derive_model(body: DeriveSessionRequest, source: Session) -> tuple[str | None, dict | None]:
-    """The branch's (model, model_params): the source's for fields the request
-    omitted, else the request's (null: the agent's); 400 on bad params."""
+def _derive_model(body: DeriveSessionRequest,
+                  source: Session) -> tuple[str | None, dict | None, str | None]:
+    """The branch's (model, model_params, api_format): the source's for fields
+    the request omitted, else the request's (null: the agent's); 400 on bad
+    values."""
     sent = body.model_fields_set
     model = source.model
     if "model" in sent:
@@ -266,7 +274,13 @@ def _derive_model(body: DeriveSessionRequest, source: Session) -> tuple[str | No
                       if body.model_params is not None else None)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-    return model, params
+    api_format = source.api_format
+    if "api_format" in sent:
+        try:
+            api_format = validate_api_format(body.api_format)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return model, params, api_format
 
 
 @router.post("", response_model=Session, status_code=201)
@@ -397,9 +411,9 @@ async def get_session_model(
 ):
     """The session's model override and what the next turn will use.
 
-    model / model_params are the session's own values (null: none set);
-    effective_* resolve them against the agent (openai_model,
-    config.model_params) the way the engine does.
+    model / model_params / api_format are the session's own values (null:
+    none set); effective_* resolve them against the agent (openai_model,
+    config.model_params, openai_api_format) the way the engine does.
     """
     try:
         session = await db.get_session(session_id)
@@ -419,6 +433,9 @@ def _model_view(session: Session, agent) -> dict:
         "effective_model": session.model or agent.openai_model,
         "effective_model_params": (
             session.model_params if session.model_params is not None else agent_params),
+        "api_format": session.api_format,
+        "agent_api_format": agent.openai_api_format,
+        "effective_api_format": session.api_format or agent.openai_api_format,
     }
 
 
@@ -429,9 +446,9 @@ async def update_session_model(
     db: IAgentDatabase = Depends(get_db),
     registry: AdapterRegistry = Depends(get_registry),
 ):
-    """Give this session its own model and/or model_params (null: the agent's).
+    """Give this session its own model / model_params / api_format (null: the agent's).
 
-    Both fields are set together, so send the current value of the one you
+    All fields are set together, so send the current value of the ones you
     keep. Allowed between turns only (409 while running or awaiting a tool
     confirm). A live runner is rebuilt so the next turn uses the new model;
     history is kept. Each reply records the model that answered in
@@ -442,6 +459,10 @@ async def update_session_model(
     try:
         params = (validate_model_params(body.model_params)
                   if body.model_params is not None else None)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    try:
+        api_format = validate_api_format(body.api_format)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
@@ -460,11 +481,12 @@ async def update_session_model(
             status_code=409,
             detail="session is running; change the model after the turn finishes",
         )
-    session = await db.update_session_model(session_id, model, params)
+    session = await db.update_session_model(session_id, model, params, api_format)
     if runner is not None:
         await registry.remove(session_id)
         await get_or_rehydrate(session, db, registry)
-    logger.info("model changed session=%s model=%s params=%s", session_id, model, params)
+    logger.info("model changed session=%s model=%s params=%s api_format=%s",
+                session_id, model, params, api_format)
     return {"session": (await db.get_session(session_id)).model_dump(mode="json"),
             **_model_view(session, agent)}
 

@@ -37,7 +37,9 @@ from app.adapters.base import BaseAgentAdapter, StreamEvent, StreamEventType
 from app.adapters.cagent_agent import make_agent_class, with_turn_overrides
 from app.adapters.cagent_store import AugentiaStore, _wire_tool_calls
 from app.adapters import plugin_hooks
-from app.adapters.model_params import resolve_model_params
+from app.adapters.model_params import (
+    DEFAULT_API_FORMAT, resolve_model_params, validate_api_format,
+)
 from app.adapters.tools.base import (  # noqa: F401 — BaseTool for type hints
     IMAGE_OMITTED_MARKER, BaseTool, ToolOutput,
 )
@@ -147,7 +149,8 @@ def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None
             raise RuntimeError(
                 "LLM endpoint did not return a Chat Completions response. Check "
                 "that OPENAI_BASE_URL points at an OpenAI-compatible "
-                "/chat/completions endpoint."
+                "/chat/completions endpoint, or switch the api_format to "
+                "\"responses\" if the model is only served there."
             )
         message = response.choices[0].message
         calls = []
@@ -179,6 +182,191 @@ def _make_model(client: AsyncOpenAI, model_name: str, params: dict | None = None
     return model
 
 
+# ---- Responses API (api_format "responses") ----
+#
+# CAgent hands the model callable Chat Completions-shaped messages (system /
+# user / assistant with tool_calls / tool, content a string or text + image_url
+# parts). The functions below translate them to Responses input items and the
+# response back to CAgent's {content, tool_calls, usage}.
+
+
+def _responses_content(content, text_type: str) -> str | list:
+    """Message content as Responses content: a string stays a string; parts map
+    text -> text_type, image_url -> input_image (order kept)."""
+    if not isinstance(content, list):
+        return content or ""
+    parts = []
+    for part in content:
+        kind = part.get("type")
+        if kind == "text":
+            parts.append({"type": text_type, "text": part.get("text", "")})
+        elif kind == "image_url":
+            image = part.get("image_url") or {}
+            if isinstance(image, str):
+                image = {"url": image}
+            parts.append({"type": "input_image", "image_url": image.get("url"),
+                          "detail": image.get("detail") or "auto"})
+        else:
+            raise ValueError(f"Unsupported message content part for the Responses API: {kind!r}")
+    return parts
+
+
+def _responses_input(messages) -> tuple[str | None, list[dict]]:
+    """(instructions, input items) for responses.create.
+
+    Leading system messages become instructions; a later one stays a system
+    message in the input. Assistant tool calls become function_call items, tool
+    results function_call_output items (text, or input_text / input_image parts
+    when the result carries images).
+    """
+    instructions: list[str] = []
+    items: list[dict] = []
+    for message in messages:
+        role = message["role"]
+        content = message.get("content")
+        if role == "system" and not items and isinstance(content, str):
+            instructions.append(content)
+        elif role == "tool":
+            output = _responses_content(content, "input_text")
+            items.append({"type": "function_call_output",
+                          "call_id": message["tool_call_id"], "output": output})
+        elif role == "assistant":
+            # Earlier replies are sent back as text; output_text marks them as
+            # the model's own.
+            if content:
+                items.append({"role": "assistant",
+                              "content": _responses_content(content, "output_text")})
+            for call in message.get("tool_calls") or []:
+                items.append({
+                    "type": "function_call",
+                    "call_id": call["id"],
+                    "name": call["name"],
+                    "arguments": json.dumps(call.get("arguments") or {}, ensure_ascii=False),
+                })
+        else:
+            items.append({"role": role, "content": _responses_content(content, "input_text")})
+    return ("\n\n".join(instructions) if instructions else None), items
+
+
+def _responses_tools(tools) -> list[dict]:
+    # strict=False: Responses defaults function tools to strict mode, which
+    # rejects ordinary JSON schemas (optional properties, no
+    # additionalProperties: false).
+    return [
+        {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"],
+            "strict": False,
+        }
+        for tool in tools
+    ]
+
+
+_INCOMPLETE_FINISH = {"max_output_tokens": "length", "content_filter": "content_filter"}
+
+
+def _responses_usage(usage) -> dict | None:
+    """Responses usage plus the Chat Completions names the adapter reads
+    (prompt_tokens / completion_tokens)."""
+    if usage is None:
+        return None
+    usage = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
+    if "input_tokens" in usage:
+        usage.setdefault("prompt_tokens", usage["input_tokens"])
+    if "output_tokens" in usage:
+        usage.setdefault("completion_tokens", usage["output_tokens"])
+    return usage
+
+
+def _field(obj, name, default=None):
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def _parse_responses_output(response) -> tuple[str, list[dict], str | None]:
+    """(text, tool calls, finish_reason) from a Responses response."""
+    status = _field(response, "status")
+    if status == "failed":
+        error = _field(response, "error")
+        message = _field(error, "message") if error is not None else None
+        raise RuntimeError(f"Responses API request failed: {message or 'no error details'}")
+    texts: list[str] = []
+    calls: list[dict] = []
+    for item in _field(response, "output") or []:
+        kind = _field(item, "type")
+        if kind == "message":
+            for part in _field(item, "content") or []:
+                part_type = _field(part, "type")
+                if part_type == "output_text":
+                    texts.append(_field(part, "text") or "")
+                elif part_type == "refusal":
+                    texts.append(_field(part, "refusal") or "")
+        elif kind == "function_call":
+            arguments = json.loads(_field(item, "arguments") or "{}")
+            if not isinstance(arguments, dict):
+                raise ValueError("Tool arguments must be a JSON object")
+            calls.append({"id": _field(item, "call_id"), "name": _field(item, "name"),
+                          "arguments": arguments})
+        # reasoning and other item types are not part of the conversation.
+    if status == "incomplete":
+        details = _field(response, "incomplete_details")
+        reason = _field(details, "reason") if details is not None else None
+        finish = _INCOMPLETE_FINISH.get(reason, reason or "incomplete")
+    elif calls:
+        finish = "tool_calls"
+    else:
+        finish = "stop" if status in (None, "completed") else status
+    return "".join(texts), calls, finish
+
+
+def _make_responses_model(client: AsyncOpenAI, model_name: str, params: dict | None = None):
+    """Like _make_model, over the Responses API (client.responses.create).
+
+    params are merged into the request as they are (no renaming from Chat
+    Completions names); input / instructions / tools / tool_choice are the
+    engine's.
+    """
+    params = dict(params or {})
+
+    async def model(*, messages, tools, tool_choice=None):
+        instructions, items = _responses_input(messages)
+        call_kwargs: dict = {**params, "model": model_name, "input": items}
+        if instructions is not None:
+            call_kwargs["instructions"] = instructions
+        if tools:
+            call_kwargs["tools"] = _responses_tools(tools)
+            if tool_choice is not None:
+                call_kwargs["tool_choice"] = tool_choice
+        started = time.monotonic()
+        response = await client.responses.create(**call_kwargs)
+        latency_ms = round((time.monotonic() - started) * 1000)
+        if not hasattr(response, "output"):
+            raise RuntimeError(
+                "LLM endpoint did not return a Responses API response. Check that "
+                "the endpoint serves /responses for this model, or switch the "
+                "api_format to \"chat\"."
+            )
+        content, calls, finish_reason = _parse_responses_output(response)
+        usage = _responses_usage(getattr(response, "usage", None))
+        return {
+            "content": content,
+            "tool_calls": calls,
+            "usage": usage,
+            RESPONSE_KEY: {
+                "id": getattr(response, "id", None),
+                "model": getattr(response, "model", None),
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "latency_ms": latency_ms,
+            },
+        }
+
+    return model
+
+
 class CAgentAdapter(BaseAgentAdapter):
     # The adapter (via AugentiaStore) is the single writer of conversation
     # rows; the runner only relays its events.
@@ -194,6 +382,7 @@ class CAgentAdapter(BaseAgentAdapter):
         working_dir: str | None = None,
         config: dict | None = None,
         model_callable=None,
+        api_format: str | None = None,
     ) -> None:
         super().__init__(session_id)
         self._db = db
@@ -203,6 +392,9 @@ class CAgentAdapter(BaseAgentAdapter):
         self._requires_approval: dict[str, bool] = {}
         self._model_name = model
         self._base_url = base_url
+        # "chat" or "responses"; config.compression_api_format may pick
+        # another one for the summarizer (unset: this one).
+        self._api_format = validate_api_format(api_format, "api_format") or DEFAULT_API_FORMAT
         self._api_key = api_key
         # Test injection point; None builds the AsyncOpenAI-backed model.
         self._model_callable = model_callable
@@ -317,10 +509,15 @@ class CAgentAdapter(BaseAgentAdapter):
                 not isinstance(compression_name, str) or not compression_name.strip()):
             raise ValueError("config.compression_model must be a non-empty string or null")
         self._compression_model_name = (compression_name or "").strip() or self._model_name
+        compression_format = validate_api_format(
+            self._config.get("compression_api_format"),
+            "config.compression_api_format") or self._api_format
         if self._model_callable is None and (
-                compression_name or compression_params is not params):
+                compression_name or compression_params is not params
+                or compression_format != self._api_format):
             self._compression_model = self._wrap_model(
-                self._build_model(self._compression_model_name, compression_params),
+                self._build_model(self._compression_model_name, compression_params,
+                                  compression_format),
                 record_response=False)
         else:
             self._compression_model = base_model
@@ -349,17 +546,20 @@ class CAgentAdapter(BaseAgentAdapter):
         )
         self._alive = True
         logger.info(
-            "started cagent engine model=%s compression_model=%s base_url=%s tools=%s",
-            self._model_name, self._compression_model_name, base_url,
-            [t.name for t in self._tools],
+            "started cagent engine model=%s api_format=%s compression_model=%s "
+            "compression_api_format=%s base_url=%s tools=%s",
+            self._model_name, self._api_format, self._compression_model_name,
+            compression_format, base_url, [t.name for t in self._tools],
         )
 
-    def _build_model(self, model_name: str, params: dict):
+    def _build_model(self, model_name: str, params: dict, api_format: str | None = None):
         # Only pass params when set, so _make_model stand-ins taking
         # (client, name) keep working.
+        api_format = api_format or self._api_format
+        factory = _make_responses_model if api_format == "responses" else _make_model
         if params:
-            return _make_model(self._client, model_name, params)
-        return _make_model(self._client, model_name)
+            return factory(self._client, model_name, params)
+        return factory(self._client, model_name)
 
     def _wrap_model(self, model, *, record_response: bool = True):
         if self._tool_image_mode == "user_message":
