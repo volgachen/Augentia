@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { useAttachmentUrl } from "./console/attachmentUrl";
+import ImageLightbox from "./ImageLightbox";
 import type { ImageRef } from "../api/types";
 import type { PendingImage } from "../hooks/useImageAttachments";
 
@@ -48,25 +50,38 @@ export function AttachmentTray({
   );
 }
 
-/** Images attached to a sent user message; click opens the full image. */
+/** Images attached to a sent user message; click opens the full image in place. */
 export function ImageThumbs({ images }: { images?: ImageRef[] | null }) {
   const attachmentUrl = useAttachmentUrl();
+  const [open, setOpen] = useState<{ src: string; alt: string } | null>(null);
   if (!images || images.length === 0) return null;
   return (
-    <div className="flex flex-wrap gap-2 mt-1">
-      {images.map((image, index) => {
-        const url = attachmentUrl(image.ref);
-        return (
-          <a key={`${image.ref}-${index}`} href={url} target="_blank" rel="noreferrer">
-            <img
-              src={url}
-              alt={`image ${index + 1}`}
-              loading="lazy"
-              className="h-24 max-w-[12rem] rounded-md border border-indigo-900 object-cover hover:border-indigo-500"
-            />
-          </a>
-        );
-      })}
-    </div>
+    <>
+      <div className="flex flex-wrap gap-2 mt-1">
+        {images.map((image, index) => {
+          const url = attachmentUrl(image.ref);
+          const alt = `image ${index + 1}`;
+          return (
+            <button
+              key={`${image.ref}-${index}`}
+              type="button"
+              onClick={() => setOpen({ src: url, alt })}
+              title="查看大图"
+              className="cursor-zoom-in"
+            >
+              <img
+                src={url}
+                alt={alt}
+                loading="lazy"
+                className="h-24 max-w-[12rem] rounded-md border border-indigo-900 object-cover hover:border-indigo-500"
+              />
+            </button>
+          );
+        })}
+      </div>
+      {open && (
+        <ImageLightbox src={open.src} alt={open.alt} onClose={() => setOpen(null)} />
+      )}
+    </>
   );
 }
